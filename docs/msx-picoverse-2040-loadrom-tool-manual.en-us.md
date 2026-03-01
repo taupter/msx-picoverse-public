@@ -22,7 +22,7 @@ Key characteristics:
 
 - Works on Windows (console app). Tested in `cmd.exe` and PowerShell.
 - Supports ROM sizes from 8 KB up to 16 MB (subject to Pico flash capacity).
-- Detects common mapper types automatically. Mapper can be forced via filename tags (same scheme as `multirom`): `PL-16`, `PL-32`, `KonSCC`, `Linear`, `ASC-08`, `ASC-16`, `Konami`, `NEO-8`, `NEO-16`.
+- Detects common mapper types automatically. Mapper can be forced via filename tags (same scheme as `multirom`): `PL-16`, `PL-32`, `KonSCC`, `Linear`, `ASC-08`, `ASC-16`, `ASC-16X`, `Konami`, `NEO-8`, `NEO-16`.
 - Generates UF2 files recognized by the RP2040 ROM bootloader (sets the RP2040 family ID flag).
 
 ## Command-line usage
@@ -170,4 +170,4 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 | Yamaha YIS604 | MSX1 | OK | Verified operation |
 
 Author: Cristiano Almeida Goncalves
-Last updated: 02/22/2026
+Last updated: 02/27/2026

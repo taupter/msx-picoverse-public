@@ -65,8 +65,15 @@ void readROMData(ROMRecord *records, unsigned char *recordCount, unsigned long *
     while (count < MAX_ROM_RECORDS && !isEndOfData(memory)) {
         // Copy Name
         MemCopy(records[count].Name, memory, MAX_FILE_NAME_LENGTH);
+        // The name field in flash is a fixed 50-byte record and may not be
+        // null-terminated. Scan only within bounds to avoid memory corruption.
+        unsigned int name_len = 0;
+        while (name_len < MAX_FILE_NAME_LENGTH && records[count].Name[name_len] != '\0') {
+            name_len++;
+        }
+
         // pad with spaces in case of short names
-        for (int i = strlen(records[count].Name); i < MAX_FILE_NAME_LENGTH; i++) {
+        for (unsigned int i = name_len; i < MAX_FILE_NAME_LENGTH; i++) {
             records[count].Name[i] = ' ';
         }
         // Ensure null termination
@@ -384,10 +391,22 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
 
 // mapper_description - Get the description of the mapper type
 // This function will return the description of the mapper type based on the mapper number.
-char* mapper_description(int number) {
-    // Array of strings for the descriptions
-    const char *descriptions[] = {"PL-16", "PL-32", "KonSCC", "Linear", "ASC-08", "ASC-16", "Konami","NEO-8","NEO-16","SYSTEM","SYSTEM"};	
-    return descriptions[number - 1];
+const char* mapper_description(int number) {
+    switch (number) {
+        case 1:  return "PL-16";
+        case 2:  return "PL-32";
+        case 3:  return "KNSCC";
+        case 4:  return "LINEAR";
+        case 5:  return "ASC08";
+        case 6:  return "ASC16";
+        case 7:  return "KONAMI";
+        case 8:  return "NEO-8";
+        case 9:  return "NEO16";
+        case 10: return "SYSTEM";
+        case 11: return "SYSTEM";
+        case 12: return "ASC16X";
+        default: return "UNKWN";
+    }
 }
 
 // displayMenu - Display the menu on the screen
@@ -414,7 +433,9 @@ void displayMenu() {
     unsigned int line = 0;
     for (unsigned int idx = startIndex; idx < endIndex; idx++, line++) {
         Locate(0, 2 + line); // Position on the screen, starting at line 2
-        printf(" %-24.24s %04lu %-7s", records[idx].Name, records[idx].Size/1024, mapper_description(records[idx].Mapper));
+        // Keep varargs simple for Fusion-C min printf: use 16-bit KB value.
+        unsigned int size_kb = (unsigned int)(records[idx].Size / 1024UL);
+        printf(" %-24.24s %04u %-6.6s", records[idx].Name, size_kb, mapper_description(records[idx].Mapper));
     }
 
     for (; line < FILES_PER_PAGE; line++) {

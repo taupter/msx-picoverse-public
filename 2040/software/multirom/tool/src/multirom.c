@@ -44,7 +44,7 @@
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM"
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "MAPPER", "ASC-16X"
 };
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
@@ -134,6 +134,7 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     // Define the NEO8 signature
     const char neo8_signature[] = "ROM_NEO8";
     const char neo16_signature[] = "ROM_NE16";
+    const char ascii16x_signature[] = "ASCII16X";
 
     // Initialize weighted scores for different mapper types
     int konami_score = 0;
@@ -195,6 +196,10 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     // Check for the "AB" header at the start
     if (rom[0] == 'A' && rom[1] == 'B') {
+        if (memcmp(&rom[16], ascii16x_signature, sizeof(ascii16x_signature) - 1) == 0) {
+            free(rom);
+            return 12; // ASCII16-X mapper detected
+        }
         // Check for the NEO8 signature at offset 16
         if (memcmp(&rom[16], neo8_signature, sizeof(neo8_signature) - 1) == 0) {
             free(rom);
@@ -305,9 +310,12 @@ static void print_usage(const char *prog_name) {
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
-    printf("  e.g., \"Knight Mare.PL-32.ROM\" forces PL-32; \"SYSTEM\" tags are ignored\n\n");
+    printf("  e.g., \"Knight Mare.PL-32.ROM\" forces PL-32; \"SYSTEM\"/\"MAPPER\" tags are ignored\n\n");
     printf("  here are the mapper descriptions you can use to force a specific mapper type:\n");
-    for (size_t i = 0; i < MAPPER_DESCRIPTION_COUNT-1; ++i) {
+    for (size_t i = 0; i < MAPPER_DESCRIPTION_COUNT; ++i) {
+        if (strcmp(MAPPER_DESCRIPTIONS[i], "SYSTEM") == 0 || strcmp(MAPPER_DESCRIPTIONS[i], "MAPPER") == 0) {
+            continue;
+        }
         printf("  %s", MAPPER_DESCRIPTIONS[i]);
     }
     printf("\n");
@@ -350,8 +358,8 @@ static void parse_rom_name_and_mapper_tag(const char *filename,
                 mapper_token[token_length] = '\0';
 
                 uint8_t candidate = mapper_number_from_description(mapper_token);
-                if (candidate == 10) {
-                    printf("Ignoring SYSTEM mapper tag in %s (cannot be forced)\n", filename);
+                if (candidate == 10 || candidate == 11) {
+                    printf("Ignoring SYSTEM/MAPPER mapper tag in %s (cannot be forced)\n", filename);
                 } else if (candidate != 0) {
                     *mapper_forced = true;
                     *forced_mapper_byte = candidate;

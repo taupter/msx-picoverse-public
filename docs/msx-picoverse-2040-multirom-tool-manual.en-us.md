@@ -13,7 +13,7 @@ Those are the features available in the current version of the PicoVerse 2040 ca
 * MultiROM menu system for selecting and launching MSX ROMs.
 * Inline Menu option with Nextor OS support.
 * USB mass-storage device support for loading ROMs and DSKs.
-* Support for various MSX ROM mappers (PL-16, PL-32, KonSCC, Linear, ASC-08, ASC-16, Konami, NEO-8, NEO-16).
+* Support for various MSX ROM mappers (PL-16, PL-32, KonSCC, Linear, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16).
 * Compatibility with MSX, MSX2, and MSX2+ systems.
 
 ## MultiROM UF2 Creator Manual
@@ -58,7 +58,7 @@ multirom.exe [options]
 - `-m`, `--mapper` : Includes the embedded Sunrise IDE Nextor ROM with 192KB mapper support (12 x 16KB pages). In the MSX menu this entry is still shown with mapper text `SYSTEM`.
 - `-h`, `--help`   : Show usage help and exit.
 - `-o <filename>`, `--output <filename>` : Set UF2 output filename (default is `multirom.uf2`).
-- If you need to force a specific mapper type for a ROM file, you can append a mapper tag before the `.ROM` extension in the filename. The tag is case-insensitive. For example, naming a file `Knight Mare.PL-32.ROM` forces the use of the PL-32 mapper for that ROM. Tags like `SYSTEM` and `MAPPER` are ignored. The list of possible tags that can be used is: `PL-16,  PL-32,  KonSCC,  Linear,  ASC-08,  ASC-16,  Konami,  NEO-8,  NEO-16`
+- If you need to force a specific mapper type for a ROM file, you can append a mapper tag before the `.ROM` extension in the filename. The tag is case-insensitive. For example, naming a file `Knight Mare.PL-32.ROM` forces the use of the PL-32 mapper for that ROM. Tags like `SYSTEM` and `MAPPER` are ignored. The list of possible tags that can be used is: `PL-16,  PL-32,  KonSCC,  Linear,  ASC-08,  ASC-16,  ASC-16X,  Konami,  NEO-8,  NEO-16`
 
 ### Examples
 - Produces the multirom.uf2 file with the MultiROM menu and all `.ROM` files in the current directory. You can run the tool using the command prompt or just by double-clicking the executable:
@@ -89,7 +89,7 @@ multirom.exe [options]
   - NEO8 (mapper byte 8) and NEO16 (mapper byte 9)
   - Konami, Konami SCC, ASCII8, ASCII16 and others via weighted scoring
 - If no mapper can be reliably detected, the tool skips the ROM and reports "unsupported mapper". Remember you can force a mapper via filename tag. The tags are case-insensitive and are listed below. 
-- Only the following mappers are supported in the configuration area and menu: `PL-16,  PL-32,  KonSCC,  Linear,  ASC-08,  ASC-16,  Konami,  NEO-8,  NEO-16`
+- Only the following mappers are supported in the configuration area and menu: `PL-16,  PL-32,  KonSCC,  Linear,  ASC-08,  ASC-16,  ASC-16X,  Konami,  NEO-8,  NEO-16`
 
 ## Using the MSX ROM Selector menu
 
@@ -191,4 +191,4 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 | Yamaha YIS604 | MSX1 | OK | Verified operation |
 
 Author: Cristiano Almeida Goncalves
-Last updated: 02/22/2026
+Last updated: 02/27/2026

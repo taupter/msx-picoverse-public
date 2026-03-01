@@ -383,6 +383,35 @@ static inline void __not_in_flash_func(handle_ascii16_write)(uint16_t addr, uint
     else if (addr >= 0x7000u && addr <= 0x77FFu) regs[1] = data;
 }
 
+// ASCII16-X write handler
+// Two 12-bit bank registers with mirrored write windows:
+//   Page 1 register: 2000/6000/A000/E000 - 2FFF/6FFF/AFFF/EFFF
+//   Page 2 register: 3000/7000/B000/F000 - 3FFF/7FFF/BFFF/FFFF
+// Bank number format: bits 0-7 from data bus, bits 8-11 from A8-A11.
+static inline void __not_in_flash_func(handle_ascii16x_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    uint16_t *regs = ((bank16_ctx_t *)ctx)->bank_regs;
+    uint8_t high_nibble = (uint8_t)((addr >> 8) & 0x0Fu);
+    uint16_t bank = ((uint16_t)high_nibble << 8) | data;
+
+    switch (addr & 0xF000u)
+    {
+        case 0x2000u:
+        case 0x6000u:
+        case 0xA000u:
+        case 0xE000u:
+            regs[0] = bank;
+            break;
+
+        case 0x3000u:
+        case 0x7000u:
+        case 0xB000u:
+        case 0xF000u:
+            regs[1] = bank;
+            break;
+    }
+}
+
 static inline void __not_in_flash_func(handle_neo8_write)(uint16_t addr, uint8_t data, void *ctx)
 {
     uint16_t *regs = ((bank16_ctx_t *)ctx)->bank_regs;
@@ -774,6 +803,53 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
                 data = read_rom_byte(rom_base, rel);
             }
         }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_ascii16x - ASCII16-X mapper
+// -----------------------------------------------------------------------
+// Two 16KB banks mirrored to all four 16KB address quadrants:
+//   page 1 bank at 4000-7FFF and C000-FFFF
+//   page 2 bank at 0000-3FFF and 8000-BFFF
+//
+// Bank register mirrors:
+//   page 1: 2000-2FFF, 6000-6FFF, A000-AFFF, E000-EFFF
+//   page 2: 3000-3FFF, 7000-7FFF, B000-BFFF, F000-FFFF
+//
+// Bank number is 12-bit:
+//   bits 0-7 from data bus (D0-D7)
+//   bits 8-11 from address lines A8-A11
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable)
+{
+    uint16_t bank_registers[2] = {0, 0};
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    msx_pio_bus_init();
+
+    bank16_ctx_t ctx = { .bank_regs = bank_registers };
+
+    while (true)
+    {
+        pio_drain_writes(handle_ascii16x_write, &ctx);
+
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        pio_drain_writes(handle_ascii16x_write, &ctx);
+
+        // ASCII16-X maps ROM in all 4 quadrants via mirrored 16KB pages.
+        bool in_window = true;
+        uint8_t data = 0xFFu;
+        uint8_t page_sel = (uint8_t)((addr >> 14) & 0x01u); // 1=page1, 0=page2
+        uint16_t bank = page_sel ? bank_registers[0] : bank_registers[1];
+        uint32_t rel = ((uint32_t)(bank & 0x0FFFu) << 14) | (addr & 0x3FFFu);
+
+        if (available_length == 0u || rel < available_length)
+            data = read_rom_byte(rom_base, rel);
 
         pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
     }
@@ -1232,6 +1308,9 @@ int main(void)
            break;
         case 11:
             loadrom_sunrise_mapper(selected->Offset, true);
+            break;
+        case 12:
+            loadrom_ascii16x(selected->Offset, true);
             break;
         default:
             printf("Debug: Unsupported ROM mapper: %d\n", selected->Mapper);

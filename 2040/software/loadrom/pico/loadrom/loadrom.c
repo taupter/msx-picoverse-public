@@ -599,6 +599,115 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
     }
 }
 
+// loadrom_ascii16x - Load an ASCII16-X ROM into the MSX directly from pico flash
+// ASCII16-X uses two 16KB pages mirrored across the full 64KB CPU address space:
+//   Page 1 bank: 4000h-7FFFh and C000h-FFFFh
+//   Page 2 bank: 0000h-3FFFh and 8000h-BFFFh
+//
+// Bank register write windows (mirrored):
+//   Page 1 register: 2000h-2FFFh, 6000h-6FFFh, A000h-AFFFh, E000h-EFFFh
+//   Page 2 register: 3000h-3FFFh, 7000h-7FFFh, B000h-BFFFh, F000h-FFFFh
+//
+// 12-bit bank number encoding:
+//   bits 0-7  from data bus (D0-D7)
+//   bits 8-11 from address bits A8-A11
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable)
+{
+    uint16_t bank_registers[2] = {0, 0};
+    uint32_t cached_length = 0;
+
+    if (cache_enable)
+    {
+        gpio_init(PIN_WAIT);
+        gpio_set_dir(PIN_WAIT, GPIO_OUT);
+        gpio_put(PIN_WAIT, 0);
+
+        uint32_t bytes_to_cache = active_rom_size;
+        if (bytes_to_cache == 0 || bytes_to_cache > sizeof(rom_sram))
+        {
+            bytes_to_cache = sizeof(rom_sram);
+        }
+
+        memset(rom_sram, 0, bytes_to_cache);
+        memcpy(rom_sram, rom + offset, bytes_to_cache);
+        gpio_put(PIN_WAIT, 1);
+        cached_length = bytes_to_cache;
+    }
+
+    gpio_set_dir_in_masked(0xFF << 16);
+    while (true)
+    {
+        bool sltsl = !(gpio_get(PIN_SLTSL));
+        bool rd = !(gpio_get(PIN_RD));
+        bool wr = !(gpio_get(PIN_WR));
+
+        if (sltsl)
+        {
+            uint16_t addr = gpio_get_all() & 0x00FFFF;
+
+            if (rd)
+            {
+                gpio_set_dir_out_masked(0xFF << 16);
+
+                uint8_t page_sel = (addr >> 14) & 0x01; // 1=page1, 0=page2
+                uint16_t bank = page_sel ? bank_registers[0] : bank_registers[1];
+                uint32_t rel = ((uint32_t)(bank & 0x0FFFu) << 14) | (addr & 0x3FFFu);
+                uint32_t rom_offset = offset + rel;
+
+                uint8_t data = 0xFF;
+                if (active_rom_size == 0 || rel < active_rom_size)
+                {
+                    uint32_t const relative_offset = (rom_offset >= offset) ? (rom_offset - offset) : cached_length;
+                    if (cache_enable && relative_offset < cached_length)
+                    {
+                        data = rom_sram[relative_offset];
+                    }
+                    else
+                    {
+                        gpio_put(PIN_WAIT, 0);
+                        data = rom[rom_offset];
+                        gpio_put(PIN_WAIT, 1);
+                    }
+                }
+
+                gpio_put_masked(0xFF0000, (uint32_t)data << 16);
+                while (!(gpio_get(PIN_RD)))
+                {
+                    tight_loop_contents();
+                }
+                gpio_set_dir_in_masked(0xFF << 16);
+            }
+            else if (wr)
+            {
+                uint8_t data = (gpio_get_all() >> 16) & 0xFF;
+                uint16_t bank = ((uint16_t)((addr >> 8) & 0x0F) << 8) | data;
+
+                switch (addr & 0xF000)
+                {
+                    case 0x2000:
+                    case 0x6000:
+                    case 0xA000:
+                    case 0xE000:
+                        bank_registers[0] = bank;
+                        break;
+
+                    case 0x3000:
+                    case 0x7000:
+                    case 0xB000:
+                    case 0xF000:
+                        bank_registers[1] = bank;
+                        break;
+                }
+
+                while (!(gpio_get(PIN_WR)))
+                {
+                    tight_loop_contents();
+                }
+            }
+        }
+    }
+}
+
 // loadrom_neo8 - Load an NEO8 ROM into the MSX directly from the pico flash
 // The NEO8 ROM is divided into 8KB segments, managed by a memory mapper that allows dynamic switching of these segments into the MSX's address space
 // Size of a segment: 8 KB
@@ -881,6 +990,7 @@ int __no_inline_not_in_flash_func(main)()
     // 6 - ASCII16 ROM
     // 7 - Konami (without SCC) ROM
     // 8 - NEO8 ROM
+    // 12 - ASCII16-X ROM
     switch (rom_type) 
     {
         case 1:
@@ -907,6 +1017,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 9:
             loadrom_neo16(ROM_RECORD_SIZE); //flash version
+            break;
+        case 12:
+            loadrom_ascii16x(ROM_RECORD_SIZE, true);
             break;
         default:
             //printf("Unknown ROM type: %d\n", 1);

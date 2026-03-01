@@ -10,7 +10,7 @@
 // 
 // The configuration record has the following structure:
 //  game - Game name                            - 20 bytes (padded by 0x00)
-//  mapp - Mapper code                          - 01 byte  (1 - Plain16, 2 - Plain32, 3 - KonamiSCC, 4 - Linear0, 5 - ASCII8, 6 - ASCII16, 7 - Konami)
+//  mapp - Mapper code                          - 01 byte  (1 - Plain16, 2 - Plain32, 3 - KonamiSCC, 4 - Linear0, 5 - ASCII8, 6 - ASCII16, 7 - Konami, 8 - NEO8, 9 - NEO16, 10 - SYSTEM, 11 - MAPPER, 12 - ASCII16-X)
 //  size - Size of the ROM in bytes             - 04 bytes 
 //  offset - Offset of the game in the flash    - 04 bytes 
 //
@@ -50,7 +50,7 @@ void create_uf2_file(const char *rom_filename, uint32_t rom_size, uint8_t rom_ty
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM"
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "MAPPER", "ASC-16X"
 };
 
 static const char *rom_types[] = {
@@ -63,7 +63,10 @@ static const char *rom_types[] = {
     "ASCII16",
     "Konami",
     "NEO8",
-    "NEO16"
+    "NEO16",
+    "SYSTEM",
+    "MAPPER",
+    "ASCII16-X"
 };
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
@@ -119,6 +122,7 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     // Define the NEO8 signature
     const char neo8_signature[] = "ROM_NEO8";
     const char neo16_signature[] = "ROM_NE16";
+    const char ascii16x_signature[] = "ASCII16X";
 
     // Initialize weighted scores for different mapper types
     int konami_score = 0;
@@ -180,6 +184,10 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     // Check for the "AB" header at the start
     if (rom[0] == 'A' && rom[1] == 'B') {
+        if (memcmp(&rom[16], ascii16x_signature, sizeof(ascii16x_signature) - 1) == 0) {
+            free(rom);
+            return 12; // ASCII16-X mapper detected
+        }
         // Check for the NEO8 signature at offset 16
         if (memcmp(&rom[16], neo8_signature, sizeof(neo8_signature) - 1) == 0) {
             free(rom);
@@ -292,7 +300,7 @@ static void print_usage(const char *prog_name) {
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("Mapper forcing: append tags (case-insensitive) before the ROM extension.\n");
-    printf("Example: \"Knight Mare.PL-32.ROM\" forces PL-32; \"SYSTEM\" tags are ignored.\n");
+    printf("Example: \"Knight Mare.PL-32.ROM\" forces PL-32; \"SYSTEM\"/\"MAPPER\" tags are ignored.\n");
 }
 
 // create_uf2_file - Create the UF2 file
@@ -480,8 +488,8 @@ int main(int argc, char *argv[])
             mapper_token[token_length] = '\0';
 
             uint8_t candidate = mapper_number_from_description(mapper_token);
-            if (candidate == 10) {
-                printf("Ignoring SYSTEM mapper tag in %s (cannot be forced)\n", base_name);
+            if (candidate == 10 || candidate == 11) {
+                printf("Ignoring SYSTEM/MAPPER mapper tag in %s (cannot be forced)\n", base_name);
             } else if (candidate != 0) {
                 mapper_forced_by_tag = true;
                 mapper_from_tag = candidate;

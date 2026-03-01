@@ -10,7 +10,7 @@
 // 
 // The configuration record has the following structure:
 //  game - Game name                            - 20 bytes (padded by 0x00)
-//  mapp - Mapper code                          - 01 byte  (1 - Plain16, 2 - Plain32, 3 - KonamiSCC, 4 - Linear0, 5 - ASCII8, 6 - ASCII16, 7 - Konami)
+//  mapp - Mapper code                          - 01 byte  (1 - Plain16, 2 - Plain32, 3 - KonamiSCC, 4 - Linear0, 5 - ASCII8, 6 - ASCII16, 7 - Konami, 8 - NEO8, 9 - NEO16, 10 - Sunrise, 11 - Sunrise+Mapper, 12 - ASCII16-X)
 //  size - Size of the ROM in bytes             - 04 bytes 
 //  offset - Offset of the game in the flash    - 04 bytes 
 //
@@ -51,7 +51,7 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "MAPPER"
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "MAPPER", "ASC-16X"
 };
 
 static const char *rom_types[] = {
@@ -66,11 +66,13 @@ static const char *rom_types[] = {
     "NEO8",
     "NEO16",
     "Sunrise",
-    "Sunrise+Mapper"
+    "Sunrise+Mapper",
+    "ASCII16-X"
 };
 
 #define ROM_TYPE_SUNRISE 10
 #define ROM_TYPE_SUNRISE_MAPPER 11
+#define ROM_TYPE_ASCII16X 12
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
@@ -125,6 +127,7 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     // Define the NEO8 signature
     const char neo8_signature[] = "ROM_NEO8";
     const char neo16_signature[] = "ROM_NE16";
+    const char ascii16x_signature[] = "ASCII16X";
 
     // Initialize weighted scores for different mapper types
     int konami_score = 0;
@@ -186,6 +189,10 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     // Check for the "AB" header at the start
     if (rom[0] == 'A' && rom[1] == 'B') {
+        if (memcmp(&rom[16], ascii16x_signature, sizeof(ascii16x_signature) - 1) == 0) {
+            free(rom);
+            return ROM_TYPE_ASCII16X; // ASCII16-X mapper detected
+        }
         // Check for the NEO8 signature at offset 16
         if (memcmp(&rom[16], neo8_signature, sizeof(neo8_signature) - 1) == 0) {
             free(rom);

@@ -39,6 +39,8 @@ typedef struct {
 } msx_pio_bus_t;
 
 static msx_pio_bus_t msx_bus;
+static uint32_t rom_cached_size = 0;
+static bool msx_bus_programs_loaded = false;
 
 // I/O bus context (PIO1) for memory mapper port access
 typedef struct {
@@ -51,11 +53,10 @@ typedef struct {
 } msx_pio_io_bus_t;
 
 static msx_pio_io_bus_t msx_io_bus;
+static bool msx_io_bus_programs_loaded = false;
 
-// Tracks how many bytes of the ROM are cached in SRAM (0 = no cache)
-static uint32_t rom_cached_size = 0;
 // Current cache capacity in bytes. Normal mode uses full rom_sram size,
-// mapper mode reduces this to 64KB so mapper RAM can share SRAM safely.
+// mapper mode reduces this to 0 so mapper RAM can use full SRAM.
 static uint32_t rom_cache_capacity = CACHE_SIZE;
 
 // -----------------------------------------------------------------------
@@ -165,36 +166,44 @@ static void msx_pio_bus_init(void)
     msx_bus.sm_read  = 0;
     msx_bus.sm_write = 1;
 
-    // Load PIO programs
-    msx_bus.offset_read  = pio_add_program(msx_bus.pio, &msx_read_responder_program);
-    msx_bus.offset_write = pio_add_program(msx_bus.pio, &msx_write_captor_program);
+    if (!msx_bus_programs_loaded)
+    {
+        msx_bus.offset_read  = pio_add_program(msx_bus.pio, &msx_read_responder_program);
+        msx_bus.offset_write = pio_add_program(msx_bus.pio, &msx_write_captor_program);
+        msx_bus_programs_loaded = true;
+    }
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, false);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, false);
+    pio_sm_clear_fifos(msx_bus.pio, msx_bus.sm_read);
+    pio_sm_clear_fifos(msx_bus.pio, msx_bus.sm_write);
+    pio_sm_restart(msx_bus.pio, msx_bus.sm_read);
+    pio_sm_restart(msx_bus.pio, msx_bus.sm_write);
 
     // ----- Read responder SM (SM0) -----
     pio_sm_config cfg_read = msx_read_responder_program_get_default_config(msx_bus.offset_read);
-    sm_config_set_in_pins(&cfg_read, PIN_A0);                // in base = GPIO 0
-    sm_config_set_in_shift(&cfg_read, false, false, 16);     // shift left, no autopush, 16 bits
-    sm_config_set_out_pins(&cfg_read, PIN_D0, 8);            // out base = GPIO 16, 8 pins
-    sm_config_set_out_shift(&cfg_read, true, false, 32);     // shift right (LSB first), no autopull
-    sm_config_set_sideset_pins(&cfg_read, PIN_WAIT);         // side-set = GPIO 28
-    sm_config_set_jmp_pin(&cfg_read, PIN_RD);                 // jmp pin = /RD for polling
-    sm_config_set_clkdiv(&cfg_read, 1.0f);                   // Run at full system clock
+    sm_config_set_in_pins(&cfg_read, PIN_A0);
+    sm_config_set_in_shift(&cfg_read, false, false, 16);
+    sm_config_set_out_pins(&cfg_read, PIN_D0, 8);
+    sm_config_set_out_shift(&cfg_read, true, false, 32);
+    sm_config_set_sideset_pins(&cfg_read, PIN_WAIT);
+    sm_config_set_jmp_pin(&cfg_read, PIN_RD);
+    sm_config_set_clkdiv(&cfg_read, 1.0f);
     pio_sm_init(msx_bus.pio, msx_bus.sm_read, msx_bus.offset_read, &cfg_read);
 
     // ----- Write captor SM (SM1) -----
     pio_sm_config cfg_write = msx_write_captor_program_get_default_config(msx_bus.offset_write);
-    sm_config_set_in_pins(&cfg_write, PIN_A0);               // in base = GPIO 0
-    sm_config_set_in_shift(&cfg_write, false, false, 32);    // shift left, no autopush, 32 bits
-    sm_config_set_fifo_join(&cfg_write, PIO_FIFO_JOIN_RX);   // Join FIFOs for 8-deep RX buffer
-    sm_config_set_jmp_pin(&cfg_write, PIN_WR);                // jmp pin = /WR for polling
+    sm_config_set_in_pins(&cfg_write, PIN_A0);
+    sm_config_set_in_shift(&cfg_write, false, false, 32);
+    sm_config_set_fifo_join(&cfg_write, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg_write, PIN_WR);
     sm_config_set_clkdiv(&cfg_write, 1.0f);
     pio_sm_init(msx_bus.pio, msx_bus.sm_write, msx_bus.offset_write, &cfg_write);
 
     // ----- Pin configuration for PIO -----
-    // /WAIT pin: PIO side-set output, initially deasserted (high)
     pio_gpio_init(msx_bus.pio, PIN_WAIT);
     pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_read, PIN_WAIT, 1, true);
 
-    // Data pins: hand over to PIO, initially tri-stated (input)
     for (uint pin = PIN_D0; pin <= PIN_D7; ++pin)
     {
         pio_gpio_init(msx_bus.pio, pin);
@@ -202,10 +211,8 @@ static void msx_pio_bus_init(void)
     pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_read, PIN_D0, 8, false);
     pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_write, PIN_D0, 8, false);
 
-    // Ensure /WAIT starts high before enabling state machines
     gpio_put(PIN_WAIT, 1);
 
-    // Enable both state machines
     pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, true);
     pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, true);
 }
@@ -215,40 +222,44 @@ static void msx_pio_bus_init(void)
 // -----------------------------------------------------------------------
 static void msx_pio_io_bus_init(void)
 {
-    // I/O read/write on PIO1: lightweight software responses are used only
-    // for mapper ports FC-FF, with no WAIT stretching.
     msx_io_bus.pio_read = pio1;
     msx_io_bus.pio_write = pio1;
     msx_io_bus.sm_io_read  = 0;
     msx_io_bus.sm_io_write = 1;
 
-    // Load PIO programs for I/O
-    msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, &msx_io_read_responder_program);
-    msx_io_bus.offset_io_write = pio_add_program(msx_io_bus.pio_write, &msx_io_write_captor_program);
+    if (!msx_io_bus_programs_loaded)
+    {
+        msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, &msx_io_read_responder_program);
+        msx_io_bus.offset_io_write = pio_add_program(msx_io_bus.pio_write, &msx_io_write_captor_program);
+        msx_io_bus_programs_loaded = true;
+    }
 
-    // ----- I/O Read responder SM (PIO1 SM0) -----
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, false);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, false);
+    pio_sm_clear_fifos(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_clear_fifos(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    pio_sm_restart(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_restart(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+
     pio_sm_config cfg_io_read = msx_io_read_responder_program_get_default_config(msx_io_bus.offset_io_read);
-    sm_config_set_in_pins(&cfg_io_read, PIN_A0);               // in base = GPIO 0
-    sm_config_set_in_shift(&cfg_io_read, false, false, 16);    // shift left, no autopush, 16 bits
-    sm_config_set_out_pins(&cfg_io_read, PIN_D0, 8);           // out base = GPIO 16, 8 pins
-    sm_config_set_out_shift(&cfg_io_read, true, false, 32);    // shift right (LSB first), no autopull
-    sm_config_set_jmp_pin(&cfg_io_read, PIN_RD);               // jmp pin = /RD
+    sm_config_set_in_pins(&cfg_io_read, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_read, false, false, 16);
+    sm_config_set_out_pins(&cfg_io_read, PIN_D0, 8);
+    sm_config_set_out_shift(&cfg_io_read, true, false, 32);
+    sm_config_set_jmp_pin(&cfg_io_read, PIN_RD);
     sm_config_set_clkdiv(&cfg_io_read, 1.0f);
     pio_sm_init(msx_io_bus.pio_read, msx_io_bus.sm_io_read, msx_io_bus.offset_io_read, &cfg_io_read);
 
-    // ----- I/O Write captor SM (PIO1 SM1) -----
     pio_sm_config cfg_io_write = msx_io_write_captor_program_get_default_config(msx_io_bus.offset_io_write);
-    sm_config_set_in_pins(&cfg_io_write, PIN_A0);            // in base = GPIO 0
-    sm_config_set_in_shift(&cfg_io_write, false, false, 32); // shift left, no autopush, 32 bits
-    sm_config_set_fifo_join(&cfg_io_write, PIO_FIFO_JOIN_RX); // Join FIFOs for 8-deep RX buffer
-    sm_config_set_jmp_pin(&cfg_io_write, PIN_WR);            // jmp pin = /WR
+    sm_config_set_in_pins(&cfg_io_write, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_write, false, false, 32);
+    sm_config_set_fifo_join(&cfg_io_write, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg_io_write, PIN_WR);
     sm_config_set_clkdiv(&cfg_io_write, 1.0f);
     pio_sm_init(msx_io_bus.pio_write, msx_io_bus.sm_io_write, msx_io_bus.offset_io_write, &cfg_io_write);
 
-    // Data pins are controlled by PIO1 for I/O read responses.
     pio_sm_set_consecutive_pindirs(msx_io_bus.pio_read, msx_io_bus.sm_io_read, PIN_D0, 8, false);
 
-    // Enable I/O read and I/O write state machines.
     pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, true);
     pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, true);
 }
@@ -386,6 +397,35 @@ static inline void __not_in_flash_func(handle_ascii16_write)(uint16_t addr, uint
     uint8_t *regs = ((bank8_ctx_t *)ctx)->bank_regs;
     if      (addr >= 0x6000u && addr <= 0x67FFu) regs[0] = data;
     else if (addr >= 0x7000u && addr <= 0x77FFu) regs[1] = data;
+}
+
+// ASCII16-X write handler
+// Two 12-bit bank registers with mirrored write windows:
+//   Page 1 register: 2000/6000/A000/E000 - 2FFF/6FFF/AFFF/EFFF
+//   Page 2 register: 3000/7000/B000/F000 - 3FFF/7FFF/BFFF/FFFF
+// Bank number format: bits 0-7 from data bus, bits 8-11 from A8-A11.
+static inline void __not_in_flash_func(handle_ascii16x_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    uint16_t *regs = ((bank16_ctx_t *)ctx)->bank_regs;
+    uint8_t high_nibble = (uint8_t)((addr >> 8) & 0x0Fu);
+    uint16_t bank = ((uint16_t)high_nibble << 8) | data;
+
+    switch (addr & 0xF000u)
+    {
+        case 0x2000u:
+        case 0x6000u:
+        case 0xA000u:
+        case 0xE000u:
+            regs[0] = bank;
+            break;
+
+        case 0x3000u:
+        case 0x7000u:
+        case 0xB000u:
+        case 0xF000u:
+            regs[1] = bank;
+            break;
+    }
 }
 
 // NEO8 write handler (16-bit bank registers, 12-bit segment)
@@ -717,6 +757,53 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
 }
 
 // -----------------------------------------------------------------------
+// loadrom_ascii16x - ASCII16-X mapper
+// -----------------------------------------------------------------------
+// Two 16KB banks mirrored to all four 16KB address quadrants:
+//   page 1 bank at 4000-7FFF and C000-FFFF
+//   page 2 bank at 0000-3FFF and 8000-BFFF
+//
+// Bank register mirrors:
+//   page 1: 2000-2FFF, 6000-6FFF, A000-AFFF, E000-EFFF
+//   page 2: 3000-3FFF, 7000-7FFF, B000-BFFF, F000-FFFF
+//
+// Bank number is 12-bit:
+//   bits 0-7 from data bus (D0-D7)
+//   bits 8-11 from address lines A8-A11
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable)
+{
+    uint16_t bank_registers[2] = {0, 0};
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    msx_pio_bus_init();
+
+    bank16_ctx_t ctx = { .bank_regs = bank_registers };
+
+    while (true)
+    {
+        pio_drain_writes(handle_ascii16x_write, &ctx);
+
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        pio_drain_writes(handle_ascii16x_write, &ctx);
+
+        // ASCII16-X maps ROM in all 4 quadrants via mirrored 16KB pages.
+        bool in_window = true;
+        uint8_t data = 0xFFu;
+        uint8_t page_sel = (uint8_t)((addr >> 14) & 0x01u); // 1=page1, 0=page2
+        uint16_t bank = page_sel ? bank_registers[0] : bank_registers[1];
+        uint32_t rel = ((uint32_t)(bank & 0x0FFFu) << 14) | (addr & 0x3FFFu);
+
+        if (available_length == 0u || rel < available_length)
+            data = read_rom_byte(rom_base, rel);
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
 // loadrom_neo8 - NEO8 mapper (8KB segments, 16-bit bank registers)
 // -----------------------------------------------------------------------
 // 6 banks of 8KB covering 0x0000-0xBFFF
@@ -827,12 +914,104 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
     (void)cache_enable;
 
     // ---------------------------------------------------------------
-    // Hold the MSX bus with WAIT while we initialise the mapper.
-    // On power-on the BIOS starts probing slots immediately.
-    // We must freeze the CPU until the PIO engines, mapper RAM and I/O
-    // port handlers are all ready, otherwise the BIOS probe races
-    // against our initialisation and fails to detect the 192KB mapper.
+    // Phase 1 — Bootstrap: serve a tiny ROM that restarts the MSX.
+    //
+    // On cold power-on the Pico and MSX start simultaneously.  The MSX2
+    // BIOS probes slots very early, and if the Pico is not yet ready
+    // the BIOS records the slot as empty/simple.  Releasing WAIT later
+    // with an expanded-slot mapper active leaves the BIOS in an
+    // inconsistent state, causing a freeze (blue screen on MSX2).
+    //
+    // To guarantee a clean boot we first serve a minimal ROM whose INIT
+    // routine executes JP 0x0000 (cold restart).  Once the restart is
+    // detected we freeze the CPU and set up the full mapper before the
+    // BIOS probes slots again.  This mirrors the multirom flow where
+    // the menu ROM triggers rst 0x00 before switching to mapper mode.
     // ---------------------------------------------------------------
+
+    // Minimal MSX ROM:  AB header with INIT that sets port F4 bit 7
+    // (forces cold-boot on MSX2+, showing RAM count) then restarts.
+    // Matches the Carnivore2-style sequence used by multirom's menu.
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,            // 'AB' ROM header
+        0x0A, 0x40,            // INIT = 0x400A
+        0x00, 0x00,            // STATEMENT = none
+        0x00, 0x00,            // DEVICE = none
+        0x00, 0x00,            // TEXT = none
+        0xF3,                  // DI
+        0xDB, 0xF4,            // IN A, (0xF4)
+        0xF6, 0x80,            // OR 0x80       (set bit 7 → cold boot)
+        0xD3, 0xF4,            // OUT (0xF4), A
+        0xC7                   // RST 0x00      (cold restart)
+    };
+
+    // Start PIO memory bus so the MSX can discover the bootstrap ROM.
+    msx_pio_bus_init();
+
+    // Serve bootstrap ROM reads until the restart is detected.
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        // Drain writes (ignored during bootstrap)
+        {
+            uint16_t waddr;
+            uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata)) { }
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+
+            // After the bootstrap INIT has been called, addr 0x0000
+            // via SLTSL means the BIOS is rescanning our slot during
+            // the second boot (MSX2 path).
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read,
+                                    pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                // Track execution of INIT (0x400A-0x4011)
+                if (addr >= 0x400Au && addr <= 0x4011u)
+                    init_called = true;
+
+                // Serve bootstrap ROM at 0x4000-0x7FFF
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom))
+                        data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read,
+                                    pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            // MSX1 path: SLTSL is not asserted for addr 0x0000
+            // (the BIOS ROM is in slot 0).  Detect the restart on
+            // the raw address bus instead, same approach as multirom.
+            if (init_called && !gpio_get(PIN_RD) &&
+                ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+            {
+                restart_detected = true;
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 2 — Initialise the expanded-slot mapper.
+    // The MSX just restarted — freeze it before the BIOS probes slots.
+    // ---------------------------------------------------------------
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
     gpio_init(PIN_WAIT);
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
     gpio_put(PIN_WAIT, 0);            // Assert WAIT — freeze MSX bus
@@ -1053,6 +1232,7 @@ int __no_inline_not_in_flash_func(main)()
     // 9 - NEO16 ROM
     // 10 - Sunrise IDE Nextor ROM (Konami mapper)
     // 11 - Sunrise IDE Nextor ROM + 128KB Memory Mapper
+    // 12 - ASCII16-X ROM
     switch (rom_type) 
     {
         case 1:
@@ -1085,6 +1265,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 11:
             loadrom_sunrise_mapper(ROM_RECORD_SIZE, true);
+            break;
+        case 12:
+            loadrom_ascii16x(ROM_RECORD_SIZE, true);
             break;
         default:
             break;
