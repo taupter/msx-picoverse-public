@@ -42,7 +42,7 @@ void invert_chars(unsigned char startChar, unsigned char endChar);
 void print_str_normal(const char *str);
 void print_str_inverted(const char *str);
 void print_str_inverted_padded(const char *str, unsigned char width);
-char* mapper_description(int number);
+const char* mapper_description(int number);
 void charMap(); //debug
 void displayMenu();
 void navigateMenu();

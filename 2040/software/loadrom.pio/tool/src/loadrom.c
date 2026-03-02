@@ -26,6 +26,7 @@
 #include "uf2format.h"
 #include "loadrom.h"
 #include "nextor_sunrise.h"
+#include "keyboard.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "v1.0"
@@ -402,12 +403,13 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s] [-m] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s] [-m] [-k] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help Show this help message\n");
     printf("  -s, --sunrise Build UF2 with embedded Sunrise IDE Nextor ROM\n");
     printf("  -m, --mapper  Build UF2 with Sunrise IDE Nextor ROM + 192KB memory mapper\n");
+    printf("  -k, --keyboard Build UF2 with USB keyboard firmware (dedicated keyboard cartridge)\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("Mapper forcing: append tags (case-insensitive) before the ROM extension.\n");
@@ -569,6 +571,7 @@ int main(int argc, char *argv[])
     const char *rom_filename = NULL;
     bool use_sunrise = false;
     bool use_mapper = false;
+    bool use_keyboard = false;
 
     for (int i = 1; i < argc; ++i) {
         if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
@@ -578,6 +581,8 @@ int main(int argc, char *argv[])
             use_sunrise = true;
         } else if ((strcmp(argv[i], "-m") == 0) || (strcmp(argv[i], "--mapper") == 0)) {
             use_mapper = true;
+        } else if ((strcmp(argv[i], "-k") == 0) || (strcmp(argv[i], "--keyboard") == 0)) {
+            use_keyboard = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
             if (i + 1 >= argc) {
                 printf("Option -o/--output requires a filename.\n");
@@ -598,6 +603,59 @@ int main(int argc, char *argv[])
     if (use_sunrise && use_mapper) {
         printf("Options -s and -m are mutually exclusive. Use -m for Sunrise IDE + mapper.\n");
         return 1;
+    }
+
+    if (use_keyboard && (use_sunrise || use_mapper || rom_filename)) {
+        printf("Option -k is standalone and cannot be combined with -s, -m, or a ROM file.\n");
+        return 1;
+    }
+
+    if (use_keyboard) {
+        // Keyboard-only mode: write standalone keyboard firmware as UF2
+        const uint8_t *fw_data = ___pico_keyboard_dist_keyboard_bin;
+        const size_t fw_size = sizeof(___pico_keyboard_dist_keyboard_bin);
+
+        printf("Mode: USB Keyboard (dedicated cartridge)\n");
+        printf("Firmware Size: %zu bytes\n", fw_size);
+        printf("UF2 Output: %s\n", output_filename);
+
+        FILE *uf2_file = fopen(output_filename, "wb");
+        if (!uf2_file) {
+            perror("Failed to create UF2 file");
+            return 1;
+        }
+
+        UF2_Block bl;
+        memset(&bl, 0, sizeof(bl));
+        bl.magicStart0 = UF2_MAGIC_START0;
+        bl.magicStart1 = UF2_MAGIC_START1;
+        bl.flags = UF2_FLAG_FAMILYID_PRESENT;
+        bl.magicEnd = UF2_MAGIC_END;
+        bl.targetAddr = FLASH_START;
+        bl.payloadSize = 256;
+        bl.numBlocks = (uint32_t)((fw_size + bl.payloadSize - 1) / bl.payloadSize);
+        bl.fileSize = RP2040_FAMILY_ID;
+
+        size_t offset = 0;
+        uint32_t block_no = 0;
+        while (offset < fw_size) {
+            memset(bl.data, 0, sizeof(bl.data));
+            size_t chunk = fw_size - offset;
+            if (chunk > bl.payloadSize) chunk = bl.payloadSize;
+            memcpy(bl.data, fw_data + offset, chunk);
+            bl.blockNo = block_no++;
+            if (fwrite(&bl, 1, sizeof(bl), uf2_file) != sizeof(bl)) {
+                printf("Failed to write UF2 block %u.\n", block_no - 1);
+                fclose(uf2_file);
+                return 1;
+            }
+            bl.targetAddr += bl.payloadSize;
+            offset += chunk;
+        }
+
+        fclose(uf2_file);
+        printf("\nSuccessfully wrote %u blocks to %s.\n", block_no, output_filename);
+        return 0;
     }
 
     if (use_sunrise || use_mapper) {

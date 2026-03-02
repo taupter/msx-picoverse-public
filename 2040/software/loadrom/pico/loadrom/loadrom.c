@@ -249,6 +249,43 @@ void __no_inline_not_in_flash_func(loadrom_linear48)(uint32_t offset, bool cache
     }
 }
 
+// loadrom_planar64 - Load a 64KB Planar ROM from pico flash.
+// These ROMs expose a full 64KB image and can be read across 0000h-FFFFh.
+// AB usually appears at 4000h, but some dumps also mirror AB at 0000h.
+void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base = rom + offset;
+
+    if (cache_enable)
+    {
+        gpio_init(PIN_WAIT);
+        gpio_set_dir(PIN_WAIT, GPIO_OUT);
+        gpio_put(PIN_WAIT, 0);
+        memset(rom_sram, 0, 65536);
+        memcpy(rom_sram, rom_base, 65536);
+        gpio_put(PIN_WAIT, 1);
+        rom_base = rom_sram;
+    }
+
+    gpio_set_dir_in_masked(0xFF << 16);
+    while (true)
+    {
+        if (!gpio_get(PIN_SLTSL))
+        {
+            uint16_t addr = gpio_get_all() & 0x00FFFF;
+            if (!gpio_get(PIN_RD))
+            {
+                uint8_t data = rom_base[addr];
+                gpio_set_dir_out_masked(0xFF << 16);
+                gpio_put_masked(0xFF0000, (uint32_t)data << 16);
+                while (!gpio_get(PIN_RD))
+                    tight_loop_contents();
+                gpio_set_dir_in_masked(0xFF << 16);
+            }
+        }
+    }
+}
+
 
 // loadrom_konamiscc - Load a any Konami SCC ROM into the MSX directly from the pico flash
 // The KonamiSCC ROMs are divided into 8KB segments, managed by a memory mapper that allows dynamic switching of these segments 
@@ -985,12 +1022,13 @@ int __no_inline_not_in_flash_func(main)()
     // 1 - 16KB ROM
     // 2 - 32KB ROM
     // 3 - Konami SCC ROM
-    // 4 - 48KB Linear0 ROM
+    // 4 - 48KB Planar ROM
     // 5 - ASCII8 ROM
     // 6 - ASCII16 ROM
     // 7 - Konami (without SCC) ROM
     // 8 - NEO8 ROM
     // 12 - ASCII16-X ROM
+    // 13 - 64KB Planar ROM
     switch (rom_type) 
     {
         case 1:
@@ -1020,6 +1058,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 12:
             loadrom_ascii16x(ROM_RECORD_SIZE, true);
+            break;
+        case 13:
+            loadrom_planar64(ROM_RECORD_SIZE, true);
             break;
         default:
             //printf("Unknown ROM type: %d\n", 1);

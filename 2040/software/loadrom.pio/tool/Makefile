@@ -45,6 +45,8 @@ PICOBIN_H := $(SRCDIR)/loadrom.h
 NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.MasterOnly.ROM
 #NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.ROM
 NEXTOR_SUNRISE_H := $(SRCDIR)/nextor_sunrise.h
+KEYBOARDBIN   := ../pico/keyboard/dist/keyboard.bin
+KEYBOARDBIN_H := $(SRCDIR)/keyboard.h
 
 # Helpers
 RM := rm -f
@@ -57,7 +59,7 @@ compile: $(BINDIR)/$(OUTFILE)
 
 package: $(DISDIR)/loadrom_$(VERSION).exe
 
-$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE)
+$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE) $(KEYBOARDBIN_H) $(KEYBOARDBIN)
 	@echo "Compiling $@"
 	$(CC) $(CCFLAGS) -DAPP_VERSION=\"$(VERSION)\" $(SRCDIR)/$(SOURCES) -o $@
 
@@ -67,6 +69,10 @@ $(PICOBIN_H): $(PICOBIN)
 
 $(NEXTOR_SUNRISE_H): $(NEXTOR_SUNRISE)
 	@echo "Embedding Sunrise Nextor ROM into header"
+	$(UTLDIR)/$(XXD) -i $< $@
+
+$(KEYBOARDBIN_H): $(KEYBOARDBIN)
+	@echo "Embedding Keyboard firmware into header"
 	$(UTLDIR)/$(XXD) -i $< $@
 
 $(BINDIR):
@@ -81,6 +87,6 @@ $(DISDIR)/loadrom_$(VERSION).exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
 
 clean:
 	@echo "Cleaning ...."
-	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/loadrom.h $(SRCDIR)/nextor_sunrise.h
+	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/loadrom.h $(SRCDIR)/nextor_sunrise.h $(SRCDIR)/keyboard.h
 	$(RM) $(DISDIR)/*
 

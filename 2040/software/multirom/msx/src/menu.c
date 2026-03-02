@@ -391,18 +391,23 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
 
 // mapper_description - Get the description of the mapper type
 // This function will return the description of the mapper type based on the mapper number.
-char* mapper_description(int number) {
-    // Keep array indexes aligned with mapper byte values.
-    static char unknown[] = "Unknown";
-    static char *descriptions[] = {
-        "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08", "ASC-16",
-        "Konami", "NEO-8", "NEO-16", "SYSTEM", "MAPPER", "ASC-16X"
-    };
-    int count = (int)(sizeof(descriptions) / sizeof(descriptions[0]));
-    if (number < 1 || number > count) {
-        return unknown;
+const char* mapper_description(int number) {
+    switch (number) {
+        case 1:  return "PLA-16";
+        case 2:  return "PLA-32";
+        case 3:  return "KNSCC";
+        case 4:  return "PLN-48";
+        case 5:  return "ASC08";
+        case 6:  return "ASC16";
+        case 7:  return "KONAMI";
+        case 8:  return "NEO-8";
+        case 9:  return "NEO16";
+        case 10: return "SYSTEM";
+        case 11: return "SYSTEM";
+        case 12: return "ASC16X";
+        case 13: return "PLN-64";
+        default: return "UNKWN";
     }
-    return descriptions[number - 1];
 }
 
 // displayMenu - Display the menu on the screen

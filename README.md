@@ -14,9 +14,10 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 
 - Both PicoVerse 2040 PIO based LoadROM and MultiROM tools now support Sunrise IDE emulation with Nextor ***(NEW!)***
 - Updated PicoVerse 2040 LoadROM and MultiROM with improved mapper RAM capacity (192KB) and better Nextor compatibility, including stable boot and runtime behavior in MSX1 and MSX2 environments. ***(NEW!)***
-- Added ASCII16-X and PLANAR64 mappers support to all PicoVerse 2040 firmware variants, with auto-detection heuristics and filename tag overrides in the LoadROM and MultiROM tools. ***(NEW!)*** 
+- Added ASCII16-X mapper support to all PicoVerse 2040 firmware variants, with auto-detection heuristics and filename tag overrides in the LoadROM and MultiROM tools. ***(NEW!)*** 
 - New PIO based **MultiROM** firmware and tool for PicoVerse 2350 (`2350/software/multirom.pio`) with automatic SCC emulation for Konami SCC ROMs. ***(NEW!)***
 - New PIO based **Explorer** firmware and tool for PicoVerse 2350 (`2350/software/explorer.pio`) that merges flash and microSD ROMs into a single menu, adds MP3 playback, SCC/SCC+ emulation, and supports on-device search. ***(NEW!)***
+- New standalone **USB Keyboard** firmware for PicoVerse 2040 — turns the cartridge into a dedicated USB-to-MSX keyboard interface via `loadrom.exe -k`. Works with any games/software but with original MSX hardware only (not FPGA). ***(NEW!)***
 
 ## Project Highlights
 
@@ -26,14 +27,15 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - Ready-made Nextor builds with USB (PicoVerse 2040) or microSD (PicoVerse 2350) with Sunrise IDE emulation. ***(NEW!)***
 - SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. ***(NEW!)***
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
+- USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
 - BOMs, and production-ready Gerbers.
 - Active development roadmap covering RP2040 and RP2350-based cartridges.
 
 ## Documentation
 
 **LoadROM Guides:** Use the LoadROM tool to create a UF2 image that boots directly into a single ROM, skipping the menu. Mapper type is auto-detected with filename tag overrides, and the tool reports the detected configuration before flashing.
-- [MSX PicoVerse 2040 LoadROM Tool Manual (English)](/docs/msx-picoverse-2040-loadrom-tool-manual.en-us.md) ***(UPDATED!)***
-- [MSX PicoVerse 2350 LoadROM Tool Manual (English)](/docs/msx-picoverse-2350-loadrom-tool-manual.en-us.md) ***(UPDATED!)***
+- [MSX PicoVerse 2040 LoadROM Tool Manual (English)](/docs/msx-picoverse-2040-loadrom-tool-manual.en-us.md) 
+- [MSX PicoVerse 2350 LoadROM Tool Manual (English)](/docs/msx-picoverse-2350-loadrom-tool-manual.en-us.md) 
   
 **MultiROM Guides:** Use the MultiROM tool to create a UF2 image that allows selecting from multiple ROMs at boot. Mapper type is auto-detected with filename tag overrides, and the tool reports the detected configuration before flashing.
 - [PicoVerse 2040 MultiROM Guide Manual (English)](/docs/msx-picoverse-2040-multirom-tool-manual.en-us.md)
@@ -49,8 +51,9 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - [MSX PicoVerse 2350 PIO Strategy](/docs/msx-picoverse-2350-pio.md) 
 - [MSX PicoVerse 2350 SCC Emulation Guide](/docs/msx-picoverse-2350-scc.md)
 - [Nextor Pico Bridge Protocol](/docs/Nextor-Pico-Bridge-Protocol.md)
-- [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md) ***(NEW!)***
-- [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md) ***(NEW!)***
+- [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md) 
+- [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md) 
+- [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md)
 
 ## Hardware Variants
 
@@ -63,6 +66,7 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - Based on RP2040 boards exposing 30 GPIO pins (not compatible with stock Raspberry Pi Pico pinout).
 - Up to 16 MB of flash for MSX ROMs with support for Plain16/32 (`PLA-16`/`PLA-32`), Planar48/64 (`PLN-48`/`PLN-64`), Konami SCC, Konami, ASCII8/16, NEO-8, and NEO-16 mappers.
 - USB-C port doubles as a bridge for Nextor mass storage.
+- Standalone USB keyboard firmware — use a standard USB keyboard as the MSX keyboard via the cartridge slot (`loadrom.exe -k`).
 
 #### Bill of Materials
 
@@ -210,6 +214,8 @@ All hardware and firmware binaries in this repository are released under the Cre
 The Sunrise IDE driver for Nextor used on PicoVerse is copyright by Konamiman, Piter Punk, and FRS, and is licensed under the special terms by MSX Licensing Corporation. The original Sunrise IDE code is available at https://github.com/Konamiman/Nextor/blob/v2.1/source/kernel/drivers/SunriseIDE/sunride.asm
 
 The algorithm to emulate ATA devices is original and based on the implementation for the Carnivore2 cartridge, Copyright (c) 2017-2024 by the RBSC group. Portions (c) Mitsutaka Okazaki and (c) Kazuhiro Tsujikawa. Available at https://github.com/RBSC/Carnivore2/tree/master/Firmware/Sources
+
+Mapper detection heuristics and filename tag forcing schemes in the LoadROM and MultiROM tools are original implementations by the OpenMSX developers for the Romfactory module and licensed under the GNU Public License (GPL). Available at https://github.com/openMSX/openMSX/blob/6f8aa9865eeccdb0b31043d8851b822538440204/src/memory/RomFactory.cc
 
 ## Feedback & Community
 

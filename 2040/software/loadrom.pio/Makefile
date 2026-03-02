@@ -9,12 +9,15 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.44
+VERSION ?= v2.45
 
 # Paths
 PICO_DIR := pico/loadrom
 PICO_BUILD := $(PICO_DIR)/build
 PICO_CONFIG := $(PICO_BUILD)/CMakeCache.txt
+KEYBOARD_DIR := pico/keyboard
+KEYBOARD_BUILD := $(KEYBOARD_DIR)/build
+KEYBOARD_CONFIG := $(KEYBOARD_BUILD)/CMakeCache.txt
 TOOL_DIR := tool
 
 # CMake options
@@ -35,9 +38,9 @@ MAKE ?= make
 
 
 
-.PHONY: all firmware tool clean
+.PHONY: all firmware keyboard tool clean
 
-all: firmware tool
+all: firmware keyboard tool
 
 firmware: $(PICO_CONFIG)
 	@echo "Building Pico firmware"
@@ -46,12 +49,21 @@ firmware: $(PICO_CONFIG)
 $(PICO_CONFIG):
 	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S "$(PICO_DIR)" -B "$(PICO_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 
+keyboard: $(KEYBOARD_CONFIG)
+	@echo "Building Keyboard firmware"
+	@$(CMAKE) --build "$(KEYBOARD_BUILD)"
+
+$(KEYBOARD_CONFIG):
+	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S "$(KEYBOARD_DIR)" -B "$(KEYBOARD_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+
 tool:
 	@echo "Building PC tool"
 	@$(MAKE) -C "$(TOOL_DIR)" VERSION=$(VERSION)
 
 clean:
-	@echo "Cleaning firmware and tool"
+	@echo "Cleaning firmware, keyboard, and tool"
 	@$(MAKE) -C "$(TOOL_DIR)" clean VERSION=$(VERSION)
 	@$(CMAKE) --build "$(PICO_BUILD)" --target clean || true
 	@$(CMAKE) -E rm -rf "$(PICO_BUILD)"
+	@$(CMAKE) --build "$(KEYBOARD_BUILD)" --target clean || true
+	@$(CMAKE) -E rm -rf "$(KEYBOARD_BUILD)"

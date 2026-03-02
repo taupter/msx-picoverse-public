@@ -12,6 +12,7 @@ The `-m` option flashes Sunrise IDE Nextor with an additional 192KB memory mappe
 | --- | --- | --- | --- |
 | `-s` | Sunrise IDE Nextor | No | Standard Nextor USB mass-storage mode |
 | `-m` | Sunrise IDE Nextor | Yes, 192KB | Nextor workflows that need mapper-capable behavior |
+| `-k` | — | — | Standalone USB keyboard cartridge mode |
 ## Overview
 
 1. **Input**: one `.ROM` file (case-insensitive extension) supplied via the command line.
@@ -40,8 +41,9 @@ loadrom.exe [options] [romfile]
 - `-h`, `--help` : Print usage information and exit.
 - `-s`, `--sunrise` : Embed the Sunrise IDE Nextor ROM instead of a regular MSX ROM. When this option is used, the cartridge boots into Nextor firmware, and the USB-C port exposes a block device for use with Nextor loaders. No ROM file argument is needed with this option.
 - `-m`, `--mapper` : Embed Sunrise IDE Nextor with 192KB memory mapper support. This is intended for Nextor workflows that require mapper-capable behavior. No ROM file argument is needed with this option.
+- `-k`, `--keyboard` : Build a UF2 with the standalone USB keyboard firmware. The cartridge becomes a dedicated USB-to-MSX keyboard interface. This option is standalone and cannot be combined with `-s`, `-m`, or a ROM file.
 - `-o <filename>`, `--output <filename>` : Override the UF2 output name (default `loadrom.uf2`).
-- Positional argument: the path to the MSX ROM you wish to embed (not used with `-s` or `-m`).
+- Positional argument: the path to the MSX ROM you wish to embed (not used with `-s`, `-m`, or `-k`).
 
 ### Mapper forcing via filename tags
 
@@ -99,6 +101,21 @@ Tags are case-insensitive. If no valid tag is present, the tool falls back to he
 7. Power on the MSX to boot into Nextor with the mapper-capable mode enabled. UI mapper text is shown as `SYSTEM`.
 8. In this mode, the additional memory mapper capacity is 192KB (12 x 16KB pages).
 
+### Loading USB Keyboard Firmware
+
+1. Place `loadrom.exe` in a working directory.
+2. Open a Command Prompt or PowerShell window in that directory.
+3. Run `loadrom.exe` with the `-k` option:
+   ```
+   loadrom.exe -k -o keyboard.uf2
+   ```
+4. Put the Pico in BOOTSEL mode (hold BOOTSEL, plug USB) to mount the `RPI-RP2` drive.
+5. Copy the generated UF2 file to the drive. The Pico reboots once flashing completes.
+6. Connect a USB keyboard to the cartridge's USB-C port (use a USB-C OTG adapter or USB-A to USB-C adapter as needed).
+7. Insert the PicoVerse cartridge into the MSX and power on. The USB keyboard now functions as the MSX keyboard.
+
+> **Note**: The keyboard firmware does not work with FPGA-based MSX systems. The FPGA's internal PPI drives the slot data bus for keyboard ports, causing bus contention with the PicoVerse. It is designed for and tested on original MSX hardware only.
+
 ## Troubleshooting
 
 | Symptom | Possible cause | Resolution |
@@ -115,6 +132,7 @@ Tags are case-insensitive. If no valid tag is present, the tool falls back to he
 - In mapper mode (`-m`), mapper register handling is global (ports `FC`-`FF`) and the mapper capacity is 192KB.
 - Linux/macOS binaries are not yet provided; use Wine or build from source with GCC.
 - The tool does not verify ROM integrity beyond size checks and simple header heuristics.
+- The keyboard firmware (`-k`) does not work with FPGA-based MSX implementations. The FPGA's internal PPI (8255) unconditionally drives keyboard port data onto the cartridge slot bus, which conflicts with the PicoVerse's bus response. See [USB Keyboard — FPGA Incompatibility Details](/docs/msx-picoverse-2040-keyboard.md#fpga-incompatibility-details) for the full analysis.
 
 ## Tested MSX models
 
@@ -170,4 +188,4 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 | Yamaha YIS604 | MSX1 | OK | Verified operation |
 
 Author: Cristiano Almeida Goncalves
-Last updated: 02/27/2026
+Last updated: 03/01/2026

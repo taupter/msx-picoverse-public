@@ -111,5 +111,20 @@ Both RP2040 PIO firmware targets require:
 
 ---
 
+## 8) Keyboard PIO Architecture
+
+The `loadrom.pio` build also includes a standalone USB keyboard firmware (`pico/keyboard/`) that uses a separate pair of PIO programs on **PIO1**:
+
+| SM | Program | Role |
+|---|---|---|
+| SM0 | `msx_kb_io_read` | I/O read responder with `/WAIT` side-set — intercepts port `0xA9` reads and freezes the Z80 until Core 0 supplies keyboard column data |
+| SM1 | `msx_kb_io_write` | I/O write captor — captures port `0xAA` and `0xAB` writes for keyboard row selection |
+
+The keyboard PIO programs share the same pin map as the ROM-serving PIO but operate exclusively on I/O bus signals (`/IORQ`, `/RD`, `/WR`) rather than slot memory (`/SLTSL`). The read responder uses optional side-set on GPIO 28 (`/WAIT`) to hold the Z80 during the FIFO round-trip.
+
+See [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md) for the full keyboard architecture documentation.
+
+---
+
 Cristiano Goncalves  
-02/27/26
+03/01/26
