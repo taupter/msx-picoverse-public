@@ -1,0 +1,3 @@
+- New standalone **MSX-MIDI** firmware for PicoVerse 2040 GÇö turns the cartridge into a standard external MSX-MIDI interface via `loadrom.exe -i`. Bridges MSX-MIDI I/O ports to a USB MIDI device such as a Roland SoundCanvas using a standard USB MIDI cable that can be purchased on AliExpress. ***(NEW!)***
+- **MIDI-PAC** firmware for PicoVerse 2040 GÇö passive PSG-to-MIDI converter via `loadrom.exe -p`. Featuring tone+noise coexistence, pitch-bend-in-range note management, 4+ù faster envelope processing (200 Hz), per-channel instrument differentiation with automatic bass detection, 6-band noiseGåÆpercussion mapping, improved volume curves and velocity dynamics, and enhanced SC-55 compatibility. ***(NEW!)***
+
