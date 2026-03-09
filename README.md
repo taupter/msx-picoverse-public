@@ -12,22 +12,20 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 
 ## Whats New in PicoVerse?
 
-- Both PicoVerse 2040 PIO based LoadROM and MultiROM tools now support Sunrise IDE emulation with Nextor ***(NEW!)***
-- Updated PicoVerse 2040 LoadROM and MultiROM with improved mapper RAM capacity (192KB) and better Nextor compatibility, including stable boot and runtime behavior in MSX1 and MSX2 environments. ***(NEW!)***
-- Added ASCII16-X mapper support to all PicoVerse 2040 firmware variants, with auto-detection heuristics and filename tag overrides in the LoadROM and MultiROM tools. ***(NEW!)*** 
-- New PIO based **MultiROM** firmware and tool for PicoVerse 2350 (`2350/software/multirom.pio`) with automatic SCC emulation for Konami SCC ROMs. ***(NEW!)***
-- New PIO based **Explorer** firmware and tool for PicoVerse 2350 (`2350/software/explorer.pio`) that merges flash and microSD ROMs into a single menu, adds MP3 playback, SCC/SCC+ emulation, and supports on-device search. ***(NEW!)***
-- New standalone **USB Keyboard** firmware for PicoVerse 2040 — turns the cartridge into a dedicated USB-to-MSX keyboard interface via `loadrom.exe -k`. Works with any games/software but with original MSX hardware only (not FPGA). ***(NEW!)***
+- New standalone **MSX-MIDI** firmware for PicoVerse 2040 — turns the cartridge into a standard external MSX-MIDI interface via `loadrom.exe -i`. Bridges MSX-MIDI I/O ports to a USB MIDI device such as a Roland SoundCanvas using a standard USB MIDI cable that can be purchased on AliExpress. ***(NEW!)***
+- **MIDI-PAC** firmware for PicoVerse 2040 — passive PSG-to-MIDI converter via `loadrom.exe -p`. Featuring tone+noise coexistence, pitch-bend-in-range note management, 4× faster envelope processing (200 Hz), per-channel instrument differentiation with automatic bass detection, 6-band noise→percussion mapping, improved volume curves and velocity dynamics, and enhanced SC-55 compatibility. ***(NEW!)***
 
 ## Project Highlights
 
 - Single-ROM LoadROM workflow for instant and easy booting of one title.
 - Multi-ROM loader with an on-screen menu and mapper auto-detection.
 - Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds MP3 playback, and supports on-device search.
-- Ready-made Nextor builds with USB (PicoVerse 2040) or microSD (PicoVerse 2350) with Sunrise IDE emulation. ***(NEW!)***
-- SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. ***(NEW!)***
+- Ready-made Nextor builds with USB (PicoVerse 2040) or microSD (PicoVerse 2350) with Sunrise IDE emulation. 
+- SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. 
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
+- MSX-MIDI support on PicoVerse 2040 — use a USB-MIDI cable as a standard MSX-MIDI interface via the cartridge slot. ***(NEW!)***
+- MIDI-PAC support on PicoVerse 2040 — passively convert live MSX PSG music and effects into high-quality MIDI for external synths or sound modules (SC-55 optimized). Features automatic bass detection, tone+noise coexistence, smooth pitch bending on fast passages, and improved percussion mapping. ***(NEW!)***
 - BOMs, and production-ready Gerbers.
 - Active development roadmap covering RP2040 and RP2350-based cartridges.
 
@@ -54,6 +52,8 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md) 
 - [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md) 
 - [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md)
+- [MSX PicoVerse 2040 MSX-MIDI](/docs/msx-picoverse-2040-msx-midi.md) ***(NEW!)***
+- [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) ***(NEW!)***
 
 ## Hardware Variants
 
@@ -67,6 +67,8 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - Up to 16 MB of flash for MSX ROMs with support for Plain16/32 (`PLA-16`/`PLA-32`), Planar48/64 (`PLN-48`/`PLN-64`), Konami SCC, Konami, ASCII8/16, NEO-8, and NEO-16 mappers.
 - USB-C port doubles as a bridge for Nextor mass storage.
 - Standalone USB keyboard firmware — use a standard USB keyboard as the MSX keyboard via the cartridge slot (`loadrom.exe -k`).
+- Standalone MSX-MIDI firmware — use a USB-MIDI cable as a standard MSX-MIDI interface for MIDI players and sequencers (`loadrom.exe -i`).
+- Standalone MIDI-PAC firmware — passively listen to the MSX PSG and convert music and effects to USB MIDI for an external synth or sound module (`loadrom.exe -p`).
 
 #### Bill of Materials
 
@@ -154,7 +156,7 @@ Check the detailed MultiROM guide in the documentation folder for advanced featu
 
 ## LoadROM Tool
 
-The LoadROM tool targets situations where you want the PicoVerse to behave like a traditional single-game cartridge. Instead of showing the MultiROM menu, the Pico boots straight into one ROM embedded in the UF2 image.
+The LoadROM tool targets situations where you want the PicoVerse to behave like a traditional single-game cartridge or as a dedicated standalone firmware image. Instead of showing the MultiROM menu, the Pico boots straight into one ROM embedded in the UF2 image, or into a selected standalone mode such as keyboard, MSX-MIDI, or MIDI-PAC.
 
 - **Input**: exactly one `.ROM` file. Mapper type is auto-detected with the same heuristics as MultiROM, and you can still force a mapper via filename tags such as `.KonSCC.ROM` or `.PLA-32.ROM`.
 - **Output**: `loadrom.uf2` by default, or any filename you pass via `-o`. The UF2 contains the firmware, a 59-byte configuration record (title, mapper, size, flash offset), and the ROM payload.
@@ -163,6 +165,8 @@ The LoadROM tool targets situations where you want the PicoVerse to behave like 
       - `2350/software/loadrom/tool` (legacy bit-banged firmware), or
       - `2350/software/loadrom.pio/tool` (PIO-based firmware, recommended).
    2. Run `loadrom.exe -o mygame.uf2 \\path\\to\\Game.ROM` (the tool also accepts drag-and-drop onto the EXE).
+      - MSX-MIDI standalone mode: `loadrom.exe -i -o midi.uf2`
+      - MIDI-PAC standalone mode: `loadrom.exe -p -o midipac.uf2`
       - SCC standard emulation: `loadrom.exe -scc \\path\\to\\Game.ROM`
       - SCC+ enhanced emulation: `loadrom.exe -sccplus \\path\\to\\Game.ROM`
       - `-scc` and `-sccplus` are mutually exclusive.
@@ -211,6 +215,21 @@ All hardware and firmware binaries in this repository are released under the Cre
 
 **emu2149.c** and **emu2149.h** used to implement AY-3-8910 emulation are copyright by Mitsutaka Okazaki 2014 and licensed under the MIT License, allowing for free use, modification, and distribution with proper attribution. [emu2149 @ Digital Sound Antiques](https://github.com/digital-sound-antiques/emu2149)
 
+**MIDI-PAC PSG-to-MIDI Conversion:**  
+The MIDI-PAC firmware and its quality improvements were developed against public technical references and behavior studies. The PSG-to-MIDI mapping combines hardware-correct AY-3-8910 / YM2149 interpretation with pragmatic General MIDI reinterpretation for musical output on modules like the Roland SC-55. Key references used include:  
+- The `berarma/aymidi` project by berarma (AY-3-8910 to MIDI conversion reference).  
+- The `ayumi` AY/YM2149 emulator by Peter Sovietov (Peter Sovietov, 2022; used for envelope generation verification).  
+- The ESEMSX3 FPGA implementation `midi.vhd` (serves as a minimal alternative PSG-to-MIDI transport reference).  
+- AY-3-8910 and YM2149 datasheets and hardware behavior documentation (General Instruments and Yamaha specifications).  
+- MSX-MIDI specification and USB MIDI 1.0 Event Packet format (USB Implementers Forum).  
+- The Sunrise IDE specification and Nextor protocol documentation.  
+
+These references informed structure, timing, envelope shapes, and musical mapping decisions. The PicoVerse firmware maintains its own implementation with no dependencies on external emulation libraries.
+
+**MSX-MIDI Interface:**  
+The MSX-MIDI firmware was developed using the MSX-MIDI specification, USB MIDI 1.0 specification, TinyUSB host API, and reference behavior from ESEMSX3 and similar implementations. The 8251 USART emulation and standard MIDI wire protocol handling are original PicoVerse implementations.
+
+**Sunrise IDE Nextor Integration:**  
 The Sunrise IDE driver for Nextor used on PicoVerse is copyright by Konamiman, Piter Punk, and FRS, and is licensed under the special terms by MSX Licensing Corporation. The original Sunrise IDE code is available at https://github.com/Konamiman/Nextor/blob/v2.1/source/kernel/drivers/SunriseIDE/sunride.asm
 
 The algorithm to emulate ATA devices is original and based on the implementation for the Carnivore2 cartridge, Copyright (c) 2017-2024 by the RBSC group. Portions (c) Mitsutaka Okazaki and (c) Kazuhiro Tsujikawa. Available at https://github.com/RBSC/Carnivore2/tree/master/Firmware/Sources

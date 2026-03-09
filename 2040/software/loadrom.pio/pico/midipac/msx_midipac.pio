@@ -1,0 +1,53 @@
+; MSX PICOVERSE PROJECT
+; (c) 2026 Cristiano Goncalves
+; The Retro Hacker
+;
+; msx_midipac.pio - PIO program for passive PSG write interception
+;
+; Pin mapping:
+;   GPIO  0-15  = A0..A15   (address bus, always input)
+;   GPIO 16-23  = D0..D7    (data bus, always input — passive mode)
+;   GPIO 24     = /RD       (active-low read strobe)
+;   GPIO 25     = /WR       (active-low write strobe)
+;   GPIO 26     = /IORQ     (active-low I/O request)
+;   GPIO 27     = /SLTSL    (unused)
+;   GPIO 28     = /WAIT     (unused — passive, never driven)
+;   GPIO 29     = BUSSDIR   (unused)
+;
+; This firmware passively snoops on MSX bus I/O writes to the PSG (AY-3-8910).
+; It never drives any bus lines — it only watches /IORQ and /WR to detect when
+; the Z80 writes to I/O ports 0xA0 (register select) and 0xA1 (data write).
+;
+; RX FIFO word format (via mov isr, pins — 32 bits of GPIO state):
+;   bits[7:0]   = A0..A7   (port address)
+;   bits[15:8]  = A8..A15  (upper address, ignored)
+;   bits[23:16] = D0..D7   (data byte)
+;
+; jmp_pin = /WR (GPIO 25)
+;
+; This work is licensed under a "Creative Commons Attribution-NonCommercial-
+; ShareAlike 4.0 International License".
+; https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+; ===================================================================
+; msx_midipac_io_write — Passive I/O write snooper
+; ===================================================================
+; Watches for /IORQ + /WR going low (I/O write cycle), then snapshots
+; the full GPIO state (address + data) into the RX FIFO.
+;
+; This is a purely passive observer — no bus lines are driven.
+; FIFO join RX for 8-deep buffering to avoid overflows.
+;
+; jmp_pin = /WR (GPIO 25)
+
+.program msx_midipac_io_write
+
+.wrap_target
+wait_iorq:
+    wait 0 gpio 26           ; Wait for /IORQ=0
+    jmp pin wait_iorq         ; If /WR=1, not a write — loop back
+    nop              [2]     ; Let address + data settle (3 cycles)
+    mov isr, pins            ; Snapshot all GPIOs into ISR
+    push block               ; Send (addr+data) to CPU via RX FIFO
+    wait 1 gpio 25           ; Wait for /WR=1 (cycle complete)
+.wrap

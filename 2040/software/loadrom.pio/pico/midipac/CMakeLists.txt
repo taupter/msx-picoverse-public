@@ -38,40 +38,46 @@ set(PICO_BOARD pico CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(keyboard C CXX ASM)
+project(midipac C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-add_executable(keyboard
+# Reuse the USB MIDI host driver from the midi firmware
+set(MIDI_DIR ${CMAKE_CURRENT_LIST_DIR}/../midi)
+
+add_executable(midipac
     ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c
-    keyboard_main.c)
+    ${MIDI_DIR}/usb_midi_host.c
+    midipac_main.c)
 
-# Dedicated PIO programs for keyboard I/O bus handling (with /WAIT support)
-pico_generate_pio_header(keyboard ${CMAKE_CURRENT_LIST_DIR}/msx_keyboard.pio)
+# PIO program for passive PSG write interception
+pico_generate_pio_header(midipac ${CMAKE_CURRENT_LIST_DIR}/msx_midipac.pio)
 
-pico_set_program_name(keyboard "keyboard")
-pico_set_program_version(keyboard "1.0")
+pico_set_program_name(midipac "midipac")
+pico_set_program_version(midipac "1.0")
 
 # No stdio — this firmware is headless
-pico_enable_stdio_uart(keyboard 0)
-pico_enable_stdio_usb(keyboard 0)
+pico_enable_stdio_uart(midipac 0)
+pico_enable_stdio_usb(midipac 0)
 
-target_link_libraries(keyboard
+target_link_libraries(midipac
         pico_stdlib
         pico_multicore
         hardware_pio
+        hardware_timer
         tinyusb_board
         tinyusb_host)
 
-target_include_directories(keyboard PRIVATE
+target_include_directories(midipac PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}
+  ${MIDI_DIR}
 )
 
-pico_add_extra_outputs(keyboard)
+pico_add_extra_outputs(midipac)
 
 # Copy firmware binary to dist folder for the tool to embed
-add_custom_command(TARGET keyboard POST_BUILD
+add_custom_command(TARGET midipac POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/dist
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/keyboard.bin ${CMAKE_SOURCE_DIR}/dist/keyboard.bin
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/midipac.bin ${CMAKE_SOURCE_DIR}/dist/midipac.bin
 )

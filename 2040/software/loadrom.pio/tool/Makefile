@@ -47,6 +47,10 @@ NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.MasterOnly.ROM
 NEXTOR_SUNRISE_H := $(SRCDIR)/nextor_sunrise.h
 KEYBOARDBIN   := ../pico/keyboard/dist/keyboard.bin
 KEYBOARDBIN_H := $(SRCDIR)/keyboard.h
+MIDIBIN       := ../pico/midi/dist/midi.bin
+MIDIBIN_H     := $(SRCDIR)/midi_fw.h
+MIDIPACBIN    := ../pico/midipac/dist/midipac.bin
+MIDIPACBIN_H  := $(SRCDIR)/midipac_fw.h
 
 # Helpers
 RM := rm -f
@@ -59,7 +63,7 @@ compile: $(BINDIR)/$(OUTFILE)
 
 package: $(DISDIR)/loadrom_$(VERSION).exe
 
-$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE) $(KEYBOARDBIN_H) $(KEYBOARDBIN)
+$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE) $(KEYBOARDBIN_H) $(KEYBOARDBIN) $(MIDIBIN_H) $(MIDIBIN) $(MIDIPACBIN_H) $(MIDIPACBIN)
 	@echo "Compiling $@"
 	$(CC) $(CCFLAGS) -DAPP_VERSION=\"$(VERSION)\" $(SRCDIR)/$(SOURCES) -o $@
 
@@ -75,6 +79,14 @@ $(KEYBOARDBIN_H): $(KEYBOARDBIN)
 	@echo "Embedding Keyboard firmware into header"
 	$(UTLDIR)/$(XXD) -i $< $@
 
+$(MIDIBIN_H): $(MIDIBIN)
+	@echo "Embedding MIDI firmware into header"
+	$(UTLDIR)/$(XXD) -i $< $@
+
+$(MIDIPACBIN_H): $(MIDIPACBIN)
+	@echo "Embedding MIDI-PAC firmware into header"
+	$(UTLDIR)/$(XXD) -i $< $@
+
 $(BINDIR):
 	@mkdir $@
 
@@ -87,6 +99,6 @@ $(DISDIR)/loadrom_$(VERSION).exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
 
 clean:
 	@echo "Cleaning ...."
-	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/loadrom.h $(SRCDIR)/nextor_sunrise.h $(SRCDIR)/keyboard.h
+	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/loadrom.h $(SRCDIR)/nextor_sunrise.h $(SRCDIR)/keyboard.h $(SRCDIR)/midi_fw.h $(SRCDIR)/midipac_fw.h
 	$(RM) $(DISDIR)/*
 

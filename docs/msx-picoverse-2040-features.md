@@ -15,6 +15,8 @@ The MSX PicoVerse 2040 is a Raspberry Pi Pico-based MSX-compatible cartridge tha
 - **Firmware Updates**: The cartridge firmware can be updated via USB, allowing users to benefit from new features and improvements over time.
 - **USB Mass Storage Support for Nextor**: Allows the use of the USB-C port as a mass storage device when running Nextor DOS.
 - **USB Keyboard Support**: Dedicated firmware mode that turns the cartridge into a USB-to-MSX keyboard interface. Plug a standard USB keyboard into the USB-C port and it functions as the native MSX keyboard. Supports USB hubs, full matrix coverage (rows 0–10), and up to 6 simultaneous keys. Generated via `loadrom.exe -k`. Not compatible with FPGA-based MSX systems.
+- **MSX-MIDI Support**: Dedicated firmware mode that turns the cartridge into a standard MSX-MIDI interface. Plug a USB-MIDI cable (e.g., connected to a Roland SoundCanvas) into the USB-C port and MSX MIDI software can send and receive MIDI data through the standard I/O ports (`0xE8`–`0xE9`). Supports any USB MIDI device. Generated via `loadrom.exe -i`. Tested with MIDRY (`/I5` option).
+- **MIDI-PAC Support**: Dedicated firmware mode that turns the cartridge into a passive PSG-to-MIDI converter. Plug a USB MIDI device or module into the USB-C port and the firmware listens to live AY-3-8910 or YM2149 PSG writes, translating MSX music and effects into a General MIDI oriented stream. Generated via `loadrom.exe -p`.
 
 Author: Cristiano Goncalves  
-Last updated: 03/01/2026
+Last updated: 03/08/2026

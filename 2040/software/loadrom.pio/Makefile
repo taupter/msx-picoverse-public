@@ -9,15 +9,21 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.45
+VERSION ?= v2.50
 
 # Paths
 PICO_DIR := pico/loadrom
 PICO_BUILD := $(PICO_DIR)/build
-PICO_CONFIG := $(PICO_BUILD)/CMakeCache.txt
+PICO_CONFIG := $(PICO_BUILD)/build.ninja
 KEYBOARD_DIR := pico/keyboard
 KEYBOARD_BUILD := $(KEYBOARD_DIR)/build
-KEYBOARD_CONFIG := $(KEYBOARD_BUILD)/CMakeCache.txt
+KEYBOARD_CONFIG := $(KEYBOARD_BUILD)/build.ninja
+MIDI_DIR := pico/midi
+MIDI_BUILD := $(MIDI_DIR)/build
+MIDI_CONFIG := $(MIDI_BUILD)/build.ninja
+MIDIPAC_DIR := pico/midipac
+MIDIPAC_BUILD := $(MIDIPAC_DIR)/build
+MIDIPAC_CONFIG := $(MIDIPAC_BUILD)/build.ninja
 TOOL_DIR := tool
 
 # CMake options
@@ -26,44 +32,58 @@ CMAKE ?= c:/Users/Cristiano/.pico-sdk/cmake/v3.29.9/bin/cmake
 ifeq ($(OS),Windows_NT)
 	CMAKE_GENERATOR ?= Ninja
 	CMAKE_MAKE_PROGRAM ?= C:/Users/Cristiano/.pico-sdk/ninja/v1.12.1/ninja.exe
+	ifneq ($(wildcard C:/msys64/ucrt64/bin/python.exe),)
+		PYTHON3_EXECUTABLE ?= C:/msys64/ucrt64/bin/python.exe
+	endif
 else
 	CMAKE_GENERATOR ?=
 endif
 CMAKE_GENERATOR_FLAG := $(if $(CMAKE_GENERATOR),-G "$(CMAKE_GENERATOR)",)
 CMAKE_BUILD_TYPE ?= Release
 CMAKE_MAKE_PROGRAM_FLAG := $(if $(CMAKE_MAKE_PROGRAM),-DCMAKE_MAKE_PROGRAM="$(CMAKE_MAKE_PROGRAM)",)
+PYTHON3_EXECUTABLE_FLAG := $(if $(PYTHON3_EXECUTABLE),-DPython3_EXECUTABLE="$(PYTHON3_EXECUTABLE)",)
 
 # Make options
 MAKE ?= make
 
 
 
-.PHONY: all firmware keyboard tool clean
+.PHONY: all firmware keyboard midi midipac tool clean
 
-all: firmware keyboard tool
+all: firmware keyboard midi midipac tool
 
-firmware: $(PICO_CONFIG)
+firmware:
+	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) $(PYTHON3_EXECUTABLE_FLAG) -S "$(PICO_DIR)" -B "$(PICO_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 	@echo "Building Pico firmware"
 	@$(CMAKE) --build "$(PICO_BUILD)"
 
-$(PICO_CONFIG):
-	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S "$(PICO_DIR)" -B "$(PICO_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
-
-keyboard: $(KEYBOARD_CONFIG)
+keyboard:
+	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) $(PYTHON3_EXECUTABLE_FLAG) -S "$(KEYBOARD_DIR)" -B "$(KEYBOARD_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 	@echo "Building Keyboard firmware"
 	@$(CMAKE) --build "$(KEYBOARD_BUILD)"
 
-$(KEYBOARD_CONFIG):
-	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S "$(KEYBOARD_DIR)" -B "$(KEYBOARD_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+midi:
+	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) $(PYTHON3_EXECUTABLE_FLAG) -S "$(MIDI_DIR)" -B "$(MIDI_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+	@echo "Building MIDI firmware"
+	@$(CMAKE) --build "$(MIDI_BUILD)"
+
+midipac:
+	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) $(PYTHON3_EXECUTABLE_FLAG) -S "$(MIDIPAC_DIR)" -B "$(MIDIPAC_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+	@echo "Building MIDI-PAC firmware"
+	@$(CMAKE) --build "$(MIDIPAC_BUILD)"
 
 tool:
 	@echo "Building PC tool"
-	@$(MAKE) -C "$(TOOL_DIR)" VERSION=$(VERSION)
+	@"$(MAKE)" -C "$(TOOL_DIR)" VERSION=$(VERSION)
 
 clean:
-	@echo "Cleaning firmware, keyboard, and tool"
-	@$(MAKE) -C "$(TOOL_DIR)" clean VERSION=$(VERSION)
+	@echo "Cleaning firmware, keyboard, midi, midipac, and tool"
+	@"$(MAKE)" -C "$(TOOL_DIR)" clean VERSION=$(VERSION)
 	@$(CMAKE) --build "$(PICO_BUILD)" --target clean || true
 	@$(CMAKE) -E rm -rf "$(PICO_BUILD)"
 	@$(CMAKE) --build "$(KEYBOARD_BUILD)" --target clean || true
 	@$(CMAKE) -E rm -rf "$(KEYBOARD_BUILD)"
+	@$(CMAKE) --build "$(MIDI_BUILD)" --target clean || true
+	@$(CMAKE) -E rm -rf "$(MIDI_BUILD)"
+	@$(CMAKE) --build "$(MIDIPAC_BUILD)" --target clean || true
+	@$(CMAKE) -E rm -rf "$(MIDIPAC_BUILD)"

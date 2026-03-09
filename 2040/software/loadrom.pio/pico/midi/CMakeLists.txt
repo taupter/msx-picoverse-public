@@ -38,40 +38,41 @@ set(PICO_BOARD pico CACHE STRING "Board type")
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
 
-project(keyboard C CXX ASM)
+project(midi C CXX ASM)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-add_executable(keyboard
+add_executable(midi
     ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c
-    keyboard_main.c)
+    usb_midi_host.c
+    midi_main.c)
 
-# Dedicated PIO programs for keyboard I/O bus handling (with /WAIT support)
-pico_generate_pio_header(keyboard ${CMAKE_CURRENT_LIST_DIR}/msx_keyboard.pio)
+# Dedicated PIO programs for MIDI I/O bus handling (with /WAIT support)
+pico_generate_pio_header(midi ${CMAKE_CURRENT_LIST_DIR}/msx_midi.pio)
 
-pico_set_program_name(keyboard "keyboard")
-pico_set_program_version(keyboard "1.0")
+pico_set_program_name(midi "midi")
+pico_set_program_version(midi "1.0")
 
 # No stdio — this firmware is headless
-pico_enable_stdio_uart(keyboard 0)
-pico_enable_stdio_usb(keyboard 0)
+pico_enable_stdio_uart(midi 0)
+pico_enable_stdio_usb(midi 0)
 
-target_link_libraries(keyboard
+target_link_libraries(midi
         pico_stdlib
         pico_multicore
         hardware_pio
         tinyusb_board
         tinyusb_host)
 
-target_include_directories(keyboard PRIVATE
+target_include_directories(midi PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}
 )
 
-pico_add_extra_outputs(keyboard)
+pico_add_extra_outputs(midi)
 
 # Copy firmware binary to dist folder for the tool to embed
-add_custom_command(TARGET keyboard POST_BUILD
+add_custom_command(TARGET midi POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/dist
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/keyboard.bin ${CMAKE_SOURCE_DIR}/dist/keyboard.bin
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_BINARY_DIR}/midi.bin ${CMAKE_SOURCE_DIR}/dist/midi.bin
 )
