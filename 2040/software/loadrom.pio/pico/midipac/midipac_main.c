@@ -42,18 +42,24 @@
 #include "psg_freq_table.h"
 
 #define MIDI_WIRE_BYTE_US 320
-#define MIDI_TONE_BEND_QUANTUM 64
+#define MIDI_TONE_BEND_QUANTUM 16
 #define MIDI_TONE_EXPR_QUANTUM 4
-#define MIDI_TONE_BEND_MIN_INTERVAL_US 2000
+#define MIDI_TONE_BEND_MIN_INTERVAL_US 500
 #define MIDI_TONE_EXPR_MIN_INTERVAL_US 8000
 
-// Envelope service rate (Hz) and tick interval (microseconds)
-#define ENV_TICK_RATE_HZ   200
-#define ENV_TICK_US        (1000000 / ENV_TICK_RATE_HZ)  // 5000 us = 200 Hz
-
-// Bass-detection hysteresis parameters
-#define BASS_NOTE_THRESHOLD  48   // MIDI note C3
-#define BASS_DETECT_TICKS    40   // 40 ticks at 200 Hz = 200 ms
+// 50 Hz frame processing matches the intent of common MSX music engines,
+// avoids reacting to every individual PSG register write, and keeps vibrato
+// as pitch bend instead of repeated note retriggers.
+#define PSG_FRAME_RATE_HZ           50
+#define PSG_FRAME_TICK_US           (1000000 / PSG_FRAME_RATE_HZ)
+#define PSG_BEND_RATE_HZ            200
+#define PSG_BEND_TICK_US            (1000000 / PSG_BEND_RATE_HZ)
+#define MIDI_VIBRATO_BEND_ONLY_DELTA_X256 256
+#define TONE_CENTER_WINDOW_X256     192
+#define TONE_STABLE_RETRIGGER_FRAMES 3
+#define TONE_HISTORY_LEN            4
+#define NOISE_DIVISOR_SCALE         8
+#define NOISE_DIVISOR_BIAS          16
 
 // -----------------------------------------------------------------------
 // TX ring buffer: Core 0 (IRQ) writes, Core 1 reads
@@ -124,6 +130,7 @@ static inline bool __not_in_flash_func(midi_send_2)(uint8_t status, uint8_t d1) 
 // -----------------------------------------------------------------------
 static volatile uint8_t psg_addr_latch;         // Currently selected PSG register
 static uint16_t psg_reg[PSG_REG_COUNT];         // Shadow of all 14 PSG registers
+static volatile uint32_t psg_reg_seq;           // Seqlock for coherent snapshots
 
 // Per-channel MIDI state
 static uint16_t channel_freq[MIDI_CH_COUNT];    // Current PSG frequency divisor
@@ -131,7 +138,6 @@ static uint8_t  midi_note[MIDI_CH_COUNT];       // Current MIDI note (0 = off)
 static uint16_t midi_pitchbend[MIDI_CH_COUNT];  // Current pitch bend value
 static uint8_t  midi_program[MIDI_CH_COUNT];    // Current MIDI program
 static uint8_t  midi_expr[MIDI_CH_COUNT];       // Current MIDI CC#11 expression
-static uint8_t  tone_on[MIDI_CH_COUNT];         // Whether channel is enabled
 static uint8_t  psg_tone_mix[3];                // PSG tone enable per voice
 static uint8_t  psg_noise_mix[3];               // PSG noise enable per voice
 static uint16_t midi_pitchbend_pending[3];      // Deferred tone pitch bend target
@@ -140,11 +146,17 @@ static uint8_t  midi_expr_pending[3];           // Deferred tone expression targ
 static uint8_t  midi_expr_dirty[3];             // Deferred tone expression pending
 static uint32_t midi_pitchbend_last_us[3];      // Last tone bend send timestamp
 static uint32_t midi_expr_last_us[3];           // Last tone expression send timestamp
+static uint16_t tone_last_period[3];            // Last processed tone period per PSG voice
+static uint8_t  env_level[3];                   // Current envelope-derived level (0-127)
+static uint16_t tone_note_history[3][TONE_HISTORY_LEN];
+static uint8_t  tone_note_history_count[3];
+static uint8_t  tone_pending_note[3];
+static uint8_t  tone_pending_count[3];
 
 // PSG volume (0-15) to MIDI CC value.
 // Smoother curve with better low-level presence for SC-55 arrangement quality.
 static const uint8_t psg_vol_to_midi[16] = {
-    0, 16, 26, 35, 44, 52, 60, 68, 76, 84, 92, 100, 108, 114, 121, 127
+    0, 18, 30, 40, 50, 58, 66, 74, 82, 90, 98, 106, 113, 119, 124, 127
 };
 
 // Envelope volume (0-31) to MIDI CC value.
@@ -154,20 +166,22 @@ static const uint8_t env_vol_to_midi[32] = {
     76, 80, 84, 88, 92, 95, 99,103,107,110,114,117,120,123,125,127
 };
 
-static const uint8_t channel_pan[MIDI_CH_COUNT] = {
-    40, 64, 88, 56, 64, 72
+static const uint8_t tone_program[3] = {
+    MIDIPAC_MELODIC_PROG_A,
+    MIDIPAC_MELODIC_PROG_B,
+    MIDIPAC_MELODIC_PROG_C
 };
 
-static const uint8_t channel_volume[MIDI_CH_COUNT] = {
-    127, 122, 118, 76, 72, 68
+static const uint8_t tone_pan[3] = {
+    60, 64, 68
 };
 
-static const uint8_t channel_reverb[MIDI_CH_COUNT] = {
-    22, 20, 18, 4, 4, 4
+static const uint8_t tone_reverb[3] = {
+    0, 0, 0
 };
 
-static const uint8_t channel_chorus[MIDI_CH_COUNT] = {
-    12, 10, 8, 0, 0, 0
+static const uint8_t tone_chorus[3] = {
+    0, 0, 0
 };
 
 // Envelope state
@@ -176,15 +190,6 @@ static int      soundenvspeed;                  // Envelope speed (fixed-point)
 static int      soundenvspeed_toolarge;         // Overflow flag
 static int      usesoundenv[3];                 // Per-tone-channel envelope enable
 static int      soundenvcounter[3];             // Per-tone-channel envelope counter
-
-// Bass-detection state (updated at ENV_TICK_RATE_HZ in Core 1)
-static int16_t  bass_detect_counter[3];          // +N = low-note ticks, -N = high-note
-static uint8_t  bass_mode[3];                    // 1 if channel uses bass program
-static const uint8_t channel_default_prog[3] = {
-    MIDIPAC_MELODIC_PROG_A,   // Channel A: Square Lead
-    MIDIPAC_MELODIC_PROG_B,   // Channel B: Saw Lead
-    MIDIPAC_MELODIC_PROG_A    // Channel C: Square Lead (bass-detect switches)
-};
 
 // Silence detection state
 static uint32_t all_silent_since_us;             // Timestamp when all channels went quiet
@@ -202,6 +207,22 @@ static const uint8_t noise_drum_notes[6][3] = {
     {35, 36, 41}    // Band 5 (div > 176): Acoustic Bass Drum, Bass Drum, Low Floor Tom
 };
 
+static void psg_snapshot_read(uint16_t *snapshot) {
+    uint32_t seq_start;
+    uint32_t seq_end;
+
+    do {
+        seq_start = psg_reg_seq;
+        while (seq_start & 1u) {
+            seq_start = psg_reg_seq;
+        }
+        __dmb();
+        memcpy(snapshot, (const void *)psg_reg, sizeof(psg_reg));
+        __dmb();
+        seq_end = psg_reg_seq;
+    } while (seq_start != seq_end || (seq_end & 1u));
+}
+
 // -----------------------------------------------------------------------
 // MIDI event generators (called from IRQ context — must be fast)
 // -----------------------------------------------------------------------
@@ -216,9 +237,9 @@ static inline uint8_t __not_in_flash_func(noise_voice_index)(uint8_t channel) {
 
 static inline uint8_t __not_in_flash_func(midi_psg_level)(uint8_t channel, uint8_t val) {
     if (channel >= MIDI_CH_NOISE_A) {
-        // Scale noise expression to 0-95 range to keep drums from overpowering
-        // melodic voices on SC-55-style PCM modules.
-        return (uint8_t)((val * 3u) / 4u);
+        // Keep percussion clearly audible but behind the three melodic PSG
+        // channels, otherwise channel 10 dominates the mix on GM modules.
+        return (uint8_t)((val * 11u) / 16u);
     }
     return val;
 }
@@ -310,9 +331,18 @@ static void __not_in_flash_func(midi_note_off)(uint8_t channel) {
     }
 }
 
+static void __not_in_flash_func(midi_note_on_velocity)(uint8_t channel, uint8_t note, uint8_t velocity) {
+    if (note == 0 || note > 127) return;
+    if (midi_note[channel] == note) return;
+
+    midi_note_off(channel);
+    midi_send_3(0x90 | midi_tx_channel(channel), note, velocity);
+    midi_note[channel] = note;
+}
+
 static uint8_t __not_in_flash_func(midi_note_velocity)(uint8_t channel) {
-    uint16_t base = (channel >= MIDI_CH_NOISE_A) ? 40 : 48;
-    uint16_t span = (channel >= MIDI_CH_NOISE_A) ? 60 : 76;
+    uint16_t base = (channel >= MIDI_CH_NOISE_A) ? 34 : 56;
+    uint16_t span = (channel >= MIDI_CH_NOISE_A) ? 52 : 72;
     uint16_t velocity = base + (midi_expr[channel] * span) / 127;
     if (velocity > 127) velocity = 127;
     return (uint8_t)velocity;
@@ -378,6 +408,76 @@ static void __not_in_flash_func(midi_program_set)(uint8_t channel, uint8_t prog)
 // PSG-to-MIDI conversion functions
 // -----------------------------------------------------------------------
 
+static inline uint16_t psg_tone_period(const uint16_t *snapshot, uint8_t voice) {
+    uint16_t fine = snapshot[PSG_REG_FREQ_A_LO + (voice * 2u)] & 0x00FFu;
+    uint16_t coarse = snapshot[PSG_REG_FREQ_A_HI + (voice * 2u)] & 0x000Fu;
+    uint16_t period = (coarse << 8) | fine;
+    return (period == 0) ? 1u : period;
+}
+
+static inline uint8_t psg_voice_level(const uint16_t *snapshot, uint8_t voice) {
+    uint8_t volume_reg = snapshot[PSG_REG_VOL_A + voice] & 0x1Fu;
+    if (volume_reg & 0x10u) {
+        return env_level[voice];
+    }
+    return psg_vol_to_midi[volume_reg & 0x0Fu];
+}
+
+static inline uint8_t psg_voice_velocity(const uint16_t *snapshot, uint8_t voice, uint8_t level) {
+    uint8_t volume_reg = snapshot[PSG_REG_VOL_A + voice] & 0x1Fu;
+    if (volume_reg & 0x10u) {
+        uint16_t velocity = ((uint16_t)level * 120u) / 127u;
+        return (velocity == 0) ? 1u : (uint8_t)velocity;
+    }
+
+    uint16_t velocity = (uint16_t)(volume_reg & 0x0Fu) * 8u;
+    if (velocity > 127u) velocity = 127u;
+    return (velocity == 0) ? 1u : (uint8_t)velocity;
+}
+
+static inline uint16_t midi_wheel_for_anchor(uint8_t anchor_note, uint16_t fine_note_x256) {
+    int32_t delta_x256 = (int32_t)fine_note_x256 - ((int32_t)anchor_note << 8);
+    int32_t wheel = 8192 + (delta_x256 * 16);
+    if (wheel < 0) return 0;
+    if (wheel > 16383) return 16383;
+    return (uint16_t)wheel;
+}
+
+static void tone_history_push(uint8_t voice, uint16_t fine_note_x256) {
+    memmove(&tone_note_history[voice][0],
+            &tone_note_history[voice][1],
+            sizeof(tone_note_history[voice][0]) * (TONE_HISTORY_LEN - 1));
+    tone_note_history[voice][TONE_HISTORY_LEN - 1] = fine_note_x256;
+    if (tone_note_history_count[voice] < TONE_HISTORY_LEN) {
+        tone_note_history_count[voice]++;
+    }
+}
+
+static bool tone_history_indicates_modulation(uint8_t voice, uint8_t current_note) {
+    if (tone_note_history_count[voice] < TONE_STABLE_RETRIGGER_FRAMES) {
+        return false;
+    }
+
+    int32_t center = (int32_t)current_note << 8;
+    int32_t sum_delta = 0;
+    bool seen_positive = false;
+    bool seen_negative = false;
+
+    for (uint8_t i = TONE_HISTORY_LEN - TONE_STABLE_RETRIGGER_FRAMES; i < TONE_HISTORY_LEN; i++) {
+        int32_t delta = (int32_t)tone_note_history[voice][i] - center;
+        if (delta < -MIDI_VIBRATO_BEND_ONLY_DELTA_X256 ||
+            delta >  MIDI_VIBRATO_BEND_ONLY_DELTA_X256) {
+            return false;
+        }
+        if (delta > 0) seen_positive = true;
+        if (delta < 0) seen_negative = true;
+        sum_delta += delta;
+    }
+
+    return (seen_positive && seen_negative) ||
+           (sum_delta >= -TONE_CENTER_WINDOW_X256 && sum_delta <= TONE_CENTER_WINDOW_X256);
+}
+
 static uint8_t __not_in_flash_func(noise_note_for_divisor)(uint8_t channel, uint16_t divisor) {
     uint8_t band;
     uint8_t voice = noise_voice_index(channel);
@@ -392,67 +492,119 @@ static uint8_t __not_in_flash_func(noise_note_for_divisor)(uint8_t channel, uint
     return noise_drum_notes[band][voice];
 }
 
-static void __not_in_flash_func(set_freq)(uint8_t channel, uint16_t freq) {
-    channel_freq[channel] = freq;
-    if (tone_on[channel]) {
-        if (freq < PSG_MIN_FREQ_DIVISOR) {
-            midi_note_off(channel);
-        } else if (channel >= MIDI_CH_NOISE_A) {
-            midi_note_on(channel, noise_note_for_divisor(channel, freq));
-        } else if (freq < 4096) {
-            uint8_t note = psg_freq_table[freq].note;
-            uint8_t current = midi_note[channel];
+static void process_tone_channel(const uint16_t *snapshot, uint8_t voice) {
+    uint8_t channel = MIDI_CH_TONE_A + voice;
+    uint8_t mixer = snapshot[PSG_REG_MIXER] & 0x3Fu;
+    bool tone_enabled = ((mixer & (1u << voice)) == 0);
+    uint16_t period = psg_tone_period(snapshot, voice);
+    uint8_t level = psg_voice_level(snapshot, voice);
+    uint8_t velocity = psg_voice_velocity(snapshot, voice, level);
+    uint16_t fine_note_x256 = psg_freq_table[period].fine_note_x256;
+    uint8_t target_note = psg_freq_table[period].note;
+    uint8_t current_note = midi_note[channel];
+    uint16_t target_wheel = midi_wheel_for_anchor(target_note, fine_note_x256);
+    uint16_t anchor_wheel;
 
-            if (current == note) {
-                // Same MIDI note — just glide the pitch bend smoothly.
-                midi_pitch_bend(channel, psg_freq_table[freq].wheel);
-            } else if (current != 0) {
-                // Different note — check if reachable via pitch bend (±2 semitones).
-                // Avoids note-off/on retrigger gaps on fast arpeggios.
-                int16_t delta = (int16_t)psg_freq_table[freq].fine_note_x256
-                              - (int16_t)(current * 256u);
-                if (delta >= -512 && delta <= 512) {
-                    // Within ±2 semitone bend range — smooth bend, no retrigger.
-                    int32_t wheel = 8192 + (int32_t)delta * 16;
-                    if (wheel < 0) wheel = 0;
-                    if (wheel > 16383) wheel = 16383;
-                    midi_pitch_bend(channel, (uint16_t)wheel);
-                } else {
-                    // Out of bend range — must retrigger with new note.
-                    midi_pitch_bend_force(channel, psg_freq_table[freq].wheel);
-                    midi_note_on(channel, note);
-                }
-            } else {
-                // No note currently playing — start fresh.
-                midi_pitch_bend_force(channel, psg_freq_table[freq].wheel);
-                midi_note_on(channel, note);
-            }
-        }
+    channel_freq[channel] = period;
+    tone_history_push(voice, fine_note_x256);
+
+    if (!tone_enabled || level == 0 || period >= 4096u) {
+        midi_expression_set(channel, 0);
+        midi_note_off(channel);
+        tone_pending_note[voice] = 0;
+        tone_pending_count[voice] = 0;
+        tone_last_period[voice] = period;
+        return;
     }
-}
 
-static void __not_in_flash_func(set_volume)(uint8_t channel, int vol) {
-    // Convert PSG fixed volume (0-15) to MIDI CC#11 using lookup table
-    // that approximates the AY-3-8910's logarithmic 2dB/step DAC.
-    midi_expression_set(channel, psg_vol_to_midi[vol & 0x0F]);
-}
+    midi_expression_set(channel, level);
 
-static void __not_in_flash_func(set_channel_enable)(uint8_t channel, uint8_t new_state) {
-    if (tone_on[channel] != new_state) {
-        tone_on[channel] = new_state;
-        if (new_state) {
-            set_freq(channel, channel_freq[channel]);
+    if (current_note == 0) {
+        midi_note_on_velocity(channel, target_note, velocity);
+        midi_pitch_bend_force(channel, target_wheel);
+        tone_pending_note[voice] = 0;
+        tone_pending_count[voice] = 0;
+        tone_last_period[voice] = period;
+        return;
+    }
+    anchor_wheel = midi_wheel_for_anchor(current_note, fine_note_x256);
+
+    if (current_note == target_note) {
+        tone_pending_note[voice] = 0;
+        tone_pending_count[voice] = 0;
+        midi_pitch_bend(channel, anchor_wheel);
+    } else if (tone_history_indicates_modulation(voice, current_note)) {
+        tone_pending_note[voice] = 0;
+        tone_pending_count[voice] = 0;
+        midi_pitch_bend(channel, anchor_wheel);
+    } else {
+        if (tone_pending_note[voice] != target_note) {
+            tone_pending_note[voice] = target_note;
+            tone_pending_count[voice] = 1;
+        } else if (tone_pending_count[voice] < 255) {
+            tone_pending_count[voice]++;
+        }
+
+        if (tone_pending_count[voice] >= TONE_STABLE_RETRIGGER_FRAMES) {
+            midi_note_on_velocity(channel, target_note, velocity);
+            midi_pitch_bend_force(channel, target_wheel);
+            tone_pending_note[voice] = 0;
+            tone_pending_count[voice] = 0;
         } else {
-            midi_note_off(channel);
+            midi_pitch_bend(channel, anchor_wheel);
+        }
+    }
+
+    tone_last_period[voice] = period;
+}
+
+static void process_tone_bends(const uint16_t *snapshot) {
+    for (uint8_t voice = 0; voice < 3; voice++) {
+        uint8_t channel = MIDI_CH_TONE_A + voice;
+        uint8_t mixer = snapshot[PSG_REG_MIXER] & 0x3Fu;
+        bool tone_enabled = ((mixer & (1u << voice)) == 0);
+        uint16_t period = psg_tone_period(snapshot, voice);
+        uint8_t level = psg_voice_level(snapshot, voice);
+
+        if (!tone_enabled || level == 0 || period >= 4096u || midi_note[channel] == 0) {
+            continue;
+        }
+
+        if (tone_history_indicates_modulation(voice, midi_note[channel])) {
+            midi_pitch_bend(channel, midi_wheel_for_anchor(midi_note[channel], psg_freq_table[period].fine_note_x256));
         }
     }
 }
 
-static void __not_in_flash_func(update_psg_mix)(uint8_t voice) {
-    // Tone and noise are independent — both can be active simultaneously.
-    // Tone voices play on MIDI channels 0-2; noise voices on channel 9.
-    set_channel_enable(MIDI_CH_TONE_A + voice, psg_tone_mix[voice]);
-    set_channel_enable(MIDI_CH_NOISE_A + voice, psg_noise_mix[voice]);
+static void process_noise_channel(const uint16_t *snapshot, uint8_t voice) {
+    uint8_t channel = MIDI_CH_NOISE_A + voice;
+    uint8_t mixer = snapshot[PSG_REG_MIXER] & 0x3Fu;
+    bool noise_enabled = ((mixer & (1u << (voice + 3u))) == 0);
+    uint8_t level = psg_voice_level(snapshot, voice);
+    uint8_t velocity = psg_voice_velocity(snapshot, voice, level);
+    uint16_t divisor = ((snapshot[PSG_REG_NOISE_FREQ] & 0x1Fu) * NOISE_DIVISOR_SCALE) + NOISE_DIVISOR_BIAS;
+    uint8_t note = noise_note_for_divisor(channel, divisor);
+
+    channel_freq[channel] = divisor;
+
+    if (!noise_enabled || level == 0) {
+        midi_note_off(channel);
+        return;
+    }
+
+    if (midi_note[channel] != note) {
+        midi_note_on_velocity(channel, note, velocity);
+    }
+}
+
+static void process_frame(void) {
+    uint16_t snapshot[PSG_REG_COUNT];
+    psg_snapshot_read(snapshot);
+
+    for (uint8_t voice = 0; voice < 3; voice++) {
+        process_tone_channel(snapshot, voice);
+        process_noise_channel(snapshot, voice);
+    }
 }
 
 static void __not_in_flash_func(set_env_speed)(uint16_t val) {
@@ -461,10 +613,10 @@ static void __not_in_flash_func(set_env_speed)(uint16_t val) {
     //   step_rate = PSG_clock / (256 × EP) steps/sec
     // Using the CPU clock convention (2× PSG clock, 512× divider):
     //   step_rate = 3,579,545 / (512 × EP)
-    // Fixed-point speed per tick (16.16), at ENV_TICK_RATE_HZ:
-    //   speed = step_rate × 65536 / ENV_TICK_RATE_HZ
-    //         = 3579545 × 128 / (EP × ENV_TICK_RATE_HZ)
-    uint32_t tmp = 458181760U / (val * ENV_TICK_RATE_HZ);
+    // Fixed-point speed per tick (16.16), at PSG_FRAME_RATE_HZ:
+    //   speed = step_rate × 65536 / PSG_FRAME_RATE_HZ
+    //         = 3579545 × 128 / (EP × PSG_FRAME_RATE_HZ)
+    uint32_t tmp = 458181760U / (val * PSG_FRAME_RATE_HZ);
     if (tmp > PSG_MAX_ENVSPEED) {
         soundenvspeed_toolarge = (int)(tmp - PSG_MAX_ENVSPEED);
         tmp = PSG_MAX_ENVSPEED;
@@ -482,28 +634,26 @@ static void __not_in_flash_func(psg_write)(uint8_t reg, uint8_t value) {
 
     uint16_t v = value;
 
+    psg_reg_seq++;
+    __dmb();
+
     switch (reg) {
         case PSG_REG_FREQ_A_LO:
         case PSG_REG_FREQ_B_LO:
         case PSG_REG_FREQ_C_LO:
-            // Low byte of frequency — combine with high byte
-            set_freq((reg >> 1) + MIDI_CH_TONE_A, v + (psg_reg[reg + 1] << 8));
+            // Tone period low byte.
             break;
 
         case PSG_REG_FREQ_A_HI:
         case PSG_REG_FREQ_B_HI:
         case PSG_REG_FREQ_C_HI:
-            // High byte of frequency (4 bits) — combine with low byte
+            // Tone period high byte (4 bits)
             v &= 0x0F;
-            set_freq((reg >> 1) + MIDI_CH_TONE_A, (v << 8) + psg_reg[reg - 1]);
             break;
 
         case PSG_REG_NOISE_FREQ:
-            // Noise frequency — set for all 3 noise channels
+            // Noise frequency divisor (5 bits)
             v &= 0x1F;
-            set_freq(MIDI_CH_NOISE_A, v * 8 + 16);
-            set_freq(MIDI_CH_NOISE_B, v * 8 + 16);
-            set_freq(MIDI_CH_NOISE_C, v * 8 + 16);
             break;
 
         case PSG_REG_MIXER:
@@ -514,9 +664,6 @@ static void __not_in_flash_func(psg_write)(uint8_t reg, uint8_t value) {
             psg_noise_mix[0] = (v & 0x08) ? 0 : 1;
             psg_noise_mix[1] = (v & 0x10) ? 0 : 1;
             psg_noise_mix[2] = (v & 0x20) ? 0 : 1;
-            update_psg_mix(0);
-            update_psg_mix(1);
-            update_psg_mix(2);
             break;
 
         case PSG_REG_VOL_A:
@@ -528,19 +675,16 @@ static void __not_in_flash_func(psg_write)(uint8_t reg, uint8_t value) {
             if ((v & 0x10) == 0) {
                 // Fixed volume mode
                 usesoundenv[ch_idx] = 0;
-                set_volume(ch_idx + MIDI_CH_TONE_A, v & 0x0F);
-                set_volume(ch_idx + MIDI_CH_NOISE_A, v & 0x0F);
+                env_level[ch_idx] = psg_vol_to_midi[v & 0x0F];
             } else {
                 // Envelope mode — initialize envelope counter
                 usesoundenv[ch_idx] = 1;
                 soundenvcounter[ch_idx] = 0;
-                // Set initial volume based on envelope attack direction
+                // Set initial volume based on envelope attack direction.
                 if (soundenv & 4) {
-                    set_volume(ch_idx + MIDI_CH_TONE_A, 1);
-                    set_volume(ch_idx + MIDI_CH_NOISE_A, 1);
+                    env_level[ch_idx] = env_vol_to_midi[0];
                 } else {
-                    set_volume(ch_idx + MIDI_CH_TONE_A, 15);
-                    set_volume(ch_idx + MIDI_CH_NOISE_A, 15);
+                    env_level[ch_idx] = env_vol_to_midi[31];
                 }
             }
             break;
@@ -563,16 +707,19 @@ static void __not_in_flash_func(psg_write)(uint8_t reg, uint8_t value) {
             for (int i = 0; i < 3; i++) {
                 if (usesoundenv[i]) {
                     soundenvcounter[i] = 0;
+                    env_level[i] = (soundenv & 4) ? env_vol_to_midi[0] : env_vol_to_midi[31];
                 }
             }
             break;
     }
 
     psg_reg[reg] = v;
+    __dmb();
+    psg_reg_seq++;
 }
 
 // -----------------------------------------------------------------------
-// Envelope processor — called periodically from Core 1 (~200 Hz)
+// Envelope processor — called periodically from Core 1 (~50 Hz)
 // Simulates the AY-3-8910/YM2149 hardware envelope generator.
 //
 // The hardware uses a 5-bit counter (0-31) per ramp, giving 32 steps.
@@ -662,18 +809,11 @@ static void envelope_tick(void) {
         }
 
         if (hold_max) {
-            // Shapes 11, 13: hold at maximum volume after ramp
-            midi_expression_set(i + MIDI_CH_TONE_A, 127);
-            midi_expression_set(i + MIDI_CH_NOISE_A, 127);
+            env_level[i] = 127;
         } else if (volume > 0 || usesoundenv[i]) {
-            uint8_t cc = env_vol_to_midi[volume & 31];
-            midi_expression_set(i + MIDI_CH_TONE_A, cc);
-            midi_expression_set(i + MIDI_CH_NOISE_A, cc);
+            env_level[i] = env_vol_to_midi[volume & 31];
         } else {
-            midi_expression_set(i + MIDI_CH_TONE_A, 0);
-            midi_expression_set(i + MIDI_CH_NOISE_A, 0);
-            midi_note_off(i + MIDI_CH_TONE_A);
-            midi_note_off(i + MIDI_CH_NOISE_A);
+            env_level[i] = 0;
         }
     }
 }
@@ -787,32 +927,6 @@ static void midi_send_sysex_gm_on(void) {
 }
 
 // -----------------------------------------------------------------------
-// Bass-detection tick — runs at ENV_TICK_RATE_HZ from Core 1.
-// If a tone channel sustains notes below C3 for ~200 ms, switch to a
-// bass program. If it rises above C3 for ~200 ms, switch back.
-// -----------------------------------------------------------------------
-static void bass_detect_tick(void) {
-    for (int i = 0; i < 3; i++) {
-        uint8_t ch = MIDI_CH_TONE_A + i;
-        if (midi_note[ch] > 0 && midi_note[ch] < BASS_NOTE_THRESHOLD) {
-            if (bass_detect_counter[i] < BASS_DETECT_TICKS)
-                bass_detect_counter[i]++;
-        } else {
-            if (bass_detect_counter[i] > -BASS_DETECT_TICKS)
-                bass_detect_counter[i]--;
-        }
-
-        if (!bass_mode[i] && bass_detect_counter[i] >= BASS_DETECT_TICKS) {
-            bass_mode[i] = 1;
-            midi_program_set(ch, MIDIPAC_BASS_PROG);
-        } else if (bass_mode[i] && bass_detect_counter[i] <= -BASS_DETECT_TICKS) {
-            bass_mode[i] = 0;
-            midi_program_set(ch, channel_default_prog[i]);
-        }
-    }
-}
-
-// -----------------------------------------------------------------------
 // Silence detection — runs at ENV_TICK_RATE_HZ from Core 1.
 // If all channels are silent for >100 ms, send All Sound Off (CC#120)
 // on all MIDI channels to clear any stuck notes on the target module.
@@ -848,29 +962,31 @@ static void midi_init_channels(void) {
     // Send GM System On to reset the module to a known state.
     midi_send_sysex_gm_on();
 
-    // Send per-channel program changes for tone channels.
-    for (int i = MIDI_CH_TONE_A; i <= MIDI_CH_TONE_C; i++) {
-        midi_program_set(i, channel_default_prog[i]);
+    // Use brighter lead patches and a light stereo/ambience spread so the
+    // three PSG tone voices feel more vivid without changing the note logic.
+    for (int i = 0; i < 3; i++) {
+        midi_program_set(MIDI_CH_TONE_A + i, tone_program[i]);
     }
 
-    // Reset bass detection so channels start with their default programs.
-    memset((void *)bass_detect_counter, 0, sizeof(bass_detect_counter));
-    memset((void *)bass_mode, 0, sizeof(bass_mode));
-
-    // Set a fuller SC-55 mix: fixed channel volume, stereo pan, light ambience.
     for (int i = 0; i < MIDI_CH_COUNT; i++) {
-        midi_send_3(0xB0 | i, 7, channel_volume[i]);   // CC#7 Channel Volume
-        midi_send_3(0xB0 | i, 10, channel_pan[i]);     // CC#10 Pan
-        midi_send_3(0xB0 | i, 91, channel_reverb[i]);  // CC#91 Reverb Send
-        midi_send_3(0xB0 | i, 93, channel_chorus[i]);  // CC#93 Chorus Send
-        midi_send_3(0xB0 | i, 11, 0);                  // CC#11 Expression
-        midi_expr[i] = 0;
+        midi_send_3(0xB0 | i, 7, 127);  // CC#7 Channel Volume
+        midi_send_3(0xB0 | i, 10, 64);  // CC#10 default center
+        midi_send_3(0xB0 | i, 91, 0);   // CC#91 default dry
+        midi_send_3(0xB0 | i, 93, 0);   // CC#93 default no chorus
+        midi_send_3(0xB0 | i, 11, 127); // CC#11 Expression full scale
+        midi_expr[i] = 127;
     }
 
-    midi_send_3(0xB0 | MIDI_DRUM_CH, 7, 52);    // Channel 10 drum balance
-    midi_send_3(0xB0 | MIDI_DRUM_CH, 10, 64);   // Center pan for percussion
-    midi_send_3(0xB0 | MIDI_DRUM_CH, 91, 2);    // Keep drum tail short
-    midi_send_3(0xB0 | MIDI_DRUM_CH, 93, 0);    // No chorus on drums
+    for (int i = 0; i < 3; i++) {
+        midi_send_3(0xB0 | (MIDI_CH_TONE_A + i), 10, tone_pan[i]);
+        midi_send_3(0xB0 | (MIDI_CH_TONE_A + i), 91, tone_reverb[i]);
+        midi_send_3(0xB0 | (MIDI_CH_TONE_A + i), 93, tone_chorus[i]);
+    }
+
+    midi_send_3(0xB0 | MIDI_DRUM_CH, 7, 84);   // Keep rhythm present but lift the melodic voices forward
+    midi_send_3(0xB0 | MIDI_DRUM_CH, 10, 64);  // Center pan for percussion
+    midi_send_3(0xB0 | MIDI_DRUM_CH, 91, 0);   // Keep drums dry
+    midi_send_3(0xB0 | MIDI_DRUM_CH, 93, 0);   // No chorus on drums
 
     // Set pitch bend range to ±2 semitones (RPN 0, Data Entry)
     // This matches the PSG frequency table's pitch wheel sensitivity
@@ -891,7 +1007,8 @@ static void core1_entry(void) {
     tuh_init(0);
 
     bool init_sent = false;
-    absolute_time_t next_env_tick = get_absolute_time();
+    absolute_time_t next_frame_tick = get_absolute_time();
+    absolute_time_t next_bend_tick = get_absolute_time();
     absolute_time_t next_midi_tx_tick = get_absolute_time();
 
     while (true) {
@@ -926,12 +1043,19 @@ static void core1_entry(void) {
 
         midi_flush_deferred_tone_controls(time_us_32());
 
-        // Run envelope processor + bass detection + silence check at ~200 Hz
-        if (absolute_time_diff_us(next_env_tick, now) >= 0) {
+        if (absolute_time_diff_us(next_bend_tick, now) >= 0) {
+            uint16_t snapshot[PSG_REG_COUNT];
+            psg_snapshot_read(snapshot);
+            process_tone_bends(snapshot);
+            next_bend_tick = delayed_by_us(next_bend_tick, PSG_BEND_TICK_US);
+        }
+
+        // Process PSG state once per frame and keep envelope dynamics aligned.
+        if (absolute_time_diff_us(next_frame_tick, now) >= 0) {
             envelope_tick();
-            bass_detect_tick();
+            process_frame();
             silence_detect_tick();
-            next_env_tick = delayed_by_us(next_env_tick, ENV_TICK_US);
+            next_frame_tick = delayed_by_us(next_frame_tick, PSG_FRAME_TICK_US);
         }
     }
 }
@@ -952,7 +1076,6 @@ int main(void) {
     memset((void *)midi_note, 0, sizeof(midi_note));
     memset((void *)midi_program, 0xFF, sizeof(midi_program));
     memset((void *)midi_expr, 0, sizeof(midi_expr));
-    memset((void *)tone_on, 0, sizeof(tone_on));
     memset((void *)psg_tone_mix, 0, sizeof(psg_tone_mix));
     memset((void *)psg_noise_mix, 0, sizeof(psg_noise_mix));
     memset((void *)midi_pitchbend_pending, 0, sizeof(midi_pitchbend_pending));
@@ -961,6 +1084,12 @@ int main(void) {
     memset((void *)midi_expr_dirty, 0, sizeof(midi_expr_dirty));
     memset((void *)midi_pitchbend_last_us, 0, sizeof(midi_pitchbend_last_us));
     memset((void *)midi_expr_last_us, 0, sizeof(midi_expr_last_us));
+    memset((void *)tone_last_period, 0, sizeof(tone_last_period));
+    memset((void *)env_level, 0, sizeof(env_level));
+    memset((void *)tone_note_history, 0, sizeof(tone_note_history));
+    memset((void *)tone_note_history_count, 0, sizeof(tone_note_history_count));
+    memset((void *)tone_pending_note, 0, sizeof(tone_pending_note));
+    memset((void *)tone_pending_count, 0, sizeof(tone_pending_count));
     for (int i = 0; i < MIDI_CH_COUNT; i++)
         midi_pitchbend[i] = 8192;
     soundenv = 0;
@@ -968,8 +1097,7 @@ int main(void) {
     soundenvspeed_toolarge = 0;
     memset((void *)usesoundenv, 0, sizeof(usesoundenv));
     memset((void *)soundenvcounter, 0, sizeof(soundenvcounter));
-    memset((void *)bass_detect_counter, 0, sizeof(bass_detect_counter));
-    memset((void *)bass_mode, 0, sizeof(bass_mode));
+    psg_reg_seq = 0;
     all_silent_since_us = 0;
     all_sound_off_sent = 0;
 

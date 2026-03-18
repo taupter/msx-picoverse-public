@@ -108,9 +108,9 @@
 // MIDI program numbers (General MIDI)
 // -----------------------------------------------------------------------
 #define MIDIPAC_MELODIC_PROG     80  // Square Lead (GM #81)
-#define MIDIPAC_MELODIC_PROG_A   80  // Square Lead (GM #81) — channel A default
-#define MIDIPAC_MELODIC_PROG_B   81  // Saw Lead (GM #82)    — channel B default
-#define MIDIPAC_BASS_PROG        38  // Synth Bass 1 (GM #39) — adaptive bass
+#define MIDIPAC_MELODIC_PROG_A   80  // Square Lead (GM #81)
+#define MIDIPAC_MELODIC_PROG_B   80  // Square Lead (GM #81)
+#define MIDIPAC_MELODIC_PROG_C   80  // Square Lead (GM #81)
 
 // -----------------------------------------------------------------------
 // PSG frequency table: maps 12-bit PSG divisor to MIDI note + pitch wheel

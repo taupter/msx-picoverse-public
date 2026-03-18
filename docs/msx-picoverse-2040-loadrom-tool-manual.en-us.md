@@ -155,14 +155,13 @@ Tags are case-insensitive. If no valid tag is present, the tool falls back to he
 
 The MIDI-PAC firmware includes a sophisticated PSG-to-MIDI conversion layer optimized for pleasant musical output on General MIDI modules:
 
-- **Tone+Noise Coexistence**: Both PSG tone and noise can play simultaneously on the same voice, mapping to melody (MIDI channels 0–2) and percussion (MIDI channel 9) respectively. This recreates complex PSG effects and explosions that would otherwise be lost.
-- **Smooth Pitch Bending**: Fast note transitions within ±2 semitones use smooth pitch bending instead of note retrigger, eliminating audible gaps during arpeggios and chromatic runs.
-- **High-Resolution Envelopes**: Envelope processing runs at 200 Hz (4× the previous rate), providing smooth, detailed dynamics for tremolo and percussive shapes.
-- **Automatic Bass Detection**: Tone channels automatically switch to bass instruments when sustaining low notes (below MIDI C3) for extended periods, creating a richer harmonic arrangement.
-- **Per-Channel Instruments**: Channel A and C use Square Lead (GM #81), Channel B uses Saw Lead (GM #82), and automatic bass switching chooses Synth Bass (GM #39) when needed.
-- **Enhanced Noise Mapping**: Noise frequencies map to 6 bands of GM percussion (hi-hats, snares, toms, bass drums) rather than fixed drum notes, providing more musically appropriate sound effects.
-- **Improved Dynamics**: Volume and velocity curves are tuned for balanced audibility across the dynamic range, with stronger low-level presence and controlled attack dynamics.
-- **SC-55 Tuning**: Sends GM System On at startup, configures CC#7/CC#11 expression controls, manages pan/reverb/chorus per channel, and limits MIDI byte rate to match standard wire speed (31,250 baud).
+- **Frame-Based PSG Interpretation**: PSG state is evaluated from coherent 50 Hz snapshots rather than directly from every register write, which reduces false notes caused by partially-updated tone registers.
+- **Smooth Pitch Bending**: A separate 200 Hz bend pass keeps short modulation and vibrato on the current note instead of retriggering constantly.
+- **Stable Note-Center Detection**: Tone channels keep a short recent pitch history and only commit to a new note after the new pitch center remains stable for several frames. This improves Compile-style modulation loops used by games like Zanac.
+- **Unified Square Lead Voicing**: All three melodic channels use Square Lead (GM #81), keeping the output close to PSG character and avoiding distracting per-note patch switching.
+- **Enhanced Noise Mapping**: Noise frequencies map to 6 bands of GM percussion (hi-hats, snares, toms, bass drums) rather than fixed drum notes, providing more musically appropriate rhythm and sound effects.
+- **Improved Dynamics**: Volume and velocity curves are tuned for balanced audibility across the dynamic range, with stronger low-level presence and the melodic channels kept slightly ahead of channel 10.
+- **SC-55 Tuning**: Sends GM System On at startup, configures pitch bend sensitivity, uses a narrow stereo placement for the melodic channels, keeps the tone path dry, and limits MIDI byte rate to match standard wire speed (31,250 baud).
 - **Silence Detection**: Automatically sends All Sound Off (CC#120) after 100+ ms of silence to prevent stuck notes on the MIDI device.
 
 See [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) for in-depth documentation on architecture, conversion algorithms, and limitations.
@@ -232,9 +231,11 @@ The USB keyboard firmware (option `-k`) with the PPI rephase has been tested on 
 
 Note: The keyboard firmware is not compatible with FPGA-based MSX implementations due to bus contention issues. It is designed for and tested on original MSX hardware only.
 
-| Model | Type | Status | Comments |
-| --- | --- | --- | --- |
-| Sharp HotBit HB8000 | MSX1 | OK | Verified operation |
+| Model | Type | Keyboard | Status | Comments |
+| --- | --- | --- | --- | --- |
+| Sharp HotBit HB8000 | MSX1 | Reddragon Kumara | OK | Verified operation |
+| Sharp HotBit HB8000 | MSX1 | Reddragon Fizz | OK | Verified operation |
+| Sharp HotBit HB8000 | MSX1 | Ajazz | OK | Verified operation |
 
 
 The MSX-MIDI firmware (option `-i`) has been tested on the following MSX models:
@@ -248,11 +249,11 @@ The MIDI-PAC firmware (option `-p`) has been tested on the following MSX models 
 
 | MSX Model | Type | Status | MIDI Devices | Comments |
 | --- | --- | --- | --- | --- |
-| TRHMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh) | Verified PSG-to-MIDI conversion, tone+noise coexistence, envelope smoothness |
-| uMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh) | Verified operation; envelope and pitch bend quality confirmed |
+| TRHMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh) | Verified frame-based PSG-to-MIDI conversion, stable vibrato handling, and 6-band percussion mapping |
+| uMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh) | Verified operation; note-center stability and pitch-bend behavior confirmed |
 
-Note: MIDI-PAC has been tested with games heavy in melody, arpeggios, envelopes, and percussion. Best results on General MIDI-compatible devices; module-specific voicing is optimized for Roland Sound Canvas class modules (SC-55, SC-88, etc.).
+Note: MIDI-PAC has been tested with games heavy in melody, modulation loops, arpeggios, envelopes, and percussion. Best results on General MIDI-compatible devices; the current voicing is optimized for Roland Sound Canvas class modules (SC-55, SC-88, etc.) while keeping the three melodic channels slightly forward relative to channel 10.
 
 
 Author: Cristiano Almeida Goncalves
-Last updated: 03/08/2026
+Last updated: 03/17/2026
