@@ -1,0 +1,16 @@
+ASCII16-X: emulate AMD flash byte-program and sector-erase commands
+
+Some ASCII16-X ROMs (e.g. Neon Horizon) detect the cartridge by writing
+a flash byte-program sequence (AA/55/A0) and verifying the result. The
+mapper handler only processed bank-register writes, so flash command
+writes were silently dropped and detection failed.
+
+Add a flash_cmd_state_t state machine to the cached ASCII16-X handler
+that tracks AMD unlock sequences and emulates:
+- Byte program (A0h): AND-masks data into the SRAM cache slot
+- Sector erase (80h+30h): fills the cache slot with FFh
+- Reset to read mode (F0h)
+
+All writes are fed through flash_process_write() before bank-register
+processing. The read path is unchangedGÇöno performance impact.
+
