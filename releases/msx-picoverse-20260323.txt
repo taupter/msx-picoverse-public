@@ -1,0 +1,4 @@
+* MegaMappers cache implementation.
+* ASCII16-X fix to support NOP ASTEROIDS.
+* Documentation update
+
