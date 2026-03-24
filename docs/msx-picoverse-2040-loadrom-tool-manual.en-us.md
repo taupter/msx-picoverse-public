@@ -225,12 +225,13 @@ Note: The keyboard firmware is not compatible with FPGA-based MSX implementation
 
 | Model | Type | Status | Comments |
 | --- | --- | --- | --- | --- |
-|Gradiente Expert | MSX1 | OK | Verified operation |
+| Canon V20 | MSX1 | OK | Verified operation |
+| Gradiente Expert | MSX1 | OK | Verified operation |
 | Panasonic FS-A1FX | MSX2+ | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
 | Panasonic FS-A1GT | TurboR | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
 | Panasonic FS-A1ST | TurboR | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
 | Sharp HotBit HB8000 | MSX1 | OK | Verified operation |
-|Sony HB-101P| MSX1 | OK | Verified operation |
+| Sony HB-101P| MSX1 | OK | Verified operation |
 
 The MSX-MIDI firmware (option `-i`) has been tested on the following MSX models:
 

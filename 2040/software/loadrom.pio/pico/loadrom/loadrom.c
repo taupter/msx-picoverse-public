@@ -931,17 +931,135 @@ static inline void __not_in_flash_func(bcache_prefill)(bank_cache_t *c)
         bcache_ensure(c, b);
 }
 
+// -----------------------------------------------------------------------
+// AMD-compatible flash command emulation for ASCII16-X
+// -----------------------------------------------------------------------
+// Real ASCII16-X cartridges use AMD/SST-compatible flash chips.  Some
+// ROMs detect the cartridge by issuing a flash byte-program command and
+// verifying the write.  Others use flash for persistent save data.
+//
+// The state machine below intercepts the standard AMD unlock + command
+// sequences and emulates byte-program and sector-erase by modifying the
+// SRAM bank cache directly.  This makes the programmed/erased data
+// immediately visible on subsequent reads without any change to the fast
+// read path.
+//
+// Flash command addresses use the lower 12 bits: 0xAAA and 0x555,
+// matching the convention used by common flash chips (AM29F040,
+// MX29LV640, SST39SF040, etc.).
+
+typedef enum {
+    FLASH_IDLE = 0,       // Normal read mode
+    FLASH_UNLOCK1,        // Received AAh at *AAAh
+    FLASH_UNLOCK2,        // Received 55h at *555h
+    FLASH_BYTE_PGM,       // Received A0h at *AAAh – next write programs
+    FLASH_ERASE_SETUP,    // Received 80h at *AAAh – awaiting second unlock
+    FLASH_ERASE_UNLOCK1,  // Received AAh at *AAAh (second unlock cycle)
+    FLASH_ERASE_UNLOCK2,  // Received 55h at *555h (second unlock cycle)
+} flash_cmd_state_t;
+
 typedef struct {
-    uint16_t     bank_regs[2];
-    bank_cache_t cache;
+    uint16_t         bank_regs[2];
+    bank_cache_t     cache;
+    flash_cmd_state_t flash_state;
 } ascii16x_state_t;
+
+// Process a bus write through the AMD flash command state machine.
+// On byte-program completion the target byte in the SRAM cache is
+// AND-masked with the written value (flash can only clear bits).
+// On sector-erase the entire cache slot is filled with FFh.
+static inline void __not_in_flash_func(flash_process_write)(
+    ascii16x_state_t *st, uint16_t addr, uint8_t data)
+{
+    uint16_t cmd_addr = addr & 0x0FFFu;
+
+    switch (st->flash_state)
+    {
+        case FLASH_IDLE:
+            if (cmd_addr == 0x0AAAu && data == 0xAAu)
+                st->flash_state = FLASH_UNLOCK1;
+            else if (data == 0xF0u)
+                st->flash_state = FLASH_IDLE;  // Reset to read mode
+            break;
+
+        case FLASH_UNLOCK1:
+            if (cmd_addr == 0x0555u && data == 0x55u)
+                st->flash_state = FLASH_UNLOCK2;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+
+        case FLASH_UNLOCK2:
+            if (cmd_addr == 0x0AAAu)
+            {
+                switch (data)
+                {
+                    case 0xA0u: st->flash_state = FLASH_BYTE_PGM;    break;
+                    case 0x80u: st->flash_state = FLASH_ERASE_SETUP;  break;
+                    default:    st->flash_state = FLASH_IDLE;         break;
+                }
+            }
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+
+        case FLASH_BYTE_PGM:
+        {
+            // Program one byte: flash can only clear bits (AND-mask).
+            uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+            int8_t slot = st->cache.page_slot[page_idx];
+            if (slot >= 0)
+            {
+                uint32_t off = (uint32_t)slot * st->cache.slot_size
+                             + (addr & 0x3FFFu);
+                rom_sram[off] &= data;
+            }
+            st->flash_state = FLASH_IDLE;
+            break;
+        }
+
+        case FLASH_ERASE_SETUP:
+            if (cmd_addr == 0x0AAAu && data == 0xAAu)
+                st->flash_state = FLASH_ERASE_UNLOCK1;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+
+        case FLASH_ERASE_UNLOCK1:
+            if (cmd_addr == 0x0555u && data == 0x55u)
+                st->flash_state = FLASH_ERASE_UNLOCK2;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+
+        case FLASH_ERASE_UNLOCK2:
+            if (data == 0x30u)
+            {
+                // Sector erase: fill the mapped cache slot with FFh.
+                uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+                int8_t slot = st->cache.page_slot[page_idx];
+                if (slot >= 0)
+                    memset(&rom_sram[(uint32_t)slot * st->cache.slot_size],
+                           0xFFu, st->cache.slot_size);
+            }
+            st->flash_state = FLASH_IDLE;
+            break;
+    }
+}
 
 // Cached ASCII16-X write handler.
 // On every bank-register write the corresponding cache slot is ensured,
 // so the read path never touches flash.
+// All writes are also fed through the flash command state machine so that
+// AMD byte-program and sector-erase sequences are emulated.
 static inline void __not_in_flash_func(handle_ascii16x_write_cached)(uint16_t addr, uint8_t data, void *ctx)
 {
     ascii16x_state_t *st = (ascii16x_state_t *)ctx;
+
+    // Feed every write to the flash command state machine.
+    flash_process_write(st, addr, data);
+
+    // Bank register processing.
     uint8_t high_nibble = (uint8_t)((addr >> 8) & 0x0Fu);
     uint16_t bank = ((uint16_t)high_nibble << 8) | data;
     uint8_t page;
