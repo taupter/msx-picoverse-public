@@ -782,7 +782,181 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
     }
 }
 
+// Generic mapper-aware LRU bank cache
 // -----------------------------------------------------------------------
+// Divides the 192KB SRAM pool into fixed-size slots matching the mapper's
+// bank size.  Two configurations are used:
+//
+//   16KB slots → 12 slots  (ASCII16-X, NEO16)
+//    8KB slots → 24 slots  (NEO8)
+//
+// LRU eviction ensures pinned banks (those mapped to active pages) are
+// never evicted.  On a bank-register write the handler ensures the new
+// bank is resident; flash is only accessed on a cache miss.  The read
+// path then always hits SRAM, keeping /WAIT hold time minimal.
+
+#define BANK_CACHE_MAX_SLOTS 24   // max slots (192KB / 8KB)
+#define BANK_CACHE_MAX_PINS   6   // max simultaneously pinned pages
+#define BANK_EMPTY           0xFFFFu
+
+typedef struct {
+    uint16_t      slot_bank[BANK_CACHE_MAX_SLOTS]; // bank loaded per slot
+    uint8_t       slot_lru[BANK_CACHE_MAX_SLOTS];  // LRU counter (0 = MRU)
+    int8_t        page_slot[BANK_CACHE_MAX_PINS];  // slot pinned per page
+    const uint8_t *flash_base;
+    uint32_t      rom_length;
+    uint8_t       num_slots;    // actual slot count
+    uint8_t       num_pins;     // active pinned pages
+    uint16_t      slot_size;    // bytes per slot (8192 or 16384)
+    uint8_t       slot_shift;   // log2(slot_size): 13 or 14
+} bank_cache_t;
+
+static inline void __not_in_flash_func(bcache_init)(
+    bank_cache_t *c, uint16_t slot_size, uint8_t num_pins,
+    const uint8_t *flash_base, uint32_t rom_length)
+{
+    uint8_t num_slots = (uint8_t)(CACHE_SIZE / slot_size);
+    c->num_slots  = num_slots;
+    c->num_pins   = num_pins;
+    c->slot_size  = slot_size;
+    c->slot_shift = (slot_size == 8192u) ? 13 : 14;
+    c->flash_base = flash_base;
+    c->rom_length = rom_length;
+    for (int i = 0; i < BANK_CACHE_MAX_SLOTS; i++)
+    {
+        c->slot_bank[i] = BANK_EMPTY;
+        c->slot_lru[i]  = (uint8_t)i;
+    }
+    for (int i = 0; i < BANK_CACHE_MAX_PINS; i++)
+        c->page_slot[i] = -1;
+}
+
+// Promote a slot to MRU.
+static inline void __not_in_flash_func(bcache_touch)(bank_cache_t *c, int8_t slot)
+{
+    uint8_t prev = c->slot_lru[slot];
+    if (prev == 0) return;
+    uint8_t n = c->num_slots;
+    for (uint8_t i = 0; i < n; i++)
+        if (c->slot_lru[i] < prev) c->slot_lru[i]++;
+    c->slot_lru[slot] = 0;
+}
+
+// Find the slot holding a given bank, or -1.
+static inline int8_t __not_in_flash_func(bcache_find)(bank_cache_t *c, uint16_t bank)
+{
+    uint8_t n = c->num_slots;
+    for (uint8_t i = 0; i < n; i++)
+        if (c->slot_bank[i] == bank) return (int8_t)i;
+    return -1;
+}
+
+// Pick a victim slot (highest LRU counter, not pinned).
+static inline int8_t __not_in_flash_func(bcache_evict)(bank_cache_t *c)
+{
+    int8_t best = -1;
+    uint8_t best_lru = 0;
+    uint8_t n = c->num_slots;
+    uint8_t np = c->num_pins;
+    for (uint8_t i = 0; i < n; i++)
+    {
+        bool pinned = false;
+        for (uint8_t p = 0; p < np; p++)
+            if ((int8_t)i == c->page_slot[p]) { pinned = true; break; }
+        if (pinned) continue;
+        if (best < 0 || c->slot_lru[i] >= best_lru)
+        {
+            best = (int8_t)i;
+            best_lru = c->slot_lru[i];
+        }
+    }
+    return best;
+}
+
+// Ensure a bank is resident; returns its slot index.
+static inline int8_t __not_in_flash_func(bcache_ensure)(bank_cache_t *c, uint16_t bank)
+{
+    // Normalize bank number modulo ROM size so out-of-range banks wrap
+    // around, matching real hardware mirror behaviour.  Without this,
+    // games that use address bits A8-A11 for extended bank numbers (e.g.
+    // ASCII16-X) can produce bank numbers beyond the physical ROM and
+    // get 0xFF instead of mirrored data.
+    if (c->rom_length > 0u)
+    {
+        uint16_t total_banks = (uint16_t)(c->rom_length >> c->slot_shift);
+        if (total_banks > 0u)
+            bank = bank % total_banks;
+    }
+
+    int8_t slot = bcache_find(c, bank);
+    if (slot >= 0) { bcache_touch(c, slot); return slot; }
+
+    slot = bcache_evict(c);
+    uint32_t src_off = (uint32_t)(bank & 0x0FFFu) << c->slot_shift;
+    uint8_t *dst = &rom_sram[(uint32_t)slot * c->slot_size];
+    uint16_t ss = c->slot_size;
+
+    // rom_length == 0 means "unknown / unlimited" (matches the convention
+    // used by the non-cached read path).  Always copy from flash in that
+    // case.  When rom_length is known and the bank lies beyond the ROM,
+    // fill the slot with 0xFF.
+    if (c->rom_length == 0u || src_off < c->rom_length)
+    {
+        uint32_t n = ss;
+        if (c->rom_length > 0u && src_off + n > c->rom_length)
+            n = c->rom_length - src_off;
+        memcpy(dst, c->flash_base + src_off, n);
+        if (n < ss) memset(dst + n, 0xFFu, ss - n);
+    }
+    else
+    {
+        memset(dst, 0xFFu, ss);
+    }
+
+    c->slot_bank[slot] = bank;
+    bcache_touch(c, slot);
+    return slot;
+}
+
+// Pre-fill the cache with the first N banks of the ROM.
+static inline void __not_in_flash_func(bcache_prefill)(bank_cache_t *c)
+{
+    uint16_t max_banks = c->num_slots;
+    if (c->rom_length > 0u)
+    {
+        uint16_t rom_banks = (uint16_t)((c->rom_length + c->slot_size - 1u) / c->slot_size);
+        if (rom_banks < max_banks) max_banks = rom_banks;
+    }
+    for (uint16_t b = 0; b < max_banks; b++)
+        bcache_ensure(c, b);
+}
+
+typedef struct {
+    uint16_t     bank_regs[2];
+    bank_cache_t cache;
+} ascii16x_state_t;
+
+// Cached ASCII16-X write handler.
+// On every bank-register write the corresponding cache slot is ensured,
+// so the read path never touches flash.
+static inline void __not_in_flash_func(handle_ascii16x_write_cached)(uint16_t addr, uint8_t data, void *ctx)
+{
+    ascii16x_state_t *st = (ascii16x_state_t *)ctx;
+    uint8_t high_nibble = (uint8_t)((addr >> 8) & 0x0Fu);
+    uint16_t bank = ((uint16_t)high_nibble << 8) | data;
+    uint8_t page;
+
+    switch (addr & 0xF000u)
+    {
+        case 0x2000u: case 0x6000u: case 0xA000u: case 0xE000u: page = 0; break;
+        case 0x3000u: case 0x7000u: case 0xB000u: case 0xF000u: page = 1; break;
+        default: return;
+    }
+
+    st->bank_regs[page] = bank;
+    st->cache.page_slot[page] = bcache_ensure(&st->cache, bank);
+}
+
 // loadrom_ascii16x - ASCII16-X mapper
 // -----------------------------------------------------------------------
 // Two 16KB banks mirrored to all four 16KB address quadrants:
@@ -796,61 +970,138 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
 // Bank number is 12-bit:
 //   bits 0-7 from data bus (D0-D7)
 //   bits 8-11 from address lines A8-A11
+//
+// Uses a mapper-aware 12-slot LRU cache so every read is served from
+// SRAM.  Flash is only accessed during bank-switch cache misses.
 void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable)
 {
-    uint16_t bank_registers[2] = {0, 0};
-    const uint8_t *rom_base;
-    uint32_t available_length;
-    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+    (void)cache_enable;
+
+    ascii16x_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    bcache_init(&state.cache, 16384u, 2, rom + offset, active_rom_size);
+    bcache_prefill(&state.cache);
+
+    // Both pages start at bank 0 after reset
+    state.cache.page_slot[0] = bcache_find(&state.cache, 0);
+    state.cache.page_slot[1] = state.cache.page_slot[0];
 
     msx_pio_bus_init();
 
-    bank16_ctx_t ctx = { .bank_regs = bank_registers };
-
     while (true)
     {
-        pio_drain_writes(handle_ascii16x_write, &ctx);
+        pio_drain_writes(handle_ascii16x_write_cached, &state);
 
         uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
 
-        pio_drain_writes(handle_ascii16x_write, &ctx);
+        pio_drain_writes(handle_ascii16x_write_cached, &state);
 
-        // ASCII16-X maps ROM in all 4 quadrants via mirrored 16KB pages.
-        bool in_window = true;
+        // ASCII16-X mirrors ROM across all 4 quadrants.
+        // Bit 14 selects the page: 1 = page 1 (regs[0]), 0 = page 2 (regs[1]).
         uint8_t data = 0xFFu;
-        uint8_t page_sel = (uint8_t)((addr >> 14) & 0x01u); // 1=page1, 0=page2
-        uint16_t bank = page_sel ? bank_registers[0] : bank_registers[1];
-        uint32_t rel = ((uint32_t)(bank & 0x0FFFu) << 14) | (addr & 0x3FFFu);
+        uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+        int8_t slot = state.cache.page_slot[page_idx];
 
-        if (available_length == 0u || rel < available_length)
-            data = read_rom_byte(rom_base, rel);
+        if (slot >= 0)
+            data = rom_sram[(uint32_t)slot * state.cache.slot_size + (addr & 0x3FFFu)];
 
-        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(true, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// NEO8 / NEO16 cached state and write handlers
+// -----------------------------------------------------------------------
+
+typedef struct {
+    uint16_t     bank_regs[6];   // NEO8: 6 registers, NEO16: 3 used
+    bank_cache_t cache;
+} neo_state_t;
+
+// Cached NEO8 write handler.
+// Intercepts bank register writes (16-bit, split even/odd) and ensures
+// the newly selected segment is resident in the cache.
+static inline void __not_in_flash_func(handle_neo8_write_cached)(uint16_t addr, uint8_t data, void *ctx)
+{
+    neo_state_t *st = (neo_state_t *)ctx;
+    uint16_t base_addr = addr & 0xF800u;
+    uint8_t bank_index = 6;
+
+    switch (base_addr)
+    {
+        case 0x5000: case 0x1000: case 0x9000: case 0xD000: bank_index = 0; break;
+        case 0x5800: case 0x1800: case 0x9800: case 0xD800: bank_index = 1; break;
+        case 0x6000: case 0x2000: case 0xA000: case 0xE000: bank_index = 2; break;
+        case 0x6800: case 0x2800: case 0xA800: case 0xE800: bank_index = 3; break;
+        case 0x7000: case 0x3000: case 0xB000: case 0xF000: bank_index = 4; break;
+        case 0x7800: case 0x3800: case 0xB800: case 0xF800: bank_index = 5; break;
+    }
+
+    if (bank_index < 6u)
+    {
+        if (addr & 0x01u)
+            st->bank_regs[bank_index] = (st->bank_regs[bank_index] & 0x00FFu) | ((uint16_t)data << 8);
+        else
+            st->bank_regs[bank_index] = (st->bank_regs[bank_index] & 0xFF00u) | data;
+        st->bank_regs[bank_index] &= 0x0FFFu;
+        st->cache.page_slot[bank_index] = bcache_ensure(&st->cache, st->bank_regs[bank_index]);
+    }
+}
+
+// Cached NEO16 write handler.
+static inline void __not_in_flash_func(handle_neo16_write_cached)(uint16_t addr, uint8_t data, void *ctx)
+{
+    neo_state_t *st = (neo_state_t *)ctx;
+    uint16_t base_addr = addr & 0xF800u;
+    uint8_t bank_index = 3;
+
+    switch (base_addr)
+    {
+        case 0x5000: case 0x1000: case 0x9000: case 0xD000: bank_index = 0; break;
+        case 0x6000: case 0x2000: case 0xA000: case 0xE000: bank_index = 1; break;
+        case 0x7000: case 0x3000: case 0xB000: case 0xF000: bank_index = 2; break;
+    }
+
+    if (bank_index < 3u)
+    {
+        if (addr & 0x01u)
+            st->bank_regs[bank_index] = (st->bank_regs[bank_index] & 0x00FFu) | ((uint16_t)data << 8);
+        else
+            st->bank_regs[bank_index] = (st->bank_regs[bank_index] & 0xFF00u) | data;
+        st->bank_regs[bank_index] &= 0x0FFFu;
+        st->cache.page_slot[bank_index] = bcache_ensure(&st->cache, st->bank_regs[bank_index]);
     }
 }
 
 // -----------------------------------------------------------------------
 // loadrom_neo8 - NEO8 mapper (8KB segments, 16-bit bank registers)
 // -----------------------------------------------------------------------
-// 6 banks of 8KB covering 0x0000-0xBFFF
+// 6 banks of 8KB covering 0x0000-0xBFFF.
+// Uses a mapper-aware 24-slot LRU cache (192KB / 8KB) so every read is
+// served from SRAM.  Flash is only accessed during bank-switch misses.
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)
 {
-    uint16_t bank_registers[6] = {0};
-    const uint8_t *rom_base;
-    uint32_t available_length;
-    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+    neo_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    bcache_init(&state.cache, 8192u, 6, rom + offset, active_rom_size);
+    bcache_prefill(&state.cache);
+
+    // All 6 banks start at segment 0 after reset
+    int8_t slot0 = bcache_find(&state.cache, 0);
+    for (int i = 0; i < 6; i++)
+        state.cache.page_slot[i] = slot0;
 
     msx_pio_bus_init();
 
-    bank16_ctx_t ctx = { .bank_regs = bank_registers };
-
     while (true)
     {
-        pio_drain_writes(handle_neo8_write, &ctx);
+        pio_drain_writes(handle_neo8_write_cached, &state);
 
         uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
 
-        pio_drain_writes(handle_neo8_write, &ctx);
+        pio_drain_writes(handle_neo8_write_cached, &state);
 
         bool in_window = (addr <= 0xBFFFu);
         uint8_t data = 0xFFu;
@@ -860,10 +1111,9 @@ void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)
             uint8_t bank_index = addr >> 13;
             if (bank_index < 6u)
             {
-                uint32_t segment = bank_registers[bank_index] & 0x0FFFu;
-                uint32_t rel = (segment << 13) + (addr & 0x1FFFu);
-                if (available_length == 0u || rel < available_length)
-                    data = read_rom_byte(rom_base, rel);
+                int8_t slot = state.cache.page_slot[bank_index];
+                if (slot >= 0)
+                    data = rom_sram[(uint32_t)slot * state.cache.slot_size + (addr & 0x1FFFu)];
             }
         }
 
@@ -874,25 +1124,31 @@ void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)
 // -----------------------------------------------------------------------
 // loadrom_neo16 - NEO16 mapper (16KB segments, 16-bit bank registers)
 // -----------------------------------------------------------------------
-// 3 banks of 16KB covering 0x0000-0xBFFF
+// 3 banks of 16KB covering 0x0000-0xBFFF.
+// Uses a mapper-aware 12-slot LRU cache (192KB / 16KB) so every read is
+// served from SRAM.  Flash is only accessed during bank-switch misses.
 void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset)
 {
-    uint16_t bank_registers[3] = {0};
-    const uint8_t *rom_base;
-    uint32_t available_length;
-    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+    neo_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    bcache_init(&state.cache, 16384u, 3, rom + offset, active_rom_size);
+    bcache_prefill(&state.cache);
+
+    // All 3 banks start at segment 0 after reset
+    int8_t slot0 = bcache_find(&state.cache, 0);
+    for (int i = 0; i < 3; i++)
+        state.cache.page_slot[i] = slot0;
 
     msx_pio_bus_init();
 
-    bank16_ctx_t ctx = { .bank_regs = bank_registers };
-
     while (true)
     {
-        pio_drain_writes(handle_neo16_write, &ctx);
+        pio_drain_writes(handle_neo16_write_cached, &state);
 
         uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
 
-        pio_drain_writes(handle_neo16_write, &ctx);
+        pio_drain_writes(handle_neo16_write_cached, &state);
 
         bool in_window = (addr <= 0xBFFFu);
         uint8_t data = 0xFFu;
@@ -902,10 +1158,9 @@ void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset)
             uint8_t bank_index = addr >> 14;
             if (bank_index < 3u)
             {
-                uint32_t segment = bank_registers[bank_index] & 0x0FFFu;
-                uint32_t rel = (segment << 14) + (addr & 0x3FFFu);
-                if (available_length == 0u || rel < available_length)
-                    data = read_rom_byte(rom_base, rel);
+                int8_t slot = state.cache.page_slot[bank_index];
+                if (slot >= 0)
+                    data = rom_sram[(uint32_t)slot * state.cache.slot_size + (addr & 0x3FFFu)];
             }
         }
 

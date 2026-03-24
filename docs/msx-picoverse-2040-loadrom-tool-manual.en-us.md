@@ -3,11 +3,14 @@
 The PicoVerse 2040 cartridge extends MSX systems by flashing different Raspberry Pi Pico firmwares. While the MultiROM firmware offers a menu-driven launcher, some workflows require flashing a single ROM image that boots immediately on power‑on. That is the purpose of the `loadrom` firmware and of the companion `loadrom.exe` console tool documented here.
 
 `loadrom.exe` bundles the Pico firmware, a configuration record (game name, mapper code, ROM size and offset), and a single MSX ROM payload into an RP2040-compatible UF2 image. Copying the generated UF2 to the Pico’s `RPI-RP2` drive programs the cartridge so that it boots directly into the embedded ROM whenever the MSX starts.
+
 Alternatively, the `-s` (Sunrise) option can be used to flash the cartridge with the Sunrise IDE Nextor firmware, which exposes the USB-C port as a block device for use with Nextor-compatible loaders like SofaRun.
+
 The `-m` option flashes Sunrise IDE Nextor with an additional 192KB memory mapper implementation. In the firmware internals this is mapper mode (type `11`), while on-screen mapper text is still presented as `SYSTEM` for end users.
+
 The standalone firmware options `-k`, `-i`, and `-p` generate dedicated USB keyboard, MSX-MIDI, and MIDI-PAC PSG-to-MIDI converter cartridges without embedding a ROM payload.
 
-### Nextor option matrix
+### LoadRom option matrix
 
 | Option | Nextor ROM | Extra mapper RAM | Intended use |
 | --- | --- | --- | --- |
@@ -151,22 +154,9 @@ Tags are case-insensitive. If no valid tag is present, the tool falls back to he
 7. Insert the PicoVerse cartridge into the MSX and power on. The cartridge now passively monitors PSG traffic on ports `0xA0`–`0xA1` and converts music and sound effects to MIDI in real time.
 8. Boot and run the MSX software you want to hear through the external MIDI module.
 
-**MIDI-PAC Quality Features:**
-
-The MIDI-PAC firmware includes a sophisticated PSG-to-MIDI conversion layer optimized for pleasant musical output on General MIDI modules:
-
-- **Frame-Based PSG Interpretation**: PSG state is evaluated from coherent 50 Hz snapshots rather than directly from every register write, which reduces false notes caused by partially-updated tone registers.
-- **Smooth Pitch Bending**: A separate 200 Hz bend pass keeps short modulation and vibrato on the current note instead of retriggering constantly.
-- **Stable Note-Center Detection**: Tone channels keep a short recent pitch history and only commit to a new note after the new pitch center remains stable for several frames. This improves Compile-style modulation loops used by games like Zanac.
-- **Unified Square Lead Voicing**: All three melodic channels use Square Lead (GM #81), keeping the output close to PSG character and avoiding distracting per-note patch switching.
-- **Enhanced Noise Mapping**: Noise frequencies map to 6 bands of GM percussion (hi-hats, snares, toms, bass drums) rather than fixed drum notes, providing more musically appropriate rhythm and sound effects.
-- **Improved Dynamics**: Volume and velocity curves are tuned for balanced audibility across the dynamic range, with stronger low-level presence and the melodic channels kept slightly ahead of channel 10.
-- **SC-55 Tuning**: Sends GM System On at startup, configures pitch bend sensitivity, uses a narrow stereo placement for the melodic channels, keeps the tone path dry, and limits MIDI byte rate to match standard wire speed (31,250 baud).
-- **Silence Detection**: Automatically sends All Sound Off (CC#120) after 100+ ms of silence to prevent stuck notes on the MIDI device.
-
 See [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) for in-depth documentation on architecture, conversion algorithms, and limitations.
 
-> **Note**: The `-p` option is standalone. MIDI-PAC does not provide ROM loading, mass storage, or MSX-MIDI ports; it is a dedicated PSG-to-MIDI conversion firmware. Requires a USB MIDI device capable of General MIDI playback for best results.
+> **Note**: The `-p` option is standalone. MIDI-PAC does not provide ROM loading, mass storage, or MSX-MIDI ports; it is a dedicated PSG-to-MIDI conversion firmware. Requires a USB MIDI cable and a device capable of General MIDI playback for best results.
 
 ## Troubleshooting
 
@@ -204,6 +194,7 @@ The PicoVerse 2040 cartridge with LoadROM firmware has been tested when executin
 | Panasonic FS-A1ST | TurboR | OK | Verified operation |
 | Panasonic FS-A1WX | MSX2+ | OK | Verified operation |
 | Panasonic FS-A1WSX | MSX2+ | OK | Verified operation |
+| Panasonic FS-A1FX | MSX2+ | OK | Verified operation |
 | Sanyo Wavy 70FD | MSX2+ | OK | Verified operation |
 | Sharp HotBit HB8000 | MSX1 | OK | Verified operation |
 | SMX-HB | MSX2+ (FPGA clone) | OK | Verified operation |
@@ -222,6 +213,7 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 | Gradiente Expert | MSX1 | OK | Verified operation |
 | Panasonic FS-A1WX | MSX2+ | OK | Verified operation |
 | Panasonic FS-A1WSX | MSX2+ | OK | Verified operation |
+| Panasonic FS-A1FX | MSX2+ | OK | Verified operation. Only -m option works correctly as Nextor requires minimum of 128KB RAM and originally this computer has only 64KB of base RAM in slot 3. |
 | Sanyo Wavy 70FD | MSX2+ | OK | Verified operation |
 | Sharp HotBit HB8000 | MSX1 | OK | Verified operation |
 | TRHMSX | MSX2+ (FPGA clone) | OK | Verified operation |
@@ -231,19 +223,21 @@ The USB keyboard firmware (option `-k`) with the PPI rephase has been tested on 
 
 Note: The keyboard firmware is not compatible with FPGA-based MSX implementations due to bus contention issues. It is designed for and tested on original MSX hardware only.
 
-| Model | Type | Keyboard | Status | Comments |
+| Model | Type | Status | Comments |
 | --- | --- | --- | --- | --- |
-| Sharp HotBit HB8000 | MSX1 | Reddragon Kumara | OK | Verified operation |
-| Sharp HotBit HB8000 | MSX1 | Reddragon Fizz | OK | Verified operation |
-| Sharp HotBit HB8000 | MSX1 | Ajazz | OK | Verified operation |
-
+|Gradiente Expert | MSX1 | OK | Verified operation |
+| Panasonic FS-A1FX | MSX2+ | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
+| Panasonic FS-A1GT | TurboR | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
+| Panasonic FS-A1ST | TurboR | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
+| Sharp HotBit HB8000 | MSX1 | OK | Verified operation |
+|Sony HB-101P| MSX1 | OK | Verified operation |
 
 The MSX-MIDI firmware (option `-i`) has been tested on the following MSX models:
 
 | MSX Model | Type | Status | MIDI Devices | Comments |
 | --- | --- | --- | --- | --- |
 | TRHMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh)  | Verified operation |
-| TRHMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh)  | Verified operation |
+| uMSX | MSX2+ (FPGA clone) | OK | Roland SC-55, [AliExpress MIDI/USB Simple Cable](https://s.click.aliexpress.com/e/_c3iqcWDh)  | Verified operation |
 
 The MIDI-PAC firmware (option `-p`) has been tested on the following MSX models and MIDI devices:
 
