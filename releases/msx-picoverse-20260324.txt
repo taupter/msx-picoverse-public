@@ -1,16 +1,18 @@
-ASCII16-X: emulate AMD flash byte-program and sector-erase commands
+multirom.pio: add LRU bank cache and AMD flash emulation for ASCII16-X/NEO8/NEO16
 
-Some ASCII16-X ROMs (e.g. Neon Horizon) detect the cartridge by writing
-a flash byte-program sequence (AA/55/A0) and verifying the result. The
-mapper handler only processed bank-register writes, so flash command
-writes were silently dropped and detection failed.
+Port the mapper-aware LRU bank cache system from loadrom.pio to
+multirom.pio. All three large-ROM mappers now serve reads exclusively
+from SRAM instead of flash XIP, matching loadrom.pio behaviour:
 
-Add a flash_cmd_state_t state machine to the cached ASCII16-X handler
-that tracks AMD unlock sequences and emulates:
-- Byte program (A0h): AND-masks data into the SRAM cache slot
-- Sector erase (80h+30h): fills the cache slot with FFh
-- Reset to read mode (F0h)
+- ASCII16-X: 12-slot (16KB) LRU cache with AMD flash command emulation
+  (byte-program, sector-erase) for cartridge detection and save data
+- NEO8: 24-slot (8KB) LRU cache with cached write handler
+- NEO16: 12-slot (16KB) LRU cache with cached write handler
 
-All writes are fed through flash_process_write() before bank-register
-processing. The read path is unchangedGÇöno performance impact.
+The bank cache divides the 192KB SRAM pool into fixed-size slots and
+uses LRU eviction with pinned active pages. Flash is only accessed on
+cache misses during bank switches. Bank numbers are normalized modulo
+ROM size to support hardware mirroring.
+
+Sunrise/Nextor implementations verified identical across both firmwares.
 
