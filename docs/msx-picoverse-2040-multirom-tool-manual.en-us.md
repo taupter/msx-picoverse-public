@@ -1,9 +1,5 @@
 # MSX PicoVerse 2040 Project
 
-|PicoVerse Front|PicoVerse Back|
-|---|---|
-|![PicoVerse Front](/images/2025-12-02_20-05.png)|![PicoVerse Back](/images/2025-12-02_20-06.png)|
-
 The PicoVerse 2040 is a Raspberry Pi Pico based cartridge for MSX that uses replaceable firmware to extend the computer’s capabilities. By loading different firmware images, the cartridge can run MSX games and applications and emulate additional hardware devices (such as ROM mappers, extra RAM, or storage interfaces), effectively adding virtual peripherals to the MSX. One such firmware is the MultiROM system, which provides an on‑screen menu for browsing and launching multiple ROM titles stored in the cartridge.
 
 The cartridge can also expose the Pico’s USB‑C port as a mass‑storage device, allowing you to copy ROMs, DSKs, and other files directly from a PC with Windows or Linux to the cartridge.
@@ -13,7 +9,7 @@ Those are the features available in the current version of the PicoVerse 2040 ca
 * MultiROM menu system for selecting and launching MSX ROMs.
 * Inline Menu option with Nextor OS support.
 * USB mass-storage device support for loading ROMs and DSKs.
-* Support for various MSX ROM mappers (PLA-16, PLA-32, KonSCC, PLN-48, PLN-64, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16).
+* Support for various MSX ROM mappers (PLA-16, PLA-32, KonSCC, PLN-48, PLN-64, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16, MANBW2).
 * Compatibility with MSX, MSX2, and MSX2+ systems.
 
 ## MultiROM UF2 Creator Manual
@@ -58,7 +54,7 @@ multirom.exe [options]
 - `-m`, `--mapper` : Includes the embedded Sunrise IDE Nextor ROM with 192KB mapper support (12 x 16KB pages). In the MSX menu this entry is still shown with mapper text `SYSTEM`.
 - `-h`, `--help`   : Show usage help and exit.
 - `-o <filename>`, `--output <filename>` : Set UF2 output filename (default is `multirom.uf2`).
-- If you need to force a specific mapper type for a ROM file, you can append a mapper tag before the `.ROM` extension in the filename. The tag is case-insensitive. For example, naming a file `Knight Mare.PLA-32.ROM` forces the use of the PLA-32 mapper for that ROM. `SYSTEM` tags are ignored. The list of current tags is: `PLA-16, PLA-32, KonSCC, PLN-48, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16, PLN-64`.
+- If you need to force a specific mapper type for a ROM file, you can append a mapper tag before the `.ROM` extension in the filename. The tag is case-insensitive. For example, naming a file `Knight Mare.PLA-32.ROM` forces the use of the PLA-32 mapper for that ROM. `SYSTEM` tags are ignored. The list of current tags is: `PLA-16, PLA-32, KonSCC, PLN-48, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16, PLN-64, MANBW2`.
 
 ### Examples
 - Produces the multirom.uf2 file with the MultiROM menu and all `.ROM` files in the current directory. You can run the tool using the command prompt or just by double-clicking the executable:
@@ -89,8 +85,10 @@ multirom.exe [options]
   - Planar64 mapper (mapper byte 13, tag `PLN-64`) — 64KB planar layout
   - NEO8 (mapper byte 8) and NEO16 (mapper byte 9)
   - Konami, Konami SCC, ASCII8, ASCII16 and others via weighted scoring
+  - Manbow2 (mapper byte 14, tag `MANBW2`) — 512 KB Manbow 2 signature check
+- Before applying heuristics, the tool computes the SHA-1 hash of the ROM and looks it up in an embedded database derived from the openMSX `softwaredb.xml`. When a match is found the database mapper type is used directly, bypassing the heuristic scanner. This improves accuracy for titles whose mapper cannot be reliably distinguished by opcode analysis alone.
 - If no mapper can be reliably detected, the tool skips the ROM and reports "unsupported mapper". Remember you can force a mapper via filename tag. The tags are case-insensitive and are listed below. 
-- Only the following mapper tags are supported in the configuration area and menu: `PLA-16, PLA-32, KonSCC, PLN-48, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16, PLN-64`.
+- Only the following mapper tags are supported in the configuration area and menu: `PLA-16, PLA-32, KonSCC, PLN-48, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16, PLN-64, MANBW2`.
 
 ## Using the MSX ROM Selector menu
 
@@ -191,5 +189,5 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 | uMSX | MSX2+ (FPGA clone) | OK | Verified operation |
 | Yamaha YIS604 | MSX1 | OK | Verified operation |
 
-Author: Cristiano Almeida Goncalves
-Last updated: 02/27/2026
+Author: Cristiano  Goncalves
+Last updated: 03/28/2026

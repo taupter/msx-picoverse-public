@@ -24,6 +24,8 @@
 #include "multirom.h"
 #include "menu.h"
 #include "nextor_sunrise.h"
+#include "../../../tools/sha1.h"
+#include "../../../tools/romdb.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "v1.00"
@@ -44,11 +46,12 @@
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC-16X", "PLN-64"
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC-16X", "PLN-64", "MANBW2"
 };
 
 #define ROM_TYPE_ASCII16X 12
 #define ROM_TYPE_PLANAR64 13
+#define ROM_TYPE_MANBOW2  14
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
@@ -82,6 +85,9 @@ static uint8_t mapper_number_from_description(const char *description) {
     }
     if (equals_ignore_case(description, "PL-64") || equals_ignore_case(description, "PLANAR64")) {
         return ROM_TYPE_PLANAR64;
+    }
+    if (equals_ignore_case(description, "MANBOW2") || equals_ignore_case(description, "MBW-2")) {
+        return ROM_TYPE_MANBOW2;
     }
 
     return 0;
@@ -154,18 +160,11 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     const char neo16_signature[] = "ROM_NE16";
     const char ascii16x_signature[] = "ASCII16X";
 
-    // Initialize weighted scores for different mapper types
-    int konami_score = 0;
-    int konami_scc_score = 0;
-    int ascii8_score = 0;
-    int ascii16_score = 0;
-
-    // Define weights for specific addresses
-    const int KONAMI_WEIGHT = 2;
-    const int KONAMI_SCC_WEIGHT = 2;
-    const int ASCII8_WEIGHT_HIGH = 3;
-    const int ASCII8_WEIGHT_LOW = 1;
-    const int ASCII16_WEIGHT = 2;
+    // Scores for each mapper type (unit weights, matching openMSX guessRomType)
+    unsigned int konami_score = 0;
+    unsigned int konami_scc_score = 0;
+    unsigned int ascii8_score = 0;
+    unsigned int ascii16_score = 0;
 
     //size_t size = file_size(filename);
     if (size > MAX_ROM_SIZE || size < MIN_ROM_SIZE) {
@@ -191,6 +190,17 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     fread(rom, 1, read_size, file);
     fclose(file);
+
+    // SHA1 database lookup (openMSX softwaredb) — checked before heuristics.
+    {
+        uint8_t sha1[20];
+        sha1_from_buffer(rom, (uint32_t)read_size, sha1);
+        uint8_t db_type = romdb_lookup(sha1);
+        if (db_type) {
+            free(rom);
+            return db_type;
+        }
+    }
     
     // Check if the ROM has the signature "AB" at 0x0000 and 0x0001
     // Those are the cases for 16KB and 32KB ROMs
@@ -227,6 +237,16 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
         }
     }
 
+    // Manbow 2 detection: 512KB ROM with "Manbow 2" string at offset 0x28000.
+    // All known Manbow 2 dumps share this signature (game-over music track label).
+    // Must be checked before the heuristic scoring which would classify it as Konami SCC.
+    if (size == 524288u && rom[0] == 'A' && rom[1] == 'B' &&
+        memcmp(&rom[0x28000], "Manbow 2", 8) == 0)
+    {
+        free(rom);
+        return ROM_TYPE_MANBOW2;
+    }
+
     // Check if the ROM has the signature "AB" at 0x4000 and 0x4001
     // That is the case for 48KB Planar mapping.
     if (rom[0x4000] == 'A' && rom[0x4001] == 'B' && size <= 49152) {
@@ -247,112 +267,68 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     // Heuristic analysis for larger ROMs
     if (size > 32768) {
-        // Scan through the ROM data to detect patterns
+        // Scan through the ROM data to detect ld (nnnn),a patterns.
+        // Scoring matches openMSX guessRomType(): unit weights, no SCC
+        // credit for 0x6000, and >= tie-breaking favoring later types.
         for (size_t i = 0; i < read_size - 3; i++) {
-            if (rom[i] == 0x32) { // Check for 'ld (nnnn),a' instruction
+            if (rom[i] == 0x32) { // ld (nnnn),a
                 uint16_t addr = rom[i + 1] | (rom[i + 2] << 8);
                 switch (addr) {
                     case 0x4000:
                     case 0x8000:
                     case 0xA000:
-                        konami_score += KONAMI_WEIGHT;
+                        konami_score++;
                         break;
                     case 0x5000:
                     case 0x9000:
                     case 0xB000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
+                        konami_scc_score++;
                         break;
                     case 0x6800:
                     case 0x7800:
-                        ascii8_score += ASCII8_WEIGHT_HIGH;
+                        ascii8_score++;
                         break;
                     case 0x77FF:
-                        ascii16_score += ASCII16_WEIGHT;
+                        ascii16_score++;
                         break;
                     case 0x6000:
-                        konami_score += KONAMI_WEIGHT;
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
+                        konami_score++;
+                        ascii8_score++;
+                        ascii16_score++;
                         break;
                     case 0x7000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
+                        konami_scc_score++;
+                        ascii8_score++;
+                        ascii16_score++;
                         break;
-                    // Add more cases as needed
                 }
             }
         }
-         
-        
-        /*
-        printf ("DEBUG: ascii8_score = %d\n", ascii8_score);
-        printf ("DEBUG: ascii16_score = %d\n", ascii16_score);
-        printf ("DEBUG: konami_score = %d\n", konami_score);
-        printf ("DEBUG: konami_scc_score = %d\n\n", konami_scc_score);
-        */
-        
-        if (ascii8_score==1) ascii8_score--;
 
-        // Determine the ROM type based on the highest weighted score
-        if (konami_scc_score > konami_score && konami_scc_score > ascii8_score && konami_scc_score > ascii16_score) {
-            free(rom);
-            return 3; // Konami SCC
-        }
-        if (konami_score > konami_scc_score && konami_score > ascii8_score && konami_score > ascii16_score) {
-            free(rom);
-            return 7; // Konami
-        }
-        if (ascii8_score > konami_score && ascii8_score > konami_scc_score && ascii8_score > ascii16_score) {
-            free(rom);
-            return 5; // ASCII8
-        }
-        if (ascii16_score > konami_score && ascii16_score > konami_scc_score && ascii16_score > ascii8_score) {
-            free(rom);
-            return 6; // ASCII16
-        }
+        // openMSX quirk: subtract 1 from ASCII8 if non-zero.
+        if (ascii8_score) ascii8_score--;
 
-        // Resolve non-zero score ties with a secondary heuristic.
+        // Pick the winner using >= so that later types win ties.
+        // Iteration order: KonamiSCC, Konami, ASCII8, ASCII16.
+        // This means ASCII16 beats ASCII8 on equal scores, etc.
         {
-            int max_score = konami_score;
-            if (konami_scc_score > max_score) max_score = konami_scc_score;
-            if (ascii8_score > max_score) max_score = ascii8_score;
-            if (ascii16_score > max_score) max_score = ascii16_score;
-
-            int max_count = 0;
-            if (konami_score == max_score) ++max_count;
-            if (konami_scc_score == max_score) ++max_count;
-            if (ascii8_score == max_score) ++max_count;
-            if (ascii16_score == max_score) ++max_count;
-
-            if (max_score > 0 && max_count > 1) {
-                unsigned int raw_77ff = 0u;
-                unsigned int raw_6800 = 0u;
-                unsigned int raw_7800 = 0u;
-                bool ab0 = (rom[0x0000] == 'A' && rom[0x0001] == 'B');
-
-                for (size_t i = 0; i + 1 < read_size; ++i)
-                {
-                    uint16_t raw = (uint16_t)(rom[i] | (rom[i + 1] << 8));
-                    if (raw == 0x77FFu) ++raw_77ff;
-                    else if (raw == 0x6800u) ++raw_6800;
-                    else if (raw == 0x7800u) ++raw_7800;
+            uint8_t best_type = 0; // GENERIC_8KB / unknown
+            unsigned int best_score = 0;
+            struct { unsigned int score; uint8_t type; } candidates[] = {
+                { konami_scc_score, 3 },  // Konami SCC
+                { konami_score,     7 },  // Konami
+                { ascii8_score,     5 },  // ASCII8
+                { ascii16_score,    6 },  // ASCII16
+            };
+            for (int c = 0; c < 4; c++) {
+                if (candidates[c].score && candidates[c].score >= best_score) {
+                    best_score = candidates[c].score;
+                    best_type = candidates[c].type;
                 }
-
-                if (ascii16_score == max_score && raw_77ff > (raw_6800 + raw_7800)) {
-                    free(rom);
-                    return 6; // ASCII16
-                }
-                if (ascii8_score == max_score && (raw_6800 + raw_7800) >= raw_77ff) {
-                    free(rom);
-                    return 5; // ASCII8
-                }
-
-                if (ab0 && size > 65536u && ((size % 16384u) == 0u)) {
-                    free(rom);
-                    return (raw_77ff > (raw_6800 + raw_7800)) ? 6 : 5;
-                }
+            }
+            if (best_type) {
+                free(rom);
+                return best_type;
             }
         }
 

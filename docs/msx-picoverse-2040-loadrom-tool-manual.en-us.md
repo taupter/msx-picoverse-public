@@ -29,7 +29,8 @@ Key characteristics:
 
 - Works on Windows (console app). Tested in `cmd.exe` and PowerShell.
 - Supports ROM sizes from 8 KB up to 16 MB (subject to Pico flash capacity).
-- Detects common mapper types automatically. Mapper can be forced via filename tags (same scheme as `multirom`): `PLA-16`, `PLA-32`, `KonSCC`, `PLN-48`, `ASC-08`, `ASC-16`, `ASC-16X`, `Konami`, `NEO-8`, `NEO-16`, `PLN-64`.
+- Detects common mapper types automatically. Mapper can be forced via filename tags (same scheme as `multirom`): `PLA-16`, `PLA-32`, `KonSCC`, `PLN-48`, `ASC-08`, `ASC-16`, `ASC-16X`, `Konami`, `NEO-8`, `NEO-16`, `PLN-64`, `MANBW2`.
+- Space Manbow 2 ROMs (512 KB, Konami SCC + AMD flash) are auto-detected. The `MANBW2` tag (aliases `MANBOW2`, `MBW-2`) can also force this mapper.
 - Generates UF2 files recognized by the RP2040 ROM bootloader (sets the RP2040 family ID flag).
 
 ## Command-line usage
@@ -62,7 +63,24 @@ Penguin Adventure.PLA-32.ROM
 Space Manbow.KonSCC.rom
 ```
 
-Tags are case-insensitive. If no valid tag is present, the tool falls back to heuristic detection.
+Tags are case-insensitive. If no valid tag is present, the tool first computes the ROM's SHA-1 hash and looks it up in an embedded database derived from the openMSX `softwaredb.xml`. When a match is found the database mapper type is used directly. Otherwise the tool falls back to heuristic detection.
+
+Supported mapper tags:
+
+| Tag | Aliases | Mapper Type |
+|---|---|---|
+| `PLA-16` | `PL-16` | Planar 16 KB |
+| `PLA-32` | `PL-32`, `PLN-32`, `PLANAR`, `LINEAR` | Planar 32 KB |
+| `KonSCC` | | Konami SCC |
+| `PLN-48` | `PL-48` | Planar 48 KB |
+| `ASC-08` | | ASCII8 |
+| `ASC-16` | | ASCII16 |
+| `ASC-16X` | | ASCII16-X |
+| `Konami` | | Konami (without SCC) |
+| `NEO-8` | | NEO8 |
+| `NEO-16` | | NEO16 |
+| `PLN-64` | `PL-64` | Planar 64 KB |
+| `MANBW2` | `MANBOW2`, `MBW-2` | Manbow2 (Konami SCC + AMD flash) |
 
 ## Typical workflow
 
@@ -122,7 +140,7 @@ Tags are case-insensitive. If no valid tag is present, the tool falls back to he
 6. Connect a USB keyboard to the cartridge's USB-C port (use a USB-C OTG adapter or USB-A to USB-C adapter as needed).
 7. Insert the PicoVerse cartridge into the MSX and power on. The USB keyboard now functions as the MSX keyboard.
 
-> **Note**: The keyboard firmware does not work with FPGA-based MSX systems. The FPGA's internal PPI drives the slot data bus for keyboard ports, causing bus contention with the PicoVerse. It is designed for and tested on original MSX hardware only.
+> **Note**: The keyboard firmware does not work with FPGA-based MSX systems or MSX computers whose PPI is integrated into a custom chip (e.g. Panasonic models with the T9769 MSX-ENGINE). The internal PPI drives the slot data bus for keyboard ports, causing bus contention with the PicoVerse. It requires original MSX hardware with a discrete 8255 PPI.
 
 ### Loading MSX-MIDI Firmware
 
@@ -174,7 +192,7 @@ See [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) for in-de
 - In mapper mode (`-m`), mapper register handling is global (ports `FC`-`FF`) and the mapper capacity is 192KB.
 - Linux/macOS binaries are not yet provided; use Wine or build from source with GCC.
 - The tool does not verify ROM integrity beyond size checks and simple header heuristics.
-- The keyboard firmware (`-k`) does not work with FPGA-based MSX implementations. The FPGA's internal PPI (8255) unconditionally drives keyboard port data onto the cartridge slot bus, which conflicts with the PicoVerse's bus response. See [USB Keyboard — FPGA Incompatibility Details](/docs/msx-picoverse-2040-keyboard.md#fpga-incompatibility-details) for the full analysis.
+- The keyboard firmware (`-k`) does not work with FPGA-based MSX implementations or MSX computers whose PPI is integrated into a custom chip (e.g. Panasonic models with the T9769 MSX-ENGINE). The internal PPI unconditionally drives keyboard port data onto the cartridge slot bus, which conflicts with the PicoVerse's bus response. See [USB Keyboard — FPGA Incompatibility Details](/docs/msx-picoverse-2040-keyboard.md#fpga-incompatibility-details) for the full analysis.
 - The MIDI-PAC firmware (`-p`) depends on the target software using the standard PSG ports and on the connected MIDI device producing a musically useful result from the converted stream; it is a converter, not a literal PSG synthesizer.
 
 ## Tested MSX models
@@ -221,10 +239,10 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 
 The USB keyboard firmware (option `-k`) with the PPI rephase has been tested on the following MSX models:
 
-Note: The keyboard firmware is not compatible with FPGA-based MSX implementations due to bus contention issues. It is designed for and tested on original MSX hardware only.
+Note: The keyboard firmware is not compatible with FPGA-based MSX implementations or MSX computers with an integrated PPI (e.g. T9769 MSX-ENGINE) due to bus contention issues. It requires original MSX hardware with a discrete 8255 PPI.
 
 | Model | Type | Status | Comments |
-| --- | --- | --- | --- | --- |
+| --- | --- | --- | --- | 
 | Canon V20 | MSX1 | OK | Verified operation |
 | Gradiente Expert | MSX1 | OK | Verified operation |
 | Panasonic FS-A1FX | MSX2+ | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |

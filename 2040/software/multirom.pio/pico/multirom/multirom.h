@@ -68,3 +68,4 @@ void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable);

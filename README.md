@@ -12,8 +12,13 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 
 ## Whats New in PicoVerse?
 
-- New standalone **MSX-MIDI** firmware for PicoVerse 2040 — turns the cartridge into a standard external MSX-MIDI interface via `loadrom.exe -i`. Bridges MSX-MIDI I/O ports to a USB MIDI device such as a Roland SoundCanvas using a standard USB MIDI cable that can be purchased on AliExpress. ***(NEW!)***
-- **MIDI-PAC** firmware for PicoVerse 2040 — passive PSG-to-MIDI converter via `loadrom.exe -p`. Featuring tone+noise coexistence, pitch-bend-in-range note management, 4× faster envelope processing (200 Hz), per-channel instrument differentiation with automatic bass detection, 6-band noise→percussion mapping, improved volume curves and velocity dynamics, and enhanced SC-55 compatibility. ***(NEW!)***
+- LoadRom and Multirom v2.55 released
+- Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
+- Improved cache for mega mappers
+- Added Manbow2 mapper (Type 14) support (e.g., Space Manbow 2)
+- Enhanced ASCII16-X support, now compatible with MSXDEV25 titles like NOP Asteroids and Neon Horizon.
+- Increased stability during heavy flash write operations (required to support Manbow2 and some ASCII16-X games).
+- Updated documentation.
 
 ## Project Highlights
 
@@ -24,8 +29,8 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. 
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
-- MSX-MIDI support on PicoVerse 2040 — use a USB-MIDI cable as a standard MSX-MIDI interface via the cartridge slot. ***(NEW!)***
-- MIDI-PAC support on PicoVerse 2040 — passively convert live MSX PSG music and effects into high-quality MIDI for external synths or sound modules (SC-55 optimized). Features automatic bass detection, tone+noise coexistence, smooth pitch bending on fast passages, and improved percussion mapping. ***(NEW!)***
+- MSX-MIDI support on PicoVerse 2040 — use a USB-MIDI cable as a standard MSX-MIDI interface via the cartridge slot. 
+- MIDI-PAC support on PicoVerse 2040 — passively convert live MSX PSG music and effects into high-quality MIDI for external synths or sound modules (SC-55 optimized). Features automatic bass detection, tone+noise coexistence, smooth pitch bending on fast passages, and improved percussion mapping. 
 - BOMs, and production-ready Gerbers.
 - Active development roadmap covering RP2040 and RP2350-based cartridges.
 
@@ -52,8 +57,9 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md) 
 - [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md) 
 - [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md)
-- [MSX PicoVerse 2040 MSX-MIDI](/docs/msx-picoverse-2040-msx-midi.md) ***(NEW!)***
-- [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) ***(NEW!)***
+- [MSX PicoVerse 2040 MSX-MIDI](/docs/msx-picoverse-2040-msx-midi.md) 
+- [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md)
+- [MSX PicoVerse 2040 MegaROMs](/docs/msx-picoverse-2040-megaroms.md)
 
 ## Hardware Variants
 
@@ -64,15 +70,15 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 | ![Image 1](/images/20241230_001854885_iOS.jpg) | ![Image 2](/images/20241230_001901504_iOS.jpg) | 
 
 - Based on RP2040 boards exposing 30 GPIO pins (not compatible with stock Raspberry Pi Pico pinout).
-- Up to 16 MB of flash for MSX ROMs with support for Plain16/32 (`PLA-16`/`PLA-32`), Planar48/64 (`PLN-48`/`PLN-64`), Konami SCC, Konami, ASCII8/16, NEO-8, and NEO-16 mappers.
+- Up to 16 MB of flash for MSX ROMs with support for Plain16/32 (`PLA-16`/`PLA-32`), Planar48/64 (`PLN-48`/`PLN-64`), Konami SCC, Konami, ASCII8/16, NEO-8, NEO-16, and Manbow2 (`MANBW2`) mappers.
 - USB-C port doubles as a bridge for Nextor mass storage.
-- Standalone USB keyboard firmware — use a standard USB keyboard as the MSX keyboard via the cartridge slot (`loadrom.exe -k`).
+- Standalone USB keyboard firmware — use a standard USB keyboard as the MSX keyboard via the cartridge slot (`loadrom.exe -k`). Not compatible with FPGA-based MSX systems or MSX computers with an integrated PPI (e.g. T9769 MSX-ENGINE).
 - Standalone MSX-MIDI firmware — use a USB-MIDI cable as a standard MSX-MIDI interface for MIDI players and sequencers (`loadrom.exe -i`).
 - Standalone MIDI-PAC firmware — passively listen to the MSX PSG and convert music and effects to USB MIDI for an external synth or sound module (`loadrom.exe -p`).
 
 #### Bill of Materials
 
-![alt text](/images/2025-12-02_20-05.png)
+![alt text](/images/2026-03-28_20-28.png)
 
 Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/?https://raw.githubusercontent.com/cristianoag/msx-picoverse-public/refs/heads/main/2040/hardware/MSX_PicoVerse_2040_1.3_bom.html)
 
@@ -203,7 +209,7 @@ A search function is available by pressing `/` in the menu. Type part of a ROM n
 
 ![Creative Commons Attribution-NonCommercial-ShareAlike 4.0](/images/ccans.png)
 
-All hardware and firmware binaries in this repository are released under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International license. Personal builds and community tinkering are encouraged, but commercial use or resale requires explicit authorization from the author.
+All hardware and firmware binaries in this repository are released under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International license. Personal builds and community tinkering are encouraged, but **commercial use or resale requires explicit authorization from the author**.
 
 **bios.h** is used on all MSX menus and was adapted from http://www.konamiman.com/msx/msx2th/th-ap.txt by Danilo Angelo, 2020. The original text file is licensed under CC0 1.0 Universal (public domain). The adapted bios.h file in this repository is also released under CC0 1.0 Universal, allowing for free use and modification without restrictions.
 
@@ -234,8 +240,13 @@ The Sunrise IDE driver for Nextor used on PicoVerse is copyright by Konamiman, P
 
 The algorithm to emulate ATA devices is original and based on the implementation for the Carnivore2 cartridge, Copyright (c) 2017-2024 by the RBSC group. Portions (c) Mitsutaka Okazaki and (c) Kazuhiro Tsujikawa. Available at https://github.com/RBSC/Carnivore2/tree/master/Firmware/Sources
 
-Mapper detection heuristics and filename tag forcing schemes in the LoadROM and MultiROM tools are original implementations by the OpenMSX developers for the Romfactory module and licensed under the GNU Public License (GPL). Available at https://github.com/openMSX/openMSX/blob/6f8aa9865eeccdb0b31043d8851b822538440204/src/memory/RomFactory.cc
+**Mapper detection heuristics and filename tag forcing schemes** in the LoadROM and MultiROM tools are original implementations by the OpenMSX developers for the Romfactory module and licensed under the GNU Public License (GPL). Available at https://github.com/openMSX/openMSX/blob/6f8aa9865eeccdb0b31043d8851b822538440204/src/memory/RomFactory.cc
+
+**The softwaredb database** used for ROM mapper detection is built upon contributions from across the MSX community, including the initial work by Nicolas Beyaert, later expanded by the BlueMSX Team (2004–2013) and continuously maintained by the openMSX Team (2005–present). It also incorporates MSX ID data generated by Generation MSX (www.generation-msx.nl). Special thanks go to the Generation MSX / Sylvester project for its extensive reference data, as well as to contributors such as p_gimeno and diedel for ROM additions and validation, and GDX for further ROM information, corrections, and verification efforts. Part of OpenMSX effort. Available at https://github.com/openMSX
 
 ## Feedback & Community
 
 Questions, test reports, and build photos are welcome. Open an issue on the public repository or reach out through the MSX retro hardware forums where PicoVerse updates are posted.
+
+Author: Cristiano Goncalves
+Last updated: 03/28/2026

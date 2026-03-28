@@ -406,6 +406,7 @@ const char* mapper_description(int number) {
         case 11: return "SYSTEM";
         case 12: return "ASC16X";
         case 13: return "PLN-64";
+        case 14: return "MANBW2";
         default: return "UNKWN";
     }
 }

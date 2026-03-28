@@ -2,7 +2,7 @@
 
 This document describes the standalone USB keyboard firmware for the PicoVerse 2040 cartridge. The firmware turns the cartridge into a dedicated USB-to-MSX keyboard interface: plug a standard USB keyboard into the cartridge's USB-C port and it appears as the native MSX keyboard to the host system.
 
-> **FPGA Compatibility Notice**: The keyboard firmware does **not** work with FPGA-based MSX systems (e.g. OCM/1chipMSX, uMSX, TRHMSX, SM-X, Zemmix Neo, etc.). On these systems, the PPI keyboard ports (`0xA8`–`0xAB`) are decoded and handled entirely inside the FPGA... the I/O read data bus is actively driven by the FPGA's internal PPI logic, causing bus contention with the PicoVerse. See the [FPGA Incompatibility Details](#fpga-incompatibility-details) section below for a full technical explanation.
+> **Compatibility Notice**: The keyboard firmware does **not** work with FPGA-based MSX systems (e.g. OCM/1chipMSX, uMSX, TRHMSX, SM-X, Zemmix Neo, etc.) or MSX computers whose PPI is integrated into a custom chip (e.g. Panasonic models using the T9769 MSX-ENGINE). In both cases, the PPI keyboard ports (`0xA8`–`0xAB`) are decoded and handled internally by the FPGA or MSX-ENGINE, so the I/O read data bus is actively driven by the on-chip PPI logic, causing bus contention with the PicoVerse. See the [FPGA Incompatibility Details](#fpga-incompatibility-details) section below for a full technical explanation.
 
 ---
 
@@ -266,7 +266,7 @@ USB hubs are supported, so you can use a hub to connect the keyboard if your ada
 
 ## Limitations
 
-- **FPGA MSX systems are not supported.** The FPGA's internal PPI unconditionally drives the cartridge slot data bus on keyboard port reads, causing bus contention with the PicoVerse. See the [FPGA Incompatibility Details](#fpga-incompatibility-details) section for the full analysis.
+- **FPGA MSX systems and MSX computers with an integrated PPI are not supported.** The FPGA's (or MSX-ENGINE's) internal PPI unconditionally drives the cartridge slot data bus on keyboard port reads, causing bus contention with the PicoVerse. This affects all FPGA clones and Panasonic models using the T9769 MSX-ENGINE (e.g. FS-A1FX, FS-A1ST, FS-A1GT). See the [FPGA Incompatibility Details](#fpga-incompatibility-details) section for the full analysis.
 - **Boot protocol only.** The firmware processes USB HID boot protocol reports (8 bytes). Keyboards that do not support boot protocol or that only work in report protocol are not compatible.
 - **6-key rollover limit.** USB boot protocol reports a maximum of 6 simultaneous keycodes plus modifiers. This is a USB specification constraint, not a firmware limitation.
 - **No LED feedback.** The firmware does not currently send LED state (Caps Lock, Num Lock, Scroll Lock) back to the USB keyboard.

@@ -1625,6 +1625,300 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
     }
 }
 
+// -----------------------------------------------------------------------
+// Manbow2 mapper — Konami SCC banking + AMD AM29F040B flash emulation
+// -----------------------------------------------------------------------
+// The Manbow2 cartridge uses standard Konami SCC bank switching (4×8KB
+// windows at 0x4000-0xBFFF) backed by an AMD AM29F040B 512KB flash chip.
+// The last 64KB sector (0x70000-0x7FFFF) is writable and used for save
+// data.  All writes in the 0x4000-0xBFFF window pass through both the
+// bank-switch decoder and the flash command state machine.
+//
+// Flash protocol (simplified — only the commands the game actually uses):
+//   Program byte:  AA→[x555] 55→[x2AA] A0→[x555] data→[target]
+//   Sector erase:  AA→[x555] 55→[x2AA] 80→[x555] AA→[x555] 55→[x2AA] 30→[sector]
+//   Auto-select:   AA→[x555] 55→[x2AA] 90→[x555]
+//   Reset:         F0→[any]
+//
+// Save data is backed by SRAM (volatile — lost on power off).  The last
+// 64KB of the 192KB SRAM pool is reserved for the writable sector, leaving
+// 128KB for the normal ROM cache.
+
+// Flash state machine states
+enum manbow2_flash_state {
+    MBW2_READ = 0,    // Normal read mode
+    MBW2_CMD1,        // Received AA at x555, waiting for 55 at x2AA
+    MBW2_CMD2,        // Received 55 at x2AA, waiting for command byte at x555
+    MBW2_AUTOSELECT,  // Auto-select / ID mode
+    MBW2_PROGRAM,     // Waiting for single data byte to program
+    MBW2_ERASE_CMD1,  // Received 80, waiting for AA at x555
+    MBW2_ERASE_CMD2,  // Received AA, waiting for 55 at x2AA
+    MBW2_ERASE_CMD3   // Received 55, waiting for 30 + sector address
+};
+
+// Context for the Manbow2 mapper write handler and main loop
+typedef struct {
+    uint8_t bank_regs[4];         // Bank registers (Konami SCC style)
+    enum manbow2_flash_state state;
+    uint8_t *writable_sram;       // Pointer to 64KB SRAM backing the writable sector
+    uint32_t writable_offset;     // First flash byte offset of writable sector (0x70000)
+    uint32_t writable_size;       // Size of writable sector (0x10000 = 64KB)
+    uint32_t rom_size_mask;       // ROM size - 1 (for bank wrapping)
+} manbow2_ctx_t;
+
+// Manbow2 write handler — processes both bank switching and flash commands.
+// Every write in 0x4000-0xBFFF is routed here.
+static inline void __not_in_flash_func(handle_manbow2_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    manbow2_ctx_t *mb = (manbow2_ctx_t *)ctx;
+
+    if (addr < 0x4000u || addr > 0xBFFFu)
+        return;
+
+    uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+
+    // --- Flash command state machine ---
+    // Compute the absolute flash address BEFORE updating the bank register.
+    // This matches openMSX: flash.write(addr, value) uses the OLD bank,
+    // then setRom(page, value) updates it afterward.
+    uint32_t flash_addr = (uint32_t)mb->bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+    // --- Bank switching (Konami SCC style) ---
+    // Writes where (addr & 0x1800) == 0x1000 within each 8KB page select banks.
+    // Updated AFTER flash_addr is computed (matches real hardware ordering).
+    if ((addr & 0x1800u) == 0x1000u)
+    {
+        mb->bank_regs[page] = data & 0x3Fu;  // mask to 64 blocks (512KB / 8KB)
+    }
+
+    // Reset command (F0) from any state
+    if (data == 0xF0u)
+    {
+        mb->state = MBW2_READ;
+        return;
+    }
+
+    switch (mb->state)
+    {
+        case MBW2_READ:
+            if ((flash_addr & 0x7FFu) == 0x555u && data == 0xAAu)
+                mb->state = MBW2_CMD1;
+            break;
+
+        case MBW2_CMD1:
+            if ((flash_addr & 0x7FFu) == 0x2AAu && data == 0x55u)
+                mb->state = MBW2_CMD2;
+            else
+                mb->state = MBW2_READ;
+            break;
+
+        case MBW2_CMD2:
+            if (data == 0xA0u)
+                mb->state = MBW2_PROGRAM;
+            else if (data == 0x90u)
+                mb->state = MBW2_AUTOSELECT;
+            else if (data == 0x80u)
+                mb->state = MBW2_ERASE_CMD1;
+            else
+                mb->state = MBW2_READ;
+            break;
+
+        case MBW2_PROGRAM:
+        {
+            // Program a single byte: flash can only clear bits (AND with existing data).
+            // Only the writable sector accepts programming.
+            if (flash_addr >= mb->writable_offset &&
+                flash_addr < mb->writable_offset + mb->writable_size)
+            {
+                uint32_t sram_off = flash_addr - mb->writable_offset;
+                mb->writable_sram[sram_off] &= data;  // Flash program = AND
+            }
+            mb->state = MBW2_READ;
+            break;
+        }
+
+        case MBW2_ERASE_CMD1:
+            if ((flash_addr & 0x7FFu) == 0x555u && data == 0xAAu)
+                mb->state = MBW2_ERASE_CMD2;
+            else
+                mb->state = MBW2_READ;
+            break;
+
+        case MBW2_ERASE_CMD2:
+            if ((flash_addr & 0x7FFu) == 0x2AAu && data == 0x55u)
+                mb->state = MBW2_ERASE_CMD3;
+            else
+                mb->state = MBW2_READ;
+            break;
+
+        case MBW2_ERASE_CMD3:
+            if (data == 0x30u)
+            {
+                // Erase the sector containing flash_addr, if writable.
+                if (flash_addr >= mb->writable_offset &&
+                    flash_addr < mb->writable_offset + mb->writable_size)
+                {
+                    memset(mb->writable_sram, 0xFF, mb->writable_size);
+                }
+            }
+            mb->state = MBW2_READ;
+            break;
+
+        case MBW2_AUTOSELECT:
+            // Only F0 (handled above) exits auto-select mode.
+            // Any other write is ignored while in this state.
+            break;
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_manbow2 - Manbow2 (Konami SCC + AMD flash) mapper
+// -----------------------------------------------------------------------
+// 8KB banks: 4000-5FFF, 6000-7FFF, 8000-9FFF, A000-BFFF
+// Same bank select addresses as Konami SCC.
+// Flash sector 7 (last 64KB of 512KB ROM) is writable via SRAM.
+void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+
+    // Reserve the last 64KB of the 192KB SRAM pool for the writable flash sector.
+    // This leaves 128KB for the ROM cache (sufficient for the first portion
+    // of the 512KB ROM; the remainder is served from flash XIP).
+    static const uint32_t WRITABLE_SECTOR_SIZE   = 0x10000u;  // 64KB
+    static const uint32_t WRITABLE_SECTOR_OFFSET = 0x70000u;  // Last sector of 512KB
+    uint32_t reduced_cache = CACHE_SIZE - WRITABLE_SECTOR_SIZE;
+
+    // Cache only the first 128KB by passing reduced_cache as preferred_size.
+    // prepare_rom_source will DMA that much into rom_sram and set
+    // rom_cached_size accordingly.
+    prepare_rom_source(offset, cache_enable, reduced_cache, &rom_base, &available_length);
+
+    // Override: prepare_rom_source capped available_length at 128KB and
+    // pointed rom_base at rom_sram.  Reset both so the full ROM is
+    // accessible: read_rom_byte serves the first 128KB from the SRAM cache
+    // (via rom_cached_size) and the remainder from flash XIP.
+    rom_base = rom + offset;
+    available_length = active_rom_size;
+
+    // Set up the writable SRAM area (last 64KB of rom_sram)
+    uint8_t *writable_sram = &rom_sram[reduced_cache];
+
+    // Initialise writable sector with ROM content (the original save data area).
+    // Always read from flash, not the SRAM cache, because the cache only
+    // covers the first 128KB.
+    if (available_length >= WRITABLE_SECTOR_OFFSET + WRITABLE_SECTOR_SIZE)
+    {
+        const uint8_t *flash_rom = rom + offset;
+        memcpy(writable_sram, flash_rom + WRITABLE_SECTOR_OFFSET, WRITABLE_SECTOR_SIZE);
+    }
+    else if (available_length > WRITABLE_SECTOR_OFFSET)
+    {
+        const uint8_t *flash_rom = rom + offset;
+        uint32_t partial = available_length - WRITABLE_SECTOR_OFFSET;
+        memcpy(writable_sram, flash_rom + WRITABLE_SECTOR_OFFSET, partial);
+        memset(writable_sram + partial, 0xFF, WRITABLE_SECTOR_SIZE - partial);
+    }
+    else
+    {
+        memset(writable_sram, 0xFF, WRITABLE_SECTOR_SIZE);
+    }
+
+    // Initialize Manbow2 context
+    manbow2_ctx_t mb = {
+        .bank_regs = {0, 1, 2, 3},
+        .state = MBW2_READ,
+        .writable_sram = writable_sram,
+        .writable_offset = WRITABLE_SECTOR_OFFSET,
+        .writable_size = WRITABLE_SECTOR_SIZE,
+        .rom_size_mask = 0
+    };
+
+    msx_pio_bus_init();
+
+    // Main loop: service PIO read/write events.
+    // Unlike the generic banked8_loop, this loop continuously drains the
+    // write FIFO even while waiting for reads.  Manbow2 generates heavy
+    // write traffic (flash data written through 0x5000-0x57FF etc.) that
+    // can overflow the 8-entry PIO FIFO if writes are only drained around
+    // read events.  Lost bank-switch writes cause the Z80 to read from
+    // the wrong bank, crashing the game.  Same pattern as loadrom_sunrise.
+    while (true)
+    {
+        uint16_t addr;
+
+        // Poll: drain write FIFO continuously while waiting for a read
+        while (true)
+        {
+            uint16_t waddr;
+            uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                handle_manbow2_write(waddr, wdata, &mb);
+            }
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        // Drain any writes that arrived alongside the read
+        {
+            uint16_t waddr;
+            uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                handle_manbow2_write(waddr, wdata, &mb);
+            }
+        }
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+            uint32_t rel = (uint32_t)mb.bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+            if (mb.state == MBW2_AUTOSELECT)
+            {
+                // AMD auto-select: manufacturer ID at offset 0, device ID at offset 1
+                // Sector protection at offset 2, extra code at offset 3
+                uint32_t id_addr = rel & 0x03u;
+                if (id_addr == 0x00u)
+                    data = 0x01u;  // AMD manufacturer ID
+                else if (id_addr == 0x01u)
+                    data = 0xA4u;  // AM29F040B device ID
+                else if (id_addr == 0x02u)
+                {
+                    // Sector write-protect status: 0 = writable, 1 = protected
+                    // Only sector 7 (0x70000-0x7FFFF) is writable
+                    data = (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size)
+                           ? 0x00u : 0x01u;
+                }
+                else
+                    data = 0x00u;
+            }
+            else
+            {
+                // Normal read: check writable sector first, then ROM
+                if (rel >= mb.writable_offset &&
+                    rel < mb.writable_offset + mb.writable_size)
+                {
+                    data = writable_sram[rel - mb.writable_offset];
+                }
+                else if (available_length == 0u || rel < available_length)
+                {
+                    data = read_rom_byte(rom_base, rel);
+                }
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
 // Main function running on core 0
 int main(void)
 {
@@ -1678,6 +1972,9 @@ int main(void)
             break;
         case 13:
             loadrom_planar64(selected->Offset, true);
+            break;
+        case 14:
+            loadrom_manbow2(selected->Offset, true);
             break;
         default:
             printf("Debug: Unsupported ROM mapper: %d\n", selected->Mapper);
