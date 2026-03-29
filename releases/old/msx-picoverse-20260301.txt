@@ -1,2 +1,0 @@
-- New standalone **USB Keyboard** firmware for PicoVerse 2040 GÇö turns the cartridge into a dedicated USB-to-MSX keyboard interface via `loadrom.exe -k`. Works with any games/software but with original MSX hardware only (not FPGA). ***(NEW!)***
-
