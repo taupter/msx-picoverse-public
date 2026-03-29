@@ -1,0 +1,98 @@
+; MSX PICOVERSE PROJECT
+; (c) 2026 Cristiano Goncalves
+; The Retro Hacker
+;
+; msx_joystick.pio - Dedicated PIO programs for the MSX USB joystick cartridge
+;
+; Pin mapping:
+;   GPIO  0-15  = A0..A15   (address bus, always input)
+;   GPIO 16-23  = D0..D7    (data bus, bidirectional)
+;   GPIO 24     = /RD       (active-low read strobe)
+;   GPIO 25     = /WR       (active-low write strobe)
+;   GPIO 26     = /IORQ     (active-low I/O request)
+;   GPIO 27     = /SLTSL    (unused — joystick uses I/O only)
+;   GPIO 28     = /WAIT     (active-low, driven by PIO side-set)
+;   GPIO 29     = BUSSDIR
+;
+; The joystick firmware intercepts PSG I/O ports:
+;   0xA0 (OUT) — PSG register address latch
+;   0xA1 (OUT) — PSG register data write (R15 bit 6 = port select)
+;   0xA2 (IN)  — PSG register data read (R14 = joystick state)
+;
+; The I/O read PIO program asserts /WAIT to freeze the Z80 until
+; Core 0 supplies the response.  For reads where the latched register
+; is not R14, Core 0 responds with tri-state to let the real PSG chip
+; drive the bus uncontested.  For R14, it uses open-drain: only drives
+; LOW for pressed buttons, tri-states unpressed bits.
+;
+; This work is licensed under a "Creative Commons Attribution-NonCommercial-
+; ShareAlike 4.0 International License".
+; https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+; ===================================================================
+; msx_joy_io_read — I/O read responder WITH /WAIT
+; ===================================================================
+; Intercepts I/O read cycles (/IORQ + /RD) and holds /WAIT while
+; waiting for the CPU to supply the response byte.
+;
+; Side-set: 1 pin = /WAIT (GPIO 28, active-low)
+;   side 1 = /WAIT released   (Z80 runs)
+;   side 0 = /WAIT asserted   (Z80 frozen)
+;
+; in_base     = GPIO 0  (A0), 16 pins
+; out_base    = GPIO 16 (D0), 8 pins
+; sideset_pin = GPIO 28 (/WAIT)
+; jmp_pin     = /RD (GPIO 24)
+;
+; TX FIFO data token from CPU (16 bits):
+;   bits[7:0]  = data byte for D0..D7
+;   bits[15:8] = pindirs (0xFF = drive bus, 0x00 = tri-state,
+;                          or partial mask for open-drain)
+
+.program msx_joy_io_read
+.side_set 1 opt
+
+.wrap_target
+wait_iorq:
+    wait 0 gpio 26     side 1     ; Wait for /IORQ=0. /WAIT released.
+    jmp pin wait_iorq   side 1     ; If /RD=1 (no read), loop back
+    nop                 side 0     ; Assert /WAIT=0 immediately to freeze Z80
+    in pins, 16         side 0     ; Capture A0..A15 into ISR
+    push block          side 0     ; Send address to CPU via RX FIFO
+    pull block          side 0     ; Stall until CPU responds (Z80 frozen)
+    out pins, 8         side 0     ; Drive D0..D7 with response byte
+    out pindirs, 8      side 0     ; Set pindirs (partial mask for open-drain)
+    nop                 side 1 [1] ; Release /WAIT; data valid. 2-cycle hold.
+    wait 1 gpio 24      side 1     ; Wait for /RD=1 (bus cycle complete)
+    set x, 0            side 1     ; Prepare zero
+    mov osr, x          side 1     ; Load zero into OSR
+    out pindirs, 8      side 1     ; Tri-state D0..D7
+.wrap
+
+; ===================================================================
+; msx_joy_io_write — I/O write captor
+; ===================================================================
+; Captures address + data during I/O write cycles (/IORQ + /WR).
+; Used for port 0xA0 (PSG register latch) and 0xA1 (PSG data write).
+;
+; No side-set needed (writes don't require bus hold).
+; FIFO join RX for 8-deep buffering.
+;
+; RX FIFO word format (via mov isr, pins — 32 bits of GPIO state):
+;   bits[7:0]   = A0..A7   (port address)
+;   bits[15:8]  = A8..A15  (upper address, ignored)
+;   bits[23:16] = D0..D7   (data byte)
+;
+; jmp_pin = /WR (GPIO 25)
+
+.program msx_joy_io_write
+
+.wrap_target
+wait_iorq:
+    wait 0 gpio 26           ; Wait for /IORQ=0
+    jmp pin wait_iorq         ; If /WR=1, loop back
+    nop              [2]     ; Let address + data settle (3 cycles)
+    mov isr, pins            ; Snapshot all GPIOs into ISR
+    push block               ; Send (addr+data) to CPU via RX FIFO
+    wait 1 gpio 25           ; Wait for /WR=1 (cycle complete)
+.wrap

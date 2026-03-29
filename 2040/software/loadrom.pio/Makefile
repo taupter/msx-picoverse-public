@@ -9,7 +9,7 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.55
+VERSION ?= v2.56
 
 # Paths
 PICO_DIR := pico/loadrom
@@ -24,6 +24,9 @@ MIDI_CONFIG := $(MIDI_BUILD)/build.ninja
 MIDIPAC_DIR := pico/midipac
 MIDIPAC_BUILD := $(MIDIPAC_DIR)/build
 MIDIPAC_CONFIG := $(MIDIPAC_BUILD)/build.ninja
+JOYSTICK_DIR := pico/joystick
+JOYSTICK_BUILD := $(JOYSTICK_DIR)/build
+JOYSTICK_CONFIG := $(JOYSTICK_BUILD)/build.ninja
 TOOL_DIR := tool
 
 # CMake options
@@ -48,9 +51,9 @@ MAKE ?= make
 
 
 
-.PHONY: all firmware keyboard midi midipac tool clean
+.PHONY: all firmware keyboard midi midipac joystick tool clean
 
-all: firmware keyboard midi midipac tool
+all: firmware keyboard midi midipac joystick tool
 
 firmware:
 	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) $(PYTHON3_EXECUTABLE_FLAG) -S "$(PICO_DIR)" -B "$(PICO_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
@@ -72,12 +75,17 @@ midipac:
 	@echo "Building MIDI-PAC firmware"
 	@$(CMAKE) --build "$(MIDIPAC_BUILD)"
 
+joystick:
+	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) $(PYTHON3_EXECUTABLE_FLAG) -S "$(JOYSTICK_DIR)" -B "$(JOYSTICK_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+	@echo "Building Joystick firmware"
+	@$(CMAKE) --build "$(JOYSTICK_BUILD)"
+
 tool:
 	@echo "Building PC tool"
 	@"$(MAKE)" -C "$(TOOL_DIR)" VERSION=$(VERSION)
 
 clean:
-	@echo "Cleaning firmware, keyboard, midi, midipac, and tool"
+	@echo "Cleaning firmware, keyboard, midi, midipac, joystick, and tool"
 	@"$(MAKE)" -C "$(TOOL_DIR)" clean VERSION=$(VERSION)
 	@$(CMAKE) --build "$(PICO_BUILD)" --target clean || true
 	@$(CMAKE) -E rm -rf "$(PICO_BUILD)"
@@ -87,3 +95,5 @@ clean:
 	@$(CMAKE) -E rm -rf "$(MIDI_BUILD)"
 	@$(CMAKE) --build "$(MIDIPAC_BUILD)" --target clean || true
 	@$(CMAKE) -E rm -rf "$(MIDIPAC_BUILD)"
+	@$(CMAKE) --build "$(JOYSTICK_BUILD)" --target clean || true
+	@$(CMAKE) -E rm -rf "$(JOYSTICK_BUILD)"

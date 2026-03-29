@@ -15,16 +15,16 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.1.1)
+set(sdkVersion 2.2.0)
 set(toolchainVersion 14_2_Rel1)
-set(picotoolVersion 2.1.1)
+set(picotoolVersion 2.2.0-a4)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
 set(PICO_BOARD pico2 CACHE STRING "Board type")
-set(PICO_COPY_TO_RAM 1)
+# set(PICO_COPY_TO_RAM 1)
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -38,12 +38,19 @@ project(loadrom C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+# SD card library (no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
+add_subdirectory(lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src build_sd_lib)
+
 # add_compile_options(-O3)
 
 # Add executable. Default name is the project name, version 0.1
 add_executable(loadrom 
+    ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c
     loadrom.c 
     emu2212.c
+    sunrise_ide.c
+    sunrise_sd.c
+    hw_config.c
     )
 
 pico_generate_pio_header(loadrom ${CMAKE_CURRENT_LIST_DIR}/msx_bus.pio)
@@ -61,7 +68,10 @@ target_link_libraries(loadrom
     pico_multicore
     pico_audio_i2s
     hardware_dma
-    hardware_pio)
+    hardware_pio
+    tinyusb_board
+    tinyusb_host
+    no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
 
 target_compile_definitions(loadrom PRIVATE
     PICO_AUDIO_I2S_PIO=1

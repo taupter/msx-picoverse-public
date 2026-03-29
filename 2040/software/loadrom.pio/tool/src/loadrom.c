@@ -29,6 +29,7 @@
 #include "keyboard.h"
 #include "midi_fw.h"
 #include "midipac_fw.h"
+#include "joystick_fw.h"
 #include "../../../tools/sha1.h"
 #include "../../../tools/romdb.h"
 
@@ -386,7 +387,7 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s] [-m] [-k] [-i] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s] [-m] [-k] [-i] [-p] [-j] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help     Show this help message\n");
@@ -395,6 +396,7 @@ static void print_usage(const char *prog_name) {
     printf("  -k, --keyboard Build UF2 with USB keyboard firmware (dedicated keyboard cartridge)\n");
     printf("  -i, --midi     Build UF2 with USB MIDI firmware (MSX-MIDI interface via USB cable)\n");
     printf("  -p, --midipac  Build UF2 with MIDI-PAC firmware (PSG-to-MIDI via USB cable)\n");
+    printf("  -j, --joystick Build UF2 with USB joystick firmware (USB gamepad to MSX joystick)\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("Mapper forcing: append tags (case-insensitive) before the ROM extension.\n");
@@ -559,6 +561,7 @@ int main(int argc, char *argv[])
     bool use_keyboard = false;
     bool use_midi = false;
     bool use_midipac = false;
+    bool use_joystick = false;
 
     for (int i = 1; i < argc; ++i) {
         if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
@@ -574,6 +577,8 @@ int main(int argc, char *argv[])
             use_midi = true;
         } else if ((strcmp(argv[i], "-p") == 0) || (strcmp(argv[i], "--midipac") == 0)) {
             use_midipac = true;
+        } else if ((strcmp(argv[i], "-j") == 0) || (strcmp(argv[i], "--joystick") == 0)) {
+            use_joystick = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
             if (i + 1 >= argc) {
                 printf("Option -o/--output requires a filename.\n");
@@ -596,18 +601,23 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (use_keyboard && (use_sunrise || use_mapper || use_midi || use_midipac || rom_filename)) {
-        printf("Option -k is standalone and cannot be combined with -s, -m, -i, -p, or a ROM file.\n");
+    if (use_keyboard && (use_sunrise || use_mapper || use_midi || use_midipac || use_joystick || rom_filename)) {
+        printf("Option -k is standalone and cannot be combined with -s, -m, -i, -p, -j, or a ROM file.\n");
         return 1;
     }
 
-    if (use_midi && (use_sunrise || use_mapper || use_keyboard || use_midipac || rom_filename)) {
-        printf("Option -i is standalone and cannot be combined with -s, -m, -k, -p, or a ROM file.\n");
+    if (use_midi && (use_sunrise || use_mapper || use_keyboard || use_midipac || use_joystick || rom_filename)) {
+        printf("Option -i is standalone and cannot be combined with -s, -m, -k, -p, -j, or a ROM file.\n");
         return 1;
     }
 
-    if (use_midipac && (use_sunrise || use_mapper || use_keyboard || use_midi || rom_filename)) {
-        printf("Option -p is standalone and cannot be combined with -s, -m, -k, -i, or a ROM file.\n");
+    if (use_midipac && (use_sunrise || use_mapper || use_keyboard || use_midi || use_joystick || rom_filename)) {
+        printf("Option -p is standalone and cannot be combined with -s, -m, -k, -i, -j, or a ROM file.\n");
+        return 1;
+    }
+
+    if (use_joystick && (use_sunrise || use_mapper || use_keyboard || use_midi || use_midipac || rom_filename)) {
+        printf("Option -j is standalone and cannot be combined with -s, -m, -k, -i, -p, or a ROM file.\n");
         return 1;
     }
 
@@ -713,6 +723,54 @@ int main(int argc, char *argv[])
         const size_t fw_size = sizeof(___pico_keyboard_dist_keyboard_bin);
 
         printf("Mode: USB Keyboard (dedicated cartridge)\n");
+        printf("Firmware Size: %zu bytes\n", fw_size);
+        printf("UF2 Output: %s\n", output_filename);
+
+        FILE *uf2_file = fopen(output_filename, "wb");
+        if (!uf2_file) {
+            perror("Failed to create UF2 file");
+            return 1;
+        }
+
+        UF2_Block bl;
+        memset(&bl, 0, sizeof(bl));
+        bl.magicStart0 = UF2_MAGIC_START0;
+        bl.magicStart1 = UF2_MAGIC_START1;
+        bl.flags = UF2_FLAG_FAMILYID_PRESENT;
+        bl.magicEnd = UF2_MAGIC_END;
+        bl.targetAddr = FLASH_START;
+        bl.payloadSize = 256;
+        bl.numBlocks = (uint32_t)((fw_size + bl.payloadSize - 1) / bl.payloadSize);
+        bl.fileSize = RP2040_FAMILY_ID;
+
+        size_t offset = 0;
+        uint32_t block_no = 0;
+        while (offset < fw_size) {
+            memset(bl.data, 0, sizeof(bl.data));
+            size_t chunk = fw_size - offset;
+            if (chunk > bl.payloadSize) chunk = bl.payloadSize;
+            memcpy(bl.data, fw_data + offset, chunk);
+            bl.blockNo = block_no++;
+            if (fwrite(&bl, 1, sizeof(bl), uf2_file) != sizeof(bl)) {
+                printf("Failed to write UF2 block %u.\n", block_no - 1);
+                fclose(uf2_file);
+                return 1;
+            }
+            bl.targetAddr += bl.payloadSize;
+            offset += chunk;
+        }
+
+        fclose(uf2_file);
+        printf("\nSuccessfully wrote %u blocks to %s.\n", block_no, output_filename);
+        return 0;
+    }
+
+    if (use_joystick) {
+        // Joystick mode: write standalone USB joystick firmware as UF2
+        const uint8_t *fw_data = ___pico_joystick_dist_joystick_bin;
+        const size_t fw_size = sizeof(___pico_joystick_dist_joystick_bin);
+
+        printf("Mode: USB Joystick (USB gamepad to MSX joystick via PSG)\n");
         printf("Firmware Size: %zu bytes\n", fw_size);
         printf("UF2 Output: %s\n", output_filename);
 

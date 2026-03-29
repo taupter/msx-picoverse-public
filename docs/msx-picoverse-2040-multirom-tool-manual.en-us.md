@@ -78,14 +78,15 @@ multirom.exe [options]
 3. The combined payload is written as a UF2 file named `multirom.uf2` using `create_uf2_file()` which produces 256-byte payload UF2 blocks targeted to the Pico flash address `0x10000000`.
 
 ## Mapper detection heuristics
-- `detect_rom_type()` implements a combination of signature checks ("AB" header, `ROM_NEO8` / `ROM_NE16` tags) and heuristic scanning of opcodes and addresses to pick common MSX mappers, including (but not limited to):
+- `detect_rom_type()` implements a combination of signature checks ("AB" header, `ROM_NEO8` / `ROM_NE16` / `ASCII16X` tags) and heuristic scanning of opcodes and addresses to pick common MSX mappers, including (but not limited to):
   - Plain 16KB (mapper byte 1) — 16KB AB header check
   - Plain 32KB (mapper byte 2) — 32KB AB header check
   - Planar48 mapper (mapper byte 4, tag `PLN-48`) — special AB layout check
   - Planar64 mapper (mapper byte 13, tag `PLN-64`) — 64KB planar layout
-  - NEO8 (mapper byte 8) and NEO16 (mapper byte 9)
-  - Konami, Konami SCC, ASCII8, ASCII16 and others via weighted scoring
+  - NEO8 (mapper byte 8) and NEO16 (mapper byte 9) — signature-based detection
+  - ASCII16-X (mapper byte 12, tag `ASC-16X`) — `ASCII16X` signature at ROM offset 16
   - Manbow2 (mapper byte 14, tag `MANBW2`) — 512 KB Manbow 2 signature check
+  - Konami, Konami SCC, ASCII8, ASCII16 and others via unit-weight scoring aligned with openMSX's `guessRomType()` algorithm
 - Before applying heuristics, the tool computes the SHA-1 hash of the ROM and looks it up in an embedded database derived from the openMSX `softwaredb.xml`. When a match is found the database mapper type is used directly, bypassing the heuristic scanner. This improves accuracy for titles whose mapper cannot be reliably distinguished by opcode analysis alone.
 - If no mapper can be reliably detected, the tool skips the ROM and reports "unsupported mapper". Remember you can force a mapper via filename tag. The tags are case-insensitive and are listed below. 
 - Only the following mapper tags are supported in the configuration area and menu: `PLA-16, PLA-32, KonSCC, PLN-48, ASC-08, ASC-16, ASC-16X, Konami, NEO-8, NEO-16, PLN-64, MANBW2`.
@@ -190,4 +191,4 @@ Sunrise IDE Nextor ROM (options `-s` and `-m`) has been tested on the following 
 | Yamaha YIS604 | MSX1 | OK | Verified operation |
 
 Author: Cristiano  Goncalves
-Last updated: 03/28/2026
+Last updated: 03/29/2026

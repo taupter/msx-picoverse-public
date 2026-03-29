@@ -16,7 +16,10 @@
 
 #define ROM_NAME_MAX    50   // Maximum size of the ROM name
 #define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2)) // Name + mapper + size + offset
-#define CACHE_SIZE      196608     // 192KB cache size for ROM data
+#define CACHE_SIZE      262144     // 256KB cache size for ROM data
+#define MAPPER_SIZE     262144     // 256 KB memory mapper RAM
+#define MAPPER_PAGES    16         // 256 KB / 16 KB = 16 pages
+#define MAPPER_PAGE_SIZE 16384     // 16 KB per mapper page
 
 // -----------------------
 // User-defined pin assignments for the Raspberry Pi Pico
@@ -74,8 +77,19 @@
 // The ROM data is concatenated immediately after this point.
 extern unsigned char __flash_binary_end;
 
-// Optionally copy the ROM into this SRAM buffer for faster access
-static uint8_t rom_sram[CACHE_SIZE];
+// Optionally copy the ROM into this SRAM buffer for faster access.
+// Normal modes use the full 256KB as ROM cache.
+// Sunrise+Mapper mode uses the full 256KB as mapper RAM (no ROM cache).
+static union {
+    uint8_t rom_sram[CACHE_SIZE];           // normal: full 256KB ROM cache
+    struct {
+        uint8_t mapper_ram[MAPPER_SIZE];      // mapper: 256KB mapper RAM
+    } mapper;
+} sram_pool;
+
+#define rom_sram    sram_pool.rom_sram
+#define mapper_ram  sram_pool.mapper.mapper_ram
+
 static uint32_t active_rom_size = 0;
 
 

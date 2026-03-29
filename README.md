@@ -10,27 +10,44 @@ PicoVerse is a community-driven effort to build versatile MSX cartridges powered
 
 PicoVerse is designed as an open-source, independent, and documented MSX cartridge platform. Compatibility with other projects is neither a goal nor guaranteed (I tested some without much success); running third‑party software on PicoVerse hardware, or PicoVerse firmware on other boards, is at your own risk. The source and manufacturing files are openly available so you can learn, experiment, and build on them for the MSX community, subject to the project license.
 
+If you find any issues, have questions, or want to contribute, please open an issue or reach out via the contact information in the repository.
+
 ## Whats New in PicoVerse?
 
-- LoadRom and Multirom v2.55 released
-- Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
-- Improved cache for mega mappers
-- Added Manbow2 mapper (Type 14) support (e.g., Space Manbow 2)
-- Enhanced ASCII16-X support, now compatible with MSXDEV25 titles like NOP Asteroids and Neon Horizon.
-- Increased stability during heavy flash write operations (required to support Manbow2 and some ASCII16-X games).
-- Updated documentation.
+- PicoVerse 2040 LoadROM and MultiROM v2.56 released!!
+  - There is now a dedicated loadrom -j option that allows the use of USB gamepads (HID, Xbox 360, Xbox One, or Xbox Series X|S) with MSX computers with discrete PSGs.
+  - Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
+  - Improved cache algorithm for mega mappers (NEO-8, NEO-16, ASCII16-X).
+  - Added Manbow2 mapper (Type 14) support (e.g., Space Manbow 2). There is no SCC emulation, but the cartridge emulates the flash-based storage used by the game for saves. Manbow2 ROMs are auto-detected by size (512 KB) and mapper type, and save data is volatile (SRAM-backed).
+  - Enhanced ASCII16-X support, now compatible with MSXDEV25 titles like NOP Asteroids and Neon Horizon.
+  - Increased stability during heavy flash write operations (required to support Manbow2 and some ASCII16-X games).
+  - Updated documentation:
+    - Added a detailed compatibility table for the new joystick firmware.
+    - New PicoVerse 2040 USB Joystick documentation with technical details on the architecture and implementation of the joystick firmware.
+    - New PicoVerse 2040 MegaROMs documentation covering the handling of large ROMs, mapper support, and performance optimizations for all the ROM mappers supported.
+- PicoVerse 2350 LoadROM v2.50 released!!
+  - Added support for the Sunrise IDE Nextor ROM and Sunrise + Mapper configurations on the PicoVerse 2350, using either the on-board microSD card (`-s1`/`-m1`) or USB mass storage (`-s2`/`-m2`). These options embed the Nextor 2.1.4 Sunrise IDE kernel and bridge storage through the cartridge, allowing the MSX to see a standard Sunrise IDE hard disk.
+  - Equalized all mapper support between the 2040 and 2350 variants, including ASCII16-X, the Sunrise IDE options and Manbow2 mapper support.
+  - Added SCC/SCC+ emulation support for Manbow2 mapper on the PicoVerse 2350. 
+  - Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
+  - Updated documentation:
+    - New PicoVerse 2350 Sunrise IDE Emulation for Nextor documentation covering the architecture, implementation details, and usage instructions for the Sunrise IDE features on the PicoVerse 2350.
+    - LoadRom manual updates to reflect the new options and features.
 
 ## Project Highlights
 
 - Single-ROM LoadROM workflow for instant and easy booting of one title.
 - Multi-ROM loader with an on-screen menu and mapper auto-detection.
 - Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds MP3 playback, and supports on-device search.
-- Ready-made Nextor builds with USB (PicoVerse 2040) or microSD (PicoVerse 2350) with Sunrise IDE emulation. 
+- Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or microSD card (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
+- Sunrise IDE + 192KB memory mapper on PicoVerse 2040 (`loadrom.exe -m`), or Sunrise IDE standalone (`loadrom.exe -s`).
+- Sunrise IDE + 256KB memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`). 
 - SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. 
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
 - MSX-MIDI support on PicoVerse 2040 — use a USB-MIDI cable as a standard MSX-MIDI interface via the cartridge slot. 
 - MIDI-PAC support on PicoVerse 2040 — passively convert live MSX PSG music and effects into high-quality MIDI for external synths or sound modules (SC-55 optimized). Features automatic bass detection, tone+noise coexistence, smooth pitch bending on fast passages, and improved percussion mapping. 
+- USB joystick support on PicoVerse 2040 — plug a standard USB gamepad (HID, Xbox 360, Xbox One, or Xbox Series X|S) into the USB-C port and it appears as one or two native MSX joysticks with no MSX-side software needed. Uses open-drain bus driving to coexist with the real PSG.
 - BOMs, and production-ready Gerbers.
 - Active development roadmap covering RP2040 and RP2350-based cartridges.
 
@@ -53,13 +70,15 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 - [MSX PicoVerse 2040 PIO Strategy](/docs/msx-picoverse-2040-pio.md) 
 - [MSX PicoVerse 2350 PIO Strategy](/docs/msx-picoverse-2350-pio.md) 
 - [MSX PicoVerse 2350 SCC Emulation Guide](/docs/msx-picoverse-2350-scc.md)
-- [Nextor Pico Bridge Protocol](/docs/Nextor-Pico-Bridge-Protocol.md)
 - [MSX PicoVerse 2040 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2040-sunrise-nextor.md) 
+- [MSX PicoVerse 2350 Sunrise IDE Emulation for Nextor](/docs/msx-picoverse-2350-sunrise-nextor.md) 
 - [MSX PicoVerse 2040 Mapper Implementation (Sunrise + Nextor)](/docs/msx-picoverse-2040-mapper.md) 
 - [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md)
 - [MSX PicoVerse 2040 MSX-MIDI](/docs/msx-picoverse-2040-msx-midi.md) 
 - [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md)
 - [MSX PicoVerse 2040 MegaROMs](/docs/msx-picoverse-2040-megaroms.md)
+- [MSX PicoVerse 2040 USB Joystick](/docs/msx-picoverse-2040-joystick.md)
+
 
 ## Hardware Variants
 
@@ -70,11 +89,13 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 | ![Image 1](/images/20241230_001854885_iOS.jpg) | ![Image 2](/images/20241230_001901504_iOS.jpg) | 
 
 - Based on RP2040 boards exposing 30 GPIO pins (not compatible with stock Raspberry Pi Pico pinout).
-- Up to 16 MB of flash for MSX ROMs with support for Plain16/32 (`PLA-16`/`PLA-32`), Planar48/64 (`PLN-48`/`PLN-64`), Konami SCC, Konami, ASCII8/16, NEO-8, NEO-16, and Manbow2 (`MANBW2`) mappers.
-- USB-C port doubles as a bridge for Nextor mass storage.
+- Up to 16 MB of flash for MSX ROMs with support for Plain16/32 (`PLA-16`/`PLA-32`), Planar48/64 (`PLN-48`/`PLN-64`), Konami SCC, Konami, ASCII8/16/16X, NEO-8, NEO-16, and Manbow2 (`MANBW2`) mappers.
+- USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`loadrom.exe -s`).
+- Sunrise IDE + 192KB memory mapper mode provides both Nextor disk access and expanded RAM (`loadrom.exe -m`).
 - Standalone USB keyboard firmware — use a standard USB keyboard as the MSX keyboard via the cartridge slot (`loadrom.exe -k`). Not compatible with FPGA-based MSX systems or MSX computers with an integrated PPI (e.g. T9769 MSX-ENGINE).
 - Standalone MSX-MIDI firmware — use a USB-MIDI cable as a standard MSX-MIDI interface for MIDI players and sequencers (`loadrom.exe -i`).
 - Standalone MIDI-PAC firmware — passively listen to the MSX PSG and convert music and effects to USB MIDI for an external synth or sound module (`loadrom.exe -p`).
+- Standalone USB joystick firmware — use a standard USB gamepad as an MSX joystick via the cartridge slot (`loadrom.exe -j`). Supports Xbox 360, Xbox One, Xbox Series X|S, and generic USB HID gamepads, with up to 2 gamepads mapped to MSX joystick ports 1 and 2.  Not compatible with FPGA-based MSX systems or MSX computers with an integrated PSG (e.g. T9769 MSX-ENGINE).
 
 #### Bill of Materials
 
@@ -102,9 +123,12 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Adds microSD storage, ESP8266 WiFi header, and I2S audio expansion alongside 16 MB flash space.
 - Extra RAM (PSRAM) to support advanced emulation features in future firmware releases.
 - Explorer firmware can load ROMs from both flash and microSD, with source labels and search.
+- USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`loadrom.exe -s2`).
+- microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`loadrom.exe -s1`).
+- Sunrise IDE + 256KB memory mapper mode provides both Nextor disk access and expanded RAM (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB).
 - Shares the same ROM mapper support list as the 2040 build.
 
-#### Bill of Materials ***(NEW!)***
+#### Bill of Materials
 
 ![alt text](/images/2026-02-07_19-11.png)
 
@@ -139,7 +163,7 @@ Interactive BOM available at [PicoVerse 2350 BOM](https://htmlpreview.github.io/
 3. **Generate the UF2 image**:
    - For multiple titles, place your `.rom` files beside the MultiROM tool for your cartridge family (`2040/software/multirom/multirom.exe` or `2350/software/multirom/multirom.exe`) and run `multirom.exe` to create `multirom.uf2`.
    - For an instant boot into a single game, place the desired `.rom` next to the LoadROM tool for your cartridge family and run `loadrom.exe <file> [-o custom.uf2]` to create a dedicated UF2 that skips the menu.
-   - For a combined flash + microSD menu on RP2350, use the Explorer tool (`2350/software/explorer/tool/explorer.exe`) to create `explorer.uf2`, then copy extra `.rom` and `.mp3` files to the microSD card.
+   - For a combined flash + microSD menu (on PicoVerse 2350 only), use the Explorer tool (`2350/software/explorer/tool/explorer.exe`) to create `explorer.uf2`, then copy extra `.rom` and `.mp3` files to the microSD card.
 4. **Flash the firmware**:
    - Hold BOOTSEL while connecting the cartridge to your PC via USB-C.
    - Copy the freshly generated UF2 (`multirom.uf2`, `loadrom.uf2`, or `explorer.uf2`) to the RPI-RP2 drive that appears.
@@ -162,7 +186,7 @@ Check the detailed MultiROM guide in the documentation folder for advanced featu
 
 ## LoadROM Tool
 
-The LoadROM tool targets situations where you want the PicoVerse to behave like a traditional single-game cartridge or as a dedicated standalone firmware image. Instead of showing the MultiROM menu, the Pico boots straight into one ROM embedded in the UF2 image, or into a selected standalone mode such as keyboard, MSX-MIDI, or MIDI-PAC.
+The LoadROM tool targets situations where you want the PicoVerse to behave like a traditional single-game cartridge or as a dedicated standalone firmware image. Instead of showing the MultiROM menu, the Pico boots straight into one ROM embedded in the UF2 image, or into a selected standalone mode such as keyboard, MSX-MIDI, MIDI-PAC, or USB joystick.
 
 - **Input**: exactly one `.ROM` file. Mapper type is auto-detected with the same heuristics as MultiROM, and you can still force a mapper via filename tags such as `.KonSCC.ROM` or `.PLA-32.ROM`.
 - **Output**: `loadrom.uf2` by default, or any filename you pass via `-o`. The UF2 contains the firmware, a 59-byte configuration record (title, mapper, size, flash offset), and the ROM payload.
@@ -173,10 +197,11 @@ The LoadROM tool targets situations where you want the PicoVerse to behave like 
    2. Run `loadrom.exe -o mygame.uf2 \\path\\to\\Game.ROM` (the tool also accepts drag-and-drop onto the EXE).
       - MSX-MIDI standalone mode: `loadrom.exe -i -o midi.uf2`
       - MIDI-PAC standalone mode: `loadrom.exe -p -o midipac.uf2`
-      - SCC standard emulation: `loadrom.exe -scc \\path\\to\\Game.ROM`
-      - SCC+ enhanced emulation: `loadrom.exe -sccplus \\path\\to\\Game.ROM`
-      - `-scc` and `-sccplus` are mutually exclusive.
-      - SCC/SCC+ options are supported only in `2350/software/loadrom.pio/tool` (PIO firmware path), not in legacy `2350/software/loadrom/tool`.
+      - USB joystick standalone mode: `loadrom.exe -j -o joystick.uf2`
+      - SCC standard emulation (only PicoVerse 2350): `loadrom.exe -scc \\path\\to\\Game.ROM`
+      - SCC+ enhanced emulation (only PicoVerse 2350): `loadrom.exe -sccplus \\path\\to\\Game.ROM`
+      - `-scc` and `-sccplus` are mutually exclusive.      - Sunrise IDE standalone (only PicoVerse 2350): `loadrom.exe -s`
+      - Sunrise IDE + 256KB mapper (only PicoVerse 2350): `loadrom.exe -m`      - SCC/SCC+ options are supported only in `2350/software/loadrom.pio/tool` (PIO firmware path), not in legacy `2350/software/loadrom/tool`.
    3. Observe the reported ROM name, size, mapper status (auto vs forced), and Pico offset before the UF2 is written.
    4. Put the Pico into BOOTSEL mode and copy the generated UF2 to the `RPI-RP2` drive.
    5. Insert the cartridge into your MSX—on power-up the embedded game launches immediately.
@@ -193,7 +218,7 @@ Consult the LoadROM manuals linked above for screenshots, troubleshooting, and i
 |<center>**ROM Details Screen**||
 |![](/images/WIN_20260207_20_03_20_Pro.jpg)||
 
-Explorer is a 2350-only firmware that merges ROMs stored in flash with additional ROMs and MP3 files on the microSD card. ROMs are labeled with source tags (FL/SD), MP3 entries open a player screen, the list supports paging, and you can search by name directly in the menu. Use the Explorer tool to build the UF2 and copy extra ROMs and MP3 files to the microSD card. See the Explorer manual for limits (flash vs SD capacity, 256 KB SD ROM limit, and supported formats).
+Explorer is a PicoVerse 2350-only firmware that merges ROMs stored in flash with additional ROMs and MP3 files on the microSD card. ROMs are labeled with source tags (FL/SD), MP3 entries open a player screen, the list supports paging, and you can search by name directly in the menu. Use the Explorer tool to build the UF2 and copy extra ROMs and MP3 files to the microSD card. See the Explorer manual for limits (flash vs SD capacity, 256 KB SD ROM limit, and supported formats).
 
 You can have up to 1024 entries per folder view (folders + ROMs + MP3s; the root view can also include flash entries). The menu auto-detects whether the MSX supports 80-column text mode and boots accordingly; you can also press `C` at any time to toggle between 40- and 80-column layouts.
 
@@ -211,7 +236,7 @@ A search function is available by pressing `/` in the menu. Type part of a ROM n
 
 All hardware and firmware binaries in this repository are released under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International license. Personal builds and community tinkering are encouraged, but **commercial use or resale requires explicit authorization from the author**.
 
-**bios.h** is used on all MSX menus and was adapted from http://www.konamiman.com/msx/msx2th/th-ap.txt by Danilo Angelo, 2020. The original text file is licensed under CC0 1.0 Universal (public domain). The adapted bios.h file in this repository is also released under CC0 1.0 Universal, allowing for free use and modification without restrictions.
+**bios.h** is used on all MSX menus and was adapted from http://www.konamiman.com/msx/msx2th/th-ap.txt by Danilo Angelo, 2020. The original file is licensed under CC0 1.0 Universal (public domain). The adapted bios.h file in this repository is also released under CC0 1.0 Universal, allowing for free use and modification without restrictions.
 
 **msxromcrt0.s** is used on Nextor C implementation and was adapted by S0urceror, 2022, from the crt0.s file available in FusionC v2.0. The original crt0.s file is licensed under the MIT License. The adapted msxromcrt0.s file in this repository is also released under the MIT License, permitting free use, modification, and distribution with proper attribution.
 
@@ -230,13 +255,12 @@ The MIDI-PAC firmware and its quality improvements were developed against public
 - MSX-MIDI specification and USB MIDI 1.0 Event Packet format (USB Implementers Forum).  
 - The Sunrise IDE specification and Nextor protocol documentation.  
 
-These references informed structure, timing, envelope shapes, and musical mapping decisions. The PicoVerse firmware maintains its own implementation with no dependencies on external emulation libraries.
+These references informed structure, timing, envelope shapes, and musical mapping decisions. The PicoVerse firmware maintains its own implementation with no dependencies on external emulation libraries. The PicoVerse files are licensed under CC BY-NC-SA 4.0, allowing for non-commercial use and modification with proper attribution, but commercial use or resale requires explicit authorization from the author.
 
 **MSX-MIDI Interface:**  
 The MSX-MIDI firmware was developed using the MSX-MIDI specification, USB MIDI 1.0 specification, TinyUSB host API, and reference behavior from ESEMSX3 and similar implementations. The 8251 USART emulation and standard MIDI wire protocol handling are original PicoVerse implementations.
 
-**Sunrise IDE Nextor Integration:**  
-The Sunrise IDE driver for Nextor used on PicoVerse is copyright by Konamiman, Piter Punk, and FRS, and is licensed under the special terms by MSX Licensing Corporation. The original Sunrise IDE code is available at https://github.com/Konamiman/Nextor/blob/v2.1/source/kernel/drivers/SunriseIDE/sunride.asm
+**The Sunrise IDE driver for Nextor** used on PicoVerse is copyright by Konamiman, Piter Punk, and FRS, and is licensed under the special terms by MSX Licensing Corporation. The original Sunrise IDE code is available at https://github.com/Konamiman/Nextor/blob/v2.1/source/kernel/drivers/SunriseIDE/sunride.asm
 
 The algorithm to emulate ATA devices is original and based on the implementation for the Carnivore2 cartridge, Copyright (c) 2017-2024 by the RBSC group. Portions (c) Mitsutaka Okazaki and (c) Kazuhiro Tsujikawa. Available at https://github.com/RBSC/Carnivore2/tree/master/Firmware/Sources
 
@@ -249,4 +273,4 @@ The algorithm to emulate ATA devices is original and based on the implementation
 Questions, test reports, and build photos are welcome. Open an issue on the public repository or reach out through the MSX retro hardware forums where PicoVerse updates are posted.
 
 Author: Cristiano Goncalves
-Last updated: 03/28/2026
+Last updated: 03/29/2026

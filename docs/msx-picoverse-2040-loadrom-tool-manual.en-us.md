@@ -8,7 +8,7 @@ Alternatively, the `-s` (Sunrise) option can be used to flash the cartridge with
 
 The `-m` option flashes Sunrise IDE Nextor with an additional 192KB memory mapper implementation. In the firmware internals this is mapper mode (type `11`), while on-screen mapper text is still presented as `SYSTEM` for end users.
 
-The standalone firmware options `-k`, `-i`, and `-p` generate dedicated USB keyboard, MSX-MIDI, and MIDI-PAC PSG-to-MIDI converter cartridges without embedding a ROM payload.
+The standalone firmware options `-k`, `-i`, `-p`, and `-j` generate dedicated USB keyboard, MSX-MIDI, MIDI-PAC PSG-to-MIDI converter, and USB joystick cartridges without embedding a ROM payload.
 
 ### LoadRom option matrix
 
@@ -19,6 +19,7 @@ The standalone firmware options `-k`, `-i`, and `-p` generate dedicated USB keyb
 | `-k` | — | — | Standalone USB keyboard cartridge mode |
 | `-i` | — | — | Standalone MSX-MIDI cartridge mode (USB MIDI interface) |
 | `-p` | — | — | Standalone MIDI-PAC cartridge mode (passive PSG-to-MIDI converter) |
+| `-j` | — | — | Standalone USB joystick cartridge mode (USB gamepad to MSX joystick via PSG) |
 ## Overview
 
 1. **Input**: one `.ROM` file (case-insensitive extension) supplied via the command line.
@@ -48,11 +49,12 @@ loadrom.exe [options] [romfile]
 - `-h`, `--help` : Print usage information and exit.
 - `-s`, `--sunrise` : Embed the Sunrise IDE Nextor ROM instead of a regular MSX ROM. When this option is used, the cartridge boots into Nextor firmware, and the USB-C port exposes a block device for use with Nextor loaders. No ROM file argument is needed with this option.
 - `-m`, `--mapper` : Embed Sunrise IDE Nextor with 192KB memory mapper support. This is intended for Nextor workflows that require mapper-capable behavior. No ROM file argument is needed with this option.
-- `-k`, `--keyboard` : Build a UF2 with the standalone USB keyboard firmware. The cartridge becomes a dedicated USB-to-MSX keyboard interface. This option is standalone and cannot be combined with `-s`, `-m`, `-i`, or a ROM file.
-- `-i`, `--midi` : Build a UF2 with the standalone MSX-MIDI firmware. The cartridge becomes a dedicated MSX-MIDI interface that bridges MSX-MIDI I/O ports (`0xE8`–`0xE9`) to a USB MIDI device connected to the USB-C port. This option is standalone and cannot be combined with `-s`, `-m`, `-k`, `-p`, or a ROM file.
-- `-p`, `--midipac` : Build a UF2 with the standalone MIDI-PAC firmware. The cartridge becomes a passive PSG-to-MIDI converter that listens to AY-3-8910 / YM2149 PSG writes on ports `0xA0`–`0xA1` and forwards a musical MIDI interpretation to a USB MIDI device connected to the USB-C port. This option is standalone and cannot be combined with `-s`, `-m`, `-k`, `-i`, or a ROM file.
+- `-k`, `--keyboard` : Build a UF2 with the standalone USB keyboard firmware. The cartridge becomes a dedicated USB-to-MSX keyboard interface. This option is standalone and cannot be combined with `-s`, `-m`, `-i`, `-p`, `-j`, or a ROM file.
+- `-i`, `--midi` : Build a UF2 with the standalone MSX-MIDI firmware. The cartridge becomes a dedicated MSX-MIDI interface that bridges MSX-MIDI I/O ports (`0xE8`–`0xE9`) to a USB MIDI device connected to the USB-C port. This option is standalone and cannot be combined with `-s`, `-m`, `-k`, `-p`, `-j`, or a ROM file.
+- `-p`, `--midipac` : Build a UF2 with the standalone MIDI-PAC firmware. The cartridge becomes a passive PSG-to-MIDI converter that listens to AY-3-8910 / YM2149 PSG writes on ports `0xA0`–`0xA1` and forwards a musical MIDI interpretation to a USB MIDI device connected to the USB-C port. This option is standalone and cannot be combined with `-s`, `-m`, `-k`, `-i`, `-j`, or a ROM file.
+- `-j`, `--joystick` : Build a UF2 with the standalone USB joystick firmware. The cartridge becomes a dedicated USB-to-MSX joystick adapter that intercepts PSG I/O ports (`0xA0`–`0xA2`) and overlays USB gamepad input onto the joystick bits of PSG register 14 using open-drain bus driving. Supports generic USB HID gamepads, Xbox 360 / XInput controllers, and Xbox One / Series X|S controllers, with up to 2 gamepads mapped to MSX joystick ports 1 and 2. This option is standalone and cannot be combined with `-s`, `-m`, `-k`, `-i`, `-p`, or a ROM file.
 - `-o <filename>`, `--output <filename>` : Override the UF2 output name (default `loadrom.uf2`).
-- Positional argument: the path to the MSX ROM you wish to embed (not used with `-s`, `-m`, `-k`, `-i`, or `-p`).
+- Positional argument: the path to the MSX ROM you wish to embed (not used with `-s`, `-m`, `-k`, `-i`, `-p`, or `-j`).
 
 ### Mapper forcing via filename tags
 
@@ -176,6 +178,26 @@ See [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) for in-de
 
 > **Note**: The `-p` option is standalone. MIDI-PAC does not provide ROM loading, mass storage, or MSX-MIDI ports; it is a dedicated PSG-to-MIDI conversion firmware. Requires a USB MIDI cable and a device capable of General MIDI playback for best results.
 
+### Loading USB Joystick Firmware
+
+1. Place `loadrom.exe` in a working directory.
+2. Open a Command Prompt or PowerShell window in that directory.
+3. Run `loadrom.exe` with the `-j` option:
+   ```
+   loadrom.exe -j -o joystick.uf2
+   ```
+4. Put the Pico in BOOTSEL mode (hold BOOTSEL, plug USB) to mount the `RPI-RP2` drive.
+5. Copy the generated UF2 file to the drive. The Pico reboots once flashing completes.
+6. Connect a USB gamepad to the cartridge's USB-C port (use a USB-C OTG adapter or USB hub as needed). Xbox 360, Xbox One, Xbox Series X|S, and generic USB HID gamepads are supported.
+7. Insert the PicoVerse cartridge into the MSX and power on. The USB gamepad now functions as an MSX joystick — no MSX-side software or driver is required.
+8. Up to 2 USB gamepads can be connected simultaneously (via a USB hub), mapped to MSX joystick ports 1 and 2.
+
+See [MSX PicoVerse 2040 USB Joystick](/docs/msx-picoverse-2040-joystick.md) for in-depth documentation on architecture, open-drain bus driving, input mapping, and supported controllers.
+
+> **Note**: The `-j` option is standalone — the USB port is dedicated to the gamepad(s). The firmware uses open-drain bus driving to coexist with the real PSG chip, so sound output is unaffected. If a physical joystick is also connected to the MSX, both inputs work simultaneously (active-low AND).
+
+> **Note**: The joystick firmware does not work with FPGA-based MSX systems or MSX computers whose PSG is integrated into a custom chip (e.g. Panasonic models with the T9769 MSX-ENGINE). It requires original MSX hardware with a discrete AY-3-8910 or YM2149 PSG.
+
 ## Troubleshooting
 
 | Symptom | Possible cause | Resolution |
@@ -194,6 +216,8 @@ See [MSX PicoVerse 2040 MIDI-PAC](/docs/msx-picoverse-2040-midipac.md) for in-de
 - The tool does not verify ROM integrity beyond size checks and simple header heuristics.
 - The keyboard firmware (`-k`) does not work with FPGA-based MSX implementations or MSX computers whose PPI is integrated into a custom chip (e.g. Panasonic models with the T9769 MSX-ENGINE). The internal PPI unconditionally drives keyboard port data onto the cartridge slot bus, which conflicts with the PicoVerse's bus response. See [USB Keyboard — FPGA Incompatibility Details](/docs/msx-picoverse-2040-keyboard.md#fpga-incompatibility-details) for the full analysis.
 - The MIDI-PAC firmware (`-p`) depends on the target software using the standard PSG ports and on the connected MIDI device producing a musically useful result from the converted stream; it is a converter, not a literal PSG synthesizer.
+- The joystick firmware (`-j`) does not work with FPGA-based MSX implementations or MSX computers whose PSG is integrated into a custom chip (e.g. Panasonic models with the T9769 MSX-ENGINE). The integrated PSG's output drivers conflict with the PicoVerse's open-drain bus driving on the data bus during register 14 reads, causing unreliable joystick data. It requires original MSX hardware with a discrete AY-3-8910 or YM2149 PSG.
+- The joystick firmware (`-j`) does not read the physical DE-9 joystick ports directly. If a real joystick is also connected, both inputs work simultaneously (active-low AND on the bus). Not all USB gamepads are recognised — the firmware supports standard USB HID gamepads, Xbox 360 / XInput controllers, and Xbox One / Series X|S (GIP) controllers. Proprietary protocols (e.g. PlayStation DualSense via Bluetooth) may not work.
 
 ## Tested MSX models
 
@@ -267,6 +291,19 @@ The MIDI-PAC firmware (option `-p`) has been tested on the following MSX models 
 
 Note: MIDI-PAC has been tested with games heavy in melody, modulation loops, arpeggios, envelopes, and percussion. Best results on General MIDI-compatible devices; the current voicing is optimized for Roland Sound Canvas class modules (SC-55, SC-88, etc.) while keeping the three melodic channels slightly forward relative to channel 10.
 
+The USB joystick firmware (option `-j`) has been tested on the following MSX models and USB controllers:
+
+Note: The joystick firmware is not compatible with FPGA-based MSX implementations or MSX computers with an integrated PSG (e.g. T9769 MSX-ENGINE) due to bus contention issues. It requires original MSX hardware with a discrete PSG.
+
+| MSX Model | Type | Status | USB Controllers | Comments |
+| --- | --- | --- | --- | --- |  
+| Gradiente Expert | MSX1 | OK | Xbox 360 Controller for Windows, Xbox One Controller (wired), Xbox Series X|S Controller (wired) | Verified operation with multiple controllers; tested with games that use both joystick ports |
+| Panasonic FS-A1FX | MSX2+ | Not OK | N/A | Joystick does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PSG, the firmware is not compatible. |
+| Panasonic FS-A1GT | TurboR | Not OK | N/A | Joystick does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PSG, the firmware is not compatible. |
+| Panasonic FS-A1ST | TurboR | Not OK | N/A | Joystick does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PSG, the firmware is not compatible. |
+| Sharp HotBit HB8000 | MSX1 | OK | Xbox 360 Controller for Windows, Xbox One Controller (wired), Xbox Series X|S Controller (wired) | Verified operation with multiple controllers; tested with games that use both joystick ports |
+|TRHMSX | MSX2+ (FPGA clone) | Not OK | N/A | Joystick does not function correctly. This is an FPGA-based MSX implementation, the firmware is not compatible. |
+| uMSX | MSX2+ (FPGA clone) | Not OK | N/A | Joystick does not function correctly. This is an FPGA-based MSX implementation, the firmware is not compatible. |
 
 Author: Cristiano Almeida Goncalves
-Last updated: 03/17/2026
+Last updated: 03/29/2026

@@ -126,5 +126,20 @@ See [MSX PicoVerse 2040 USB Keyboard](/docs/msx-picoverse-2040-keyboard.md) for 
 
 ---
 
+## 9) Joystick PIO Architecture
+
+The `loadrom.pio` build also includes a standalone USB joystick firmware (`pico/joystick/`) that uses a separate pair of PIO programs on **PIO1**:
+
+| SM | Program | Role |
+|---|---|---|
+| SM0 | `msx_joy_io_read` | I/O read responder with `/WAIT` side-set — intercepts port `0xA2` reads and freezes the Z80 until Core 0 supplies joystick data via an open-drain response token |
+| SM1 | `msx_joy_io_write` | I/O write captor — captures port `0xA0` (register latch) and `0xA1` (R15 port-select) writes for PSG register tracking |
+
+The joystick PIO programs share the same pin map as the ROM-serving PIO but operate exclusively on I/O bus signals (`/IORQ`, `/RD`, `/WR`) rather than slot memory (`/SLTSL`). The read responder uses optional side-set on GPIO 28 (`/WAIT`) to hold the Z80 during the FIFO round-trip. Unlike other PIO firmwares, the joystick read response uses an open-drain technique: the pin-direction mask selectively drives pressed buttons LOW while tri-stating released buttons, allowing the real PSG chip to continue driving those lines undisturbed.
+
+See [MSX PicoVerse 2040 USB Joystick](/docs/msx-picoverse-2040-joystick.md) for the full joystick architecture documentation.
+
+---
+
 Cristiano Goncalves  
-03/01/26
+03/29/26
