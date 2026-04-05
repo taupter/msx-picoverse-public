@@ -1,0 +1,3 @@
+- Move 2040/2350 romdb headers into PIO tool trees and drop legacy docs references
+- Release of the 2350/multirom 2.50
+
