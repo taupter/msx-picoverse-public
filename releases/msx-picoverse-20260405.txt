@@ -1,3 +1,18 @@
+# msx-picoverse-20260405
+
 - Move 2040/2350 romdb headers into PIO tool trees and drop legacy docs references
 - Release of the 2350/multirom 2.50
 
+## Included Windows tools
+
+- `2040/loadrom_v2.56.exe`: Creates UF2 images for PicoVerse 2040 single-ROM boots, Sunrise IDE Nextor USB mode, Sunrise IDE plus 192KB mapper mode, or standalone USB keyboard, MSX-MIDI, MIDI-PAC, and USB joystick firmware. ([manual](docs/msx-picoverse-2040-loadrom-tool-manual.en-us.md))
+- `2040/multirom_v2.55.exe`: Builds a PicoVerse 2040 MultiROM UF2 that bundles multiple MSX ROMs into one menu-driven image, with optional Sunrise IDE Nextor USB and Nextor plus 192KB mapper SYSTEM entries. ([manual](docs/msx-picoverse-2040-multirom-tool-manual.en-us.md))
+- `2350/explorer_v2.02.exe`: Builds the PicoVerse 2350 Explorer UF2, combining flash ROM packaging with microSD folder browsing, on-device search, 40/80-column menu support, and MP3 playback on the MSX. ([manual](docs/msx-picoverse-2350-explorer-tool-manual.en-us.md))
+- `2350/loadrom_v2.50.exe`: Creates UF2 images for PicoVerse 2350 single-ROM boots, Sunrise IDE Nextor from microSD or USB, optional 256KB mapper modes, and SCC or SCC+ flags for compatible Konami SCC and Manbow2 ROMs. ([manual](docs/msx-picoverse-2350-loadrom-tool-manual.en-us.md))
+- `2350/multirom_v2.50.exe`: Builds a PicoVerse 2350 MultiROM UF2 with multiple MSX ROMs, optional Nextor microSD and USB SYSTEM entries, optional 256KB mapper modes, and SCC or SCC+ audio emulation for compatible ROMs. ([manual](docs/msx-picoverse-2350-multirom-tool-manual.en-us.md))
+
+## Package contents
+
+- `exe/`: Windows command-line tools grouped by PicoVerse hardware family.
+- `docs/`: user manuals and technical documentation for the released features.
+- `hardware/`: current hardware BOMs and related manufacturing files.
