@@ -1,8 +1,0 @@
-- LoadRom and Multirom v2.55 released
-- Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
-- Improved cache for mega mappers
-- Added Manbow2 mapper (Type 14) support (e.g., Space Manbow 2)
-- Enhanced ASCII16-X support, now compatible with MSXDEV25 titles like NOP Asteroids and Neon Horizon.
-- Increased stability during heavy flash write operations (required to support Manbow2 and some ASCII16-X games).
-- Updated documentation.
-

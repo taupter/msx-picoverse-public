@@ -1,9 +1,0 @@
-- PicoVerse 2350 LoadROM v2.50 released!!
-  - Added support for the Sunrise IDE Nextor ROM and Sunrise + Mapper configurations on the PicoVerse 2350, using either the on-board microSD card (`-s1`/`-m1`) or USB mass storage (`-s2`/`-m2`). These options embed the Nextor 2.1.4 Sunrise IDE kernel and bridge storage through the cartridge, allowing the MSX to see a standard Sunrise IDE hard disk.
-  - Equalized all mapper support between the 2040 and 2350 variants, including ASCII16-X, the Sunrise IDE options and Manbow2 mapper support.
-  - Added SCC/SCC+ emulation support for Manbow2 mapper on the PicoVerse 2350.
-  - Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
-  - Updated documentation:
-    - New PicoVerse 2350 Sunrise IDE Emulation for Nextor documentation covering the architecture, implementation details, and usage instructions for the Sunrise IDE features on the PicoVerse 2350.
-    - LoadRom manual updates to reflect the new options and features.
-

@@ -16,6 +16,7 @@ _autosave-*
 *-backups
 *backups
 **/build/
+**/releases/
 **/lib
 **/.vscode/
 
