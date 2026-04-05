@@ -18,11 +18,13 @@
 #include "pico/multicore.h"
 #include "pico/audio_i2s.h"
 #include "hardware/clocks.h"
+#include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/structs/qmi.h"
 #include "hw_config.h"
 #include "multirom.h"
-#include "nextor.h"
+#include "sunrise_ide.h"
+#include "sunrise_sd.h"
 #include "emu2212.h"
 #include "msx_bus.pio.h"
 
@@ -31,13 +33,28 @@
 #define MAX_ROM_RECORDS 128
 #define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2))
 #define MONITOR_ADDR    (0x8000 + (ROM_RECORD_SIZE * MAX_ROM_RECORDS) + 1)
-#define CACHE_SIZE      262144
 
 extern unsigned char __flash_binary_end;
 
-static uint8_t rom_sram[CACHE_SIZE];
+// Optionally copy the ROM into this SRAM buffer for faster access.
+// Normal modes use the full 256KB as ROM cache.
+// Sunrise+Mapper mode uses the full 256KB as mapper RAM (no ROM cache).
+static union {
+    uint8_t rom_sram[CACHE_SIZE];           // normal: full 256KB ROM cache
+    struct {
+        uint8_t mapper_ram[MAPPER_SIZE];    // mapper: 256KB mapper RAM
+    } mapper;
+} sram_pool;
+
+#define rom_sram    sram_pool.rom_sram
+#define mapper_ram  sram_pool.mapper.mapper_ram
+
 static uint32_t active_rom_size = 0;
 static uint32_t rom_cached_size = 0;
+
+// Effective SRAM cache capacity (may be reduced by mappers that reserve
+// part of the SRAM pool for writable flash sectors, e.g. Manbow2).
+static uint32_t rom_cache_capacity = CACHE_SIZE;
 
 #define SCC_VOLUME_SHIFT 2
 #define SCC_AUDIO_BUFFER_SAMPLES 256
@@ -78,6 +95,19 @@ typedef struct {
 static ROMRecord records[MAX_ROM_RECORDS];
 static msx_pio_bus_t msx_bus;
 static bool msx_bus_programs_loaded = false;
+
+// I/O bus context (PIO1) for memory mapper port access
+typedef struct {
+    PIO pio_read;
+    PIO pio_write;
+    uint sm_io_read;
+    uint sm_io_write;
+    uint offset_io_read;
+    uint offset_io_write;
+} msx_pio_io_bus_t;
+
+static msx_pio_io_bus_t msx_io_bus;
+static bool msx_io_bus_programs_loaded = false;
 
 static inline void setup_gpio()
 {
@@ -139,18 +169,31 @@ static inline void __not_in_flash_func(prepare_rom_source)(
 
     if (cache_enable && available_length > 0u)
     {
-        uint32_t bytes_to_cache = (available_length > sizeof(rom_sram))
-                                  ? sizeof(rom_sram)
+        uint32_t bytes_to_cache = (available_length > rom_cache_capacity)
+                                  ? rom_cache_capacity
                                   : available_length;
 
         gpio_init(PIN_WAIT);
         gpio_set_dir(PIN_WAIT, GPIO_OUT);
         gpio_put(PIN_WAIT, 0);
-        memcpy(rom_sram, rom_base, bytes_to_cache);
+
+        // DMA bulk copy from flash XIP to SRAM.
+        int dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dma_cfg = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_8);
+        channel_config_set_read_increment(&dma_cfg, true);
+        channel_config_set_write_increment(&dma_cfg, true);
+        dma_channel_configure(dma_chan, &dma_cfg,
+            rom_sram,                        // write address (SRAM)
+            rom_base,                        // read address (flash XIP)
+            bytes_to_cache,                  // transfer count (bytes)
+            true);                           // start immediately
+        dma_channel_wait_for_finish_blocking(dma_chan);
+        dma_channel_unclaim(dma_chan);
         gpio_put(PIN_WAIT, 1);
 
         rom_cached_size = bytes_to_cache;
-        if (available_length <= sizeof(rom_sram))
+        if (available_length <= rom_cache_capacity)
         {
             rom_base = rom_sram;
         }
@@ -247,6 +290,95 @@ static inline void __not_in_flash_func(pio_drain_writes)(void (*handler)(uint16_
     while (pio_try_get_write(&addr, &data))
     {
         handler(addr, data, ctx);
+    }
+}
+
+// -----------------------------------------------------------------------
+// PIO I/O bus initialisation (for memory mapper port access on PIO1)
+// -----------------------------------------------------------------------
+static void msx_pio_io_bus_init(void)
+{
+    msx_io_bus.pio_read = pio1;
+    msx_io_bus.pio_write = pio1;
+    msx_io_bus.sm_io_read  = 0;
+    msx_io_bus.sm_io_write = 1;
+
+    if (!msx_io_bus_programs_loaded)
+    {
+        msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, &msx_io_read_responder_program);
+        msx_io_bus.offset_io_write = pio_add_program(msx_io_bus.pio_write, &msx_io_write_captor_program);
+        msx_io_bus_programs_loaded = true;
+    }
+
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, false);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, false);
+    pio_sm_clear_fifos(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_clear_fifos(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    pio_sm_restart(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_restart(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+
+    pio_sm_config cfg_io_read = msx_io_read_responder_program_get_default_config(msx_io_bus.offset_io_read);
+    sm_config_set_in_pins(&cfg_io_read, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_read, false, false, 16);
+    sm_config_set_out_pins(&cfg_io_read, PIN_D0, 8);
+    sm_config_set_out_shift(&cfg_io_read, true, false, 32);
+    sm_config_set_jmp_pin(&cfg_io_read, PIN_RD);
+    sm_config_set_clkdiv(&cfg_io_read, 1.0f);
+    pio_sm_init(msx_io_bus.pio_read, msx_io_bus.sm_io_read, msx_io_bus.offset_io_read, &cfg_io_read);
+
+    pio_sm_config cfg_io_write = msx_io_write_captor_program_get_default_config(msx_io_bus.offset_io_write);
+    sm_config_set_in_pins(&cfg_io_write, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_write, false, false, 32);
+    sm_config_set_fifo_join(&cfg_io_write, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg_io_write, PIN_WR);
+    sm_config_set_clkdiv(&cfg_io_write, 1.0f);
+    pio_sm_init(msx_io_bus.pio_write, msx_io_bus.sm_io_write, msx_io_bus.offset_io_write, &cfg_io_write);
+
+    pio_sm_set_consecutive_pindirs(msx_io_bus.pio_read, msx_io_bus.sm_io_read, PIN_D0, 8, false);
+
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, true);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, true);
+}
+
+// I/O bus helpers
+static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out, uint8_t *data_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_io_bus.pio_write, msx_io_bus.sm_io_write))
+        return false;
+
+    uint32_t sample = pio_sm_get(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    *addr_out = (uint16_t)(sample & 0xFFFFu);
+    *data_out = (uint8_t)((sample >> 16) & 0xFFu);
+    return true;
+}
+
+static inline uint8_t __not_in_flash_func(mapper_page_from_reg)(uint8_t reg)
+{
+    return (uint8_t)(reg % MAPPER_PAGES);
+}
+
+static inline bool __not_in_flash_func(pio_try_get_io_read)(uint16_t *addr_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_io_bus.pio_read, msx_io_bus.sm_io_read))
+        return false;
+
+    *addr_out = (uint16_t)pio_sm_get(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    return true;
+}
+
+// -----------------------------------------------------------------------
+// Sunrise IDE write handler
+// -----------------------------------------------------------------------
+typedef struct {
+    sunrise_ide_t *ide;
+} sunrise_ctx_t;
+
+static inline void __not_in_flash_func(handle_sunrise_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    sunrise_ctx_t *sctx = (sunrise_ctx_t *)ctx;
+    if (addr >= 0x4000u && addr <= 0x7FFFu)
+    {
+        sunrise_ide_handle_write(sctx->ide, addr, data);
     }
 }
 
@@ -726,64 +858,6 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
     }
 }
 
-void __no_inline_not_in_flash_func(loadrom_nextor_sd_io)(uint32_t offset)
-{
-    multicore_launch_core1(nextor_sd_io);
-
-    gpio_init(PIN_WAIT);
-    gpio_set_dir(PIN_WAIT, GPIO_OUT);
-    gpio_put(PIN_WAIT, 0);
-    memset(rom_sram, 0, 131072);
-    memcpy(rom_sram, rom + offset, 131072);
-    gpio_put(PIN_WAIT, 1);
-
-    uint8_t bank_registers[2] = {0, 1};
-
-    gpio_set_dir_in_masked(0xFF << 16);
-    while (true)
-    {
-        bool sltsl = !(gpio_get(PIN_SLTSL));
-        bool rd = !(gpio_get(PIN_RD));
-        bool wr = !(gpio_get(PIN_WR));
-
-        if (sltsl)
-        {
-            uint16_t addr = gpio_get_all() & 0x00FFFF;
-            if (addr >= 0x4000 && addr <= 0xBFFF)
-            {
-                if (rd)
-                {
-                    gpio_set_dir_out_masked(0xFF << 16);
-                    uint32_t rom_offset = (bank_registers[(addr >> 15) & 1] << 14) + (addr & 0x3FFF);
-                    gpio_put_masked(0xFF0000, rom_sram[rom_offset] << 16);
-
-                    while (!(gpio_get(PIN_RD)))
-                    {
-                        tight_loop_contents();
-                    }
-                    gpio_set_dir_in_masked(0xFF << 16);
-                }
-                else if (wr)
-                {
-                    if ((addr >= 0x6000) && (addr <= 0x67FF))
-                    {
-                        bank_registers[0] = (gpio_get_all() >> 16) & 0xFF;
-                    }
-                    else if (addr >= 0x7000 && addr <= 0x77FF)
-                    {
-                        bank_registers[1] = (gpio_get_all() >> 16) & 0xFF;
-                    }
-
-                    while (!(gpio_get(PIN_WR)))
-                    {
-                        tight_loop_contents();
-                    }
-                }
-            }
-        }
-    }
-}
-
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset)
 {
     uint16_t bank_registers[6] = {0};
@@ -860,6 +934,1103 @@ void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset)
     }
 }
 
+// -----------------------------------------------------------------------
+// loadrom_sunrise - Sunrise IDE Nextor ROM with emulated IDE interface (USB)
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_usb_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_usb_task);
+
+    msx_pio_bus_init();
+
+    sunrise_ctx_t ctx = { .ide = &ide };
+
+    while (true)
+    {
+        uint16_t addr;
+        while (true)
+        {
+            pio_drain_writes(handle_sunrise_write, &ctx);
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        pio_drain_writes(handle_sunrise_write, &ctx);
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0x7FFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t ide_data;
+            if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+            {
+                data = ide_data;
+            }
+            else
+            {
+                uint8_t seg = ide.segment;
+                uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                if (available_length == 0u || rel < available_length)
+                    data = read_rom_byte(rom_base, rel);
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_sunrise_mapper - Sunrise IDE Nextor + 256KB Memory Mapper (USB)
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable)
+{
+    (void)cache_enable;
+
+    // Phase 1 — Bootstrap: minimal ROM that restarts the MSX
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,            // 'AB' ROM header
+        0x0A, 0x40,            // INIT = 0x400A
+        0x00, 0x00,            // STATEMENT = none
+        0x00, 0x00,            // DEVICE = none
+        0x00, 0x00,            // TEXT = none
+        0xF3,                  // DI
+        0xDB, 0xF4,            // IN A, (0xF4)
+        0xF6, 0x80,            // OR 0x80       (set bit 7 = cold boot)
+        0xD3, 0xF4,            // OUT (0xF4), A
+        0xC7                   // RST 0x00      (cold restart)
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        { uint16_t waddr; uint8_t wdata; while (pio_try_get_write(&waddr, &wdata)) { } }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+                restart_detected = true;
+        }
+    }
+
+    // Phase 2 — Initialise expanded-slot mapper
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    rom_cache_capacity = 0u;
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_usb_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_usb_task);
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    memset(mapper_ram, 0xFF, MAPPER_SIZE);
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    sunrise_ctx_t ctx = { .ide = &ide };
+
+    while (true)
+    {
+        // Drain memory writes
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                if (waddr == 0xFFFFu)
+                    subslot_reg = wdata;
+                else
+                {
+                    uint8_t page = (waddr >> 14) & 0x03u;
+                    uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                    if (active_subslot == 0)
+                    {
+                        if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                            sunrise_ide_handle_write(&ide, waddr, wdata);
+                    }
+                    else if (active_subslot == 1)
+                    {
+                        uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                        uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                        mapper_ram[mapper_offset] = wdata;
+                    }
+                }
+            }
+        }
+
+        // Drain I/O writes (mapper page registers FC-FF)
+        {
+            uint16_t io_addr; uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                    mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
+            }
+        }
+
+        // Handle I/O reads (mapper page registers FC-FF)
+        {
+            uint16_t io_addr;
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xF0u | (mapper_reg[port - 0xFCu] & 0x0Fu));
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        // Handle memory reads
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = ~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_ram[mapper_offset];
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_sunrise_sd - Sunrise IDE Nextor ROM via microSD (no mapper)
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_sd_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_sd_task);
+
+    msx_pio_bus_init();
+
+    sunrise_ctx_t ctx = { .ide = &ide };
+
+    while (true)
+    {
+        uint16_t addr;
+        while (true)
+        {
+            pio_drain_writes(handle_sunrise_write, &ctx);
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        pio_drain_writes(handle_sunrise_write, &ctx);
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0x7FFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t ide_data;
+            if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+            {
+                data = ide_data;
+            }
+            else
+            {
+                uint8_t seg = ide.segment;
+                uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                if (available_length == 0u || rel < available_length)
+                    data = read_rom_byte(rom_base, rel);
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_sunrise_mapper_sd - Sunrise IDE + 256KB mapper via microSD
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, bool cache_enable)
+{
+    (void)cache_enable;
+
+    // Phase 1 — Bootstrap: minimal ROM that restarts the MSX
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42, 0x0A, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xF3, 0xDB, 0xF4, 0xF6, 0x80, 0xD3, 0xF4, 0xC7
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        { uint16_t waddr; uint8_t wdata; while (pio_try_get_write(&waddr, &wdata)) { } }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+                restart_detected = true;
+        }
+    }
+
+    // Phase 2 — Initialise expanded-slot mapper
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    rom_cache_capacity = 0u;
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_sd_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_sd_task);
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    memset(mapper_ram, 0xFF, MAPPER_SIZE);
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    sunrise_ctx_t ctx = { .ide = &ide };
+
+    while (true)
+    {
+        // Drain memory writes
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                if (waddr == 0xFFFFu)
+                    subslot_reg = wdata;
+                else
+                {
+                    uint8_t page = (waddr >> 14) & 0x03u;
+                    uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                    if (active_subslot == 0)
+                    {
+                        if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                            sunrise_ide_handle_write(&ide, waddr, wdata);
+                    }
+                    else if (active_subslot == 1)
+                    {
+                        uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                        uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                        mapper_ram[mapper_offset] = wdata;
+                    }
+                }
+            }
+        }
+
+        // Drain I/O writes (mapper page registers FC-FF)
+        {
+            uint16_t io_addr; uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                    mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
+            }
+        }
+
+        // Handle I/O reads (mapper page registers FC-FF)
+        {
+            uint16_t io_addr;
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xF0u | (mapper_reg[port - 0xFCu] & 0x0Fu));
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        // Handle memory reads
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = ~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_ram[mapper_offset];
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_planar64 - 64KB Planar ROM (no mapper)
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 65536u, &rom_base, &available_length);
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        bool in_window = true;
+        uint8_t data = 0xFFu;
+
+        if (available_length == 0u || (uint32_t)addr < available_length)
+            data = read_rom_byte(rom_base, (uint32_t)addr);
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// Bank cache infrastructure for mapper-aware LRU caching
+// -----------------------------------------------------------------------
+#define BANK_CACHE_MAX_SLOTS 32
+#define BANK_CACHE_MAX_PINS   6
+#define BANK_EMPTY           0xFFFFu
+
+typedef struct {
+    uint16_t      slot_bank[BANK_CACHE_MAX_SLOTS];
+    uint8_t       slot_lru[BANK_CACHE_MAX_SLOTS];
+    int8_t        page_slot[BANK_CACHE_MAX_PINS];
+    const uint8_t *flash_base;
+    uint32_t      rom_length;
+    uint8_t       num_slots;
+    uint8_t       num_pins;
+    uint16_t      slot_size;
+    uint8_t       slot_shift;
+} bank_cache_t;
+
+static inline void __not_in_flash_func(bcache_init)(
+    bank_cache_t *c, uint16_t slot_size, uint8_t num_pins,
+    const uint8_t *flash_base, uint32_t rom_length)
+{
+    uint8_t num_slots = (uint8_t)(CACHE_SIZE / slot_size);
+    c->num_slots  = num_slots;
+    c->num_pins   = num_pins;
+    c->slot_size  = slot_size;
+    c->slot_shift = (slot_size == 8192u) ? 13 : 14;
+    c->flash_base = flash_base;
+    c->rom_length = rom_length;
+    for (int i = 0; i < BANK_CACHE_MAX_SLOTS; i++)
+    {
+        c->slot_bank[i] = BANK_EMPTY;
+        c->slot_lru[i]  = (uint8_t)i;
+    }
+    for (int i = 0; i < BANK_CACHE_MAX_PINS; i++)
+        c->page_slot[i] = -1;
+}
+
+static inline void __not_in_flash_func(bcache_touch)(bank_cache_t *c, int8_t slot)
+{
+    uint8_t prev = c->slot_lru[slot];
+    if (prev == 0) return;
+    uint8_t n = c->num_slots;
+    for (uint8_t i = 0; i < n; i++)
+        if (c->slot_lru[i] < prev) c->slot_lru[i]++;
+    c->slot_lru[slot] = 0;
+}
+
+static inline int8_t __not_in_flash_func(bcache_find)(bank_cache_t *c, uint16_t bank)
+{
+    uint8_t n = c->num_slots;
+    for (uint8_t i = 0; i < n; i++)
+        if (c->slot_bank[i] == bank) return (int8_t)i;
+    return -1;
+}
+
+static inline int8_t __not_in_flash_func(bcache_evict)(bank_cache_t *c)
+{
+    int8_t best = -1;
+    uint8_t best_lru = 0;
+    uint8_t n = c->num_slots;
+    uint8_t np = c->num_pins;
+    for (uint8_t i = 0; i < n; i++)
+    {
+        bool pinned = false;
+        for (uint8_t p = 0; p < np; p++)
+            if ((int8_t)i == c->page_slot[p]) { pinned = true; break; }
+        if (pinned) continue;
+        if (best < 0 || c->slot_lru[i] >= best_lru)
+        {
+            best = (int8_t)i;
+            best_lru = c->slot_lru[i];
+        }
+    }
+    return best;
+}
+
+static inline int8_t __not_in_flash_func(bcache_ensure)(bank_cache_t *c, uint16_t bank)
+{
+    if (c->rom_length > 0u)
+    {
+        uint16_t total_banks = (uint16_t)(c->rom_length >> c->slot_shift);
+        if (total_banks > 0u)
+            bank = bank % total_banks;
+    }
+
+    int8_t slot = bcache_find(c, bank);
+    if (slot >= 0) { bcache_touch(c, slot); return slot; }
+
+    slot = bcache_evict(c);
+    uint32_t src_off = (uint32_t)(bank & 0x0FFFu) << c->slot_shift;
+    uint8_t *dst = &rom_sram[(uint32_t)slot * c->slot_size];
+    uint16_t ss = c->slot_size;
+
+    if (c->rom_length == 0u || src_off < c->rom_length)
+    {
+        uint32_t n = ss;
+        if (c->rom_length > 0u && src_off + n > c->rom_length)
+            n = c->rom_length - src_off;
+        memcpy(dst, c->flash_base + src_off, n);
+        if (n < ss) memset(dst + n, 0xFFu, ss - n);
+    }
+    else
+    {
+        memset(dst, 0xFFu, ss);
+    }
+
+    c->slot_bank[slot] = bank;
+    bcache_touch(c, slot);
+    return slot;
+}
+
+static inline void __not_in_flash_func(bcache_prefill)(bank_cache_t *c)
+{
+    uint16_t max_banks = c->num_slots;
+    if (c->rom_length > 0u)
+    {
+        uint16_t rom_banks = (uint16_t)((c->rom_length + c->slot_size - 1u) / c->slot_size);
+        if (rom_banks < max_banks) max_banks = rom_banks;
+    }
+    for (uint16_t b = 0; b < max_banks; b++)
+        bcache_ensure(c, b);
+}
+
+// -----------------------------------------------------------------------
+// AMD-compatible flash command emulation for ASCII16-X
+// -----------------------------------------------------------------------
+typedef enum {
+    FLASH_IDLE = 0,
+    FLASH_UNLOCK1,
+    FLASH_UNLOCK2,
+    FLASH_BYTE_PGM,
+    FLASH_ERASE_SETUP,
+    FLASH_ERASE_UNLOCK1,
+    FLASH_ERASE_UNLOCK2,
+} flash_cmd_state_t;
+
+typedef struct {
+    uint16_t         bank_regs[2];
+    bank_cache_t     cache;
+    flash_cmd_state_t flash_state;
+} ascii16x_state_t;
+
+static inline void __not_in_flash_func(flash_process_write)(
+    ascii16x_state_t *st, uint16_t addr, uint8_t data)
+{
+    uint16_t cmd_addr = addr & 0x0FFFu;
+
+    switch (st->flash_state)
+    {
+        case FLASH_IDLE:
+            if (cmd_addr == 0x0AAAu && data == 0xAAu)
+                st->flash_state = FLASH_UNLOCK1;
+            else if (data == 0xF0u)
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_UNLOCK1:
+            if (cmd_addr == 0x0555u && data == 0x55u)
+                st->flash_state = FLASH_UNLOCK2;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_UNLOCK2:
+            if (cmd_addr == 0x0AAAu)
+            {
+                switch (data)
+                {
+                    case 0xA0u: st->flash_state = FLASH_BYTE_PGM;    break;
+                    case 0x80u: st->flash_state = FLASH_ERASE_SETUP;  break;
+                    default:    st->flash_state = FLASH_IDLE;         break;
+                }
+            }
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_BYTE_PGM:
+        {
+            uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+            int8_t slot = st->cache.page_slot[page_idx];
+            if (slot >= 0)
+            {
+                uint32_t off = (uint32_t)slot * st->cache.slot_size + (addr & 0x3FFFu);
+                rom_sram[off] &= data;
+            }
+            st->flash_state = FLASH_IDLE;
+            break;
+        }
+        case FLASH_ERASE_SETUP:
+            if (cmd_addr == 0x0AAAu && data == 0xAAu)
+                st->flash_state = FLASH_ERASE_UNLOCK1;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_ERASE_UNLOCK1:
+            if (cmd_addr == 0x0555u && data == 0x55u)
+                st->flash_state = FLASH_ERASE_UNLOCK2;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_ERASE_UNLOCK2:
+            if (data == 0x30u)
+            {
+                uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+                int8_t slot = st->cache.page_slot[page_idx];
+                if (slot >= 0)
+                    memset(&rom_sram[(uint32_t)slot * st->cache.slot_size], 0xFFu, st->cache.slot_size);
+            }
+            st->flash_state = FLASH_IDLE;
+            break;
+    }
+}
+
+static inline void __not_in_flash_func(handle_ascii16x_write_cached)(uint16_t addr, uint8_t data, void *ctx)
+{
+    ascii16x_state_t *st = (ascii16x_state_t *)ctx;
+    flash_process_write(st, addr, data);
+
+    uint8_t high_nibble = (uint8_t)((addr >> 8) & 0x0Fu);
+    uint16_t bank = ((uint16_t)high_nibble << 8) | data;
+    uint8_t page;
+
+    switch (addr & 0xF000u)
+    {
+        case 0x2000u: case 0x6000u: case 0xA000u: case 0xE000u: page = 0; break;
+        case 0x3000u: case 0x7000u: case 0xB000u: case 0xF000u: page = 1; break;
+        default: return;
+    }
+
+    st->bank_regs[page] = bank;
+    st->cache.page_slot[page] = bcache_ensure(&st->cache, bank);
+}
+
+// -----------------------------------------------------------------------
+// loadrom_ascii16x - ASCII16-X mapper
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable)
+{
+    (void)cache_enable;
+
+    ascii16x_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    bcache_init(&state.cache, 16384u, 2, rom + offset, active_rom_size);
+    bcache_prefill(&state.cache);
+
+    state.cache.page_slot[0] = bcache_find(&state.cache, 0);
+    state.cache.page_slot[1] = state.cache.page_slot[0];
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        pio_drain_writes(handle_ascii16x_write_cached, &state);
+
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        pio_drain_writes(handle_ascii16x_write_cached, &state);
+
+        uint8_t data = 0xFFu;
+        uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+        int8_t slot = state.cache.page_slot[page_idx];
+
+        if (slot >= 0)
+            data = rom_sram[(uint32_t)slot * state.cache.slot_size + (addr & 0x3FFFu)];
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(true, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// Manbow2 mapper — Konami SCC banking + AMD AM29F040B flash emulation
+// -----------------------------------------------------------------------
+enum manbow2_flash_state {
+    MBW2_READ = 0,
+    MBW2_CMD1,
+    MBW2_CMD2,
+    MBW2_AUTOSELECT,
+    MBW2_PROGRAM,
+    MBW2_ERASE_CMD1,
+    MBW2_ERASE_CMD2,
+    MBW2_ERASE_CMD3
+};
+
+typedef struct {
+    uint8_t bank_regs[4];
+    enum manbow2_flash_state state;
+    uint8_t *writable_sram;
+    uint32_t writable_offset;
+    uint32_t writable_size;
+    uint32_t rom_size_mask;
+} manbow2_ctx_t;
+
+static inline void __not_in_flash_func(handle_manbow2_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    manbow2_ctx_t *mb = (manbow2_ctx_t *)ctx;
+
+    if (addr < 0x4000u || addr > 0xBFFFu)
+        return;
+
+    uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+    uint32_t flash_addr = (uint32_t)mb->bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+    if ((addr & 0x1800u) == 0x1000u)
+        mb->bank_regs[page] = data & 0x3Fu;
+
+    if (data == 0xF0u)
+    {
+        mb->state = MBW2_READ;
+        return;
+    }
+
+    switch (mb->state)
+    {
+        case MBW2_READ:
+            if ((flash_addr & 0x7FFu) == 0x555u && data == 0xAAu)
+                mb->state = MBW2_CMD1;
+            break;
+        case MBW2_CMD1:
+            if ((flash_addr & 0x7FFu) == 0x2AAu && data == 0x55u)
+                mb->state = MBW2_CMD2;
+            else
+                mb->state = MBW2_READ;
+            break;
+        case MBW2_CMD2:
+            if (data == 0xA0u) mb->state = MBW2_PROGRAM;
+            else if (data == 0x90u) mb->state = MBW2_AUTOSELECT;
+            else if (data == 0x80u) mb->state = MBW2_ERASE_CMD1;
+            else mb->state = MBW2_READ;
+            break;
+        case MBW2_PROGRAM:
+            if (flash_addr >= mb->writable_offset &&
+                flash_addr < mb->writable_offset + mb->writable_size)
+            {
+                uint32_t sram_off = flash_addr - mb->writable_offset;
+                mb->writable_sram[sram_off] &= data;
+            }
+            mb->state = MBW2_READ;
+            break;
+        case MBW2_ERASE_CMD1:
+            if ((flash_addr & 0x7FFu) == 0x555u && data == 0xAAu)
+                mb->state = MBW2_ERASE_CMD2;
+            else
+                mb->state = MBW2_READ;
+            break;
+        case MBW2_ERASE_CMD2:
+            if ((flash_addr & 0x7FFu) == 0x2AAu && data == 0x55u)
+                mb->state = MBW2_ERASE_CMD3;
+            else
+                mb->state = MBW2_READ;
+            break;
+        case MBW2_ERASE_CMD3:
+            if (data == 0x30u)
+            {
+                if (flash_addr >= mb->writable_offset &&
+                    flash_addr < mb->writable_offset + mb->writable_size)
+                    memset(mb->writable_sram, 0xFF, mb->writable_size);
+            }
+            mb->state = MBW2_READ;
+            break;
+        case MBW2_AUTOSELECT:
+            break;
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_manbow2 - Manbow2 (Konami SCC + AMD flash) mapper
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+
+    static const uint32_t WRITABLE_SECTOR_SIZE  = 0x10000u;
+    static const uint32_t WRITABLE_SECTOR_OFFSET = 0x70000u;
+    uint32_t reduced_cache = CACHE_SIZE - WRITABLE_SECTOR_SIZE;
+
+    rom_cache_capacity = reduced_cache;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    uint8_t *writable_sram = &rom_sram[reduced_cache];
+
+    if (available_length >= WRITABLE_SECTOR_OFFSET + WRITABLE_SECTOR_SIZE)
+    {
+        const uint8_t *flash_rom = rom + offset;
+        memcpy(writable_sram, flash_rom + WRITABLE_SECTOR_OFFSET, WRITABLE_SECTOR_SIZE);
+    }
+    else if (available_length > WRITABLE_SECTOR_OFFSET)
+    {
+        const uint8_t *flash_rom = rom + offset;
+        uint32_t partial = available_length - WRITABLE_SECTOR_OFFSET;
+        memcpy(writable_sram, flash_rom + WRITABLE_SECTOR_OFFSET, partial);
+        memset(writable_sram + partial, 0xFF, WRITABLE_SECTOR_SIZE - partial);
+    }
+    else
+    {
+        memset(writable_sram, 0xFF, WRITABLE_SECTOR_SIZE);
+    }
+
+    manbow2_ctx_t mb = {
+        .bank_regs = {0, 1, 2, 3},
+        .state = MBW2_READ,
+        .writable_sram = writable_sram,
+        .writable_offset = WRITABLE_SECTOR_OFFSET,
+        .writable_size = WRITABLE_SECTOR_SIZE,
+        .rom_size_mask = 0
+    };
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t addr;
+        while (true)
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+                handle_manbow2_write(waddr, wdata, &mb);
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        { uint16_t waddr; uint8_t wdata;
+          while (pio_try_get_write(&waddr, &wdata))
+              handle_manbow2_write(waddr, wdata, &mb); }
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+            uint32_t rel = (uint32_t)mb.bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+            if (mb.state == MBW2_AUTOSELECT)
+            {
+                uint32_t id_addr = rel & 0x03u;
+                if (id_addr == 0x00u) data = 0x01u;
+                else if (id_addr == 0x01u) data = 0xA4u;
+                else if (id_addr == 0x02u)
+                    data = (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size) ? 0x00u : 0x01u;
+                else data = 0x00u;
+            }
+            else
+            {
+                if (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size)
+                    data = writable_sram[rel - mb.writable_offset];
+                else if (available_length == 0u || rel < available_length)
+                    data = read_rom_byte(rom_base, rel);
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_manbow2_scc - Manbow2 mapper with SCC/SCC+ sound emulation
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+
+    static const uint32_t WRITABLE_SECTOR_SIZE  = 0x10000u;
+    static const uint32_t WRITABLE_SECTOR_OFFSET = 0x70000u;
+    uint32_t reduced_cache = CACHE_SIZE - WRITABLE_SECTOR_SIZE;
+
+    rom_cache_capacity = reduced_cache;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    uint8_t *writable_sram = &rom_sram[reduced_cache];
+
+    if (available_length >= WRITABLE_SECTOR_OFFSET + WRITABLE_SECTOR_SIZE)
+    {
+        const uint8_t *flash_rom = rom + offset;
+        memcpy(writable_sram, flash_rom + WRITABLE_SECTOR_OFFSET, WRITABLE_SECTOR_SIZE);
+    }
+    else if (available_length > WRITABLE_SECTOR_OFFSET)
+    {
+        const uint8_t *flash_rom = rom + offset;
+        uint32_t partial = available_length - WRITABLE_SECTOR_OFFSET;
+        memcpy(writable_sram, flash_rom + WRITABLE_SECTOR_OFFSET, partial);
+        memset(writable_sram + partial, 0xFF, WRITABLE_SECTOR_SIZE - partial);
+    }
+    else
+    {
+        memset(writable_sram, 0xFF, WRITABLE_SECTOR_SIZE);
+    }
+
+    manbow2_ctx_t mb = {
+        .bank_regs = {0, 1, 2, 3},
+        .state = MBW2_READ,
+        .writable_sram = writable_sram,
+        .writable_offset = WRITABLE_SECTOR_OFFSET,
+        .writable_size = WRITABLE_SECTOR_SIZE,
+        .rom_size_mask = 0
+    };
+
+    memset(&scc_instance, 0, sizeof(SCC));
+    scc_instance.clk  = SCC_CLOCK;
+    scc_instance.rate = SCC_SAMPLE_RATE;
+    SCC_set_quality(&scc_instance, 1);
+    scc_instance.type = scc_type;
+    SCC_reset(&scc_instance);
+
+    i2s_audio_init();
+    multicore_launch_core1(core1_scc_audio);
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t addr;
+        while (true)
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                handle_manbow2_write(waddr, wdata, &mb);
+                SCC_write(&scc_instance, waddr, wdata);
+            }
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        { uint16_t waddr; uint8_t wdata;
+          while (pio_try_get_write(&waddr, &wdata))
+          {
+              handle_manbow2_write(waddr, wdata, &mb);
+              SCC_write(&scc_instance, waddr, wdata);
+          } }
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            bool is_scc_read = false;
+            if (scc_instance.active)
+            {
+                uint32_t scc_reg_start = scc_instance.base_adr + 0x800u;
+                if (addr >= scc_reg_start && addr <= (scc_reg_start + 0xFFu))
+                    is_scc_read = true;
+            }
+            if (scc_type == SCC_ENHANCED && (addr & 0xFFFEu) == 0xBFFEu)
+                is_scc_read = true;
+
+            if (is_scc_read)
+            {
+                data = (uint8_t)SCC_read(&scc_instance, addr);
+            }
+            else
+            {
+                uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+                uint32_t rel = (uint32_t)mb.bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+                if (mb.state == MBW2_AUTOSELECT)
+                {
+                    uint32_t id_addr = rel & 0x03u;
+                    if (id_addr == 0x00u) data = 0x01u;
+                    else if (id_addr == 0x01u) data = 0xA4u;
+                    else if (id_addr == 0x02u)
+                        data = (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size) ? 0x00u : 0x01u;
+                    else data = 0x00u;
+                }
+                else
+                {
+                    if (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size)
+                        data = writable_sram[rel - mb.writable_offset];
+                    else if (available_length == 0u || rel < available_length)
+                        data = read_rom_byte(rom_base, rel);
+                }
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
 int __no_inline_not_in_flash_func(main)()
 {
     qmi_hw->m[0].timing = 0x40000202;
@@ -903,7 +2074,28 @@ int __no_inline_not_in_flash_func(main)()
             loadrom_neo16(records[rom_index].Offset);
             break;
         case 10:
-            loadrom_nextor_sd_io(records[rom_index].Offset);
+            loadrom_sunrise(records[rom_index].Offset, true);
+            break;
+        case 11:
+            loadrom_sunrise_mapper(records[rom_index].Offset, true);
+            break;
+        case 12:
+            loadrom_ascii16x(records[rom_index].Offset, true);
+            break;
+        case 13:
+            loadrom_planar64(records[rom_index].Offset, true);
+            break;
+        case 14:
+            if (scc_plus || (mapper & SCC_FLAG))
+                loadrom_manbow2_scc(records[rom_index].Offset, true, scc_plus ? SCC_ENHANCED : SCC_STANDARD);
+            else
+                loadrom_manbow2(records[rom_index].Offset, true);
+            break;
+        case 15:
+            loadrom_sunrise_sd(records[rom_index].Offset, true);
+            break;
+        case 16:
+            loadrom_sunrise_mapper_sd(records[rom_index].Offset, true);
             break;
         default:
             printf("Debug: Unsupported ROM mapper: %d\n", mapper);

@@ -24,8 +24,8 @@
 #include "multirom.h"
 #include "menu.h"
 #include "nextor_sunrise.h"
-#include "../../../tools/sha1.h"
-#include "../../../tools/romdb.h"
+#include "sha1.h"
+#include "romdb.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "v1.00"

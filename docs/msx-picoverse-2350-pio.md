@@ -3,8 +3,9 @@
 This document describes the RP2350 PIO strategy currently used in:
 
 - `2350/software/loadrom.pio`
+- `2350/software/multirom.pio`
 
-Unlike the 2040 family, there is no `multirom.pio` target in `2350/software`; the PIO bus engine is currently applied to the LoadROM PIO path.
+Both targets share the same PIO bus engine, I/O bus engine, and audio architecture. The MultiROM firmware extends LoadROM by embedding multiple ROMs with a menu, while both support the full mapper set (types 1–16) including Sunrise IDE, SCC/SCC+, Manbow2, and ASCII16-X.
 
 ---
 
@@ -27,7 +28,7 @@ The bus strategy is still PIO + FIFO tokenization, but RP2350 adds an audio subs
 
 ## 2) PIO Bus Architecture
 
-`loadrom.pio` uses two state machines on `pio0` for MSX memory bus access:
+`loadrom.pio` and `multirom.pio` use two state machines on `pio0` for MSX memory bus access:
 
 | SM | Program | Role |
 |---|---|---|
@@ -152,7 +153,7 @@ For full SCC/SCC+ behavior and registers, see:
 
 ## 6) Build Integration
 
-`2350/software/loadrom.pio/pico/loadrom/CMakeLists.txt` includes:
+Both `2350/software/loadrom.pio/pico/loadrom/CMakeLists.txt` and `2350/software/multirom.pio/pico/multirom/CMakeLists.txt` include:
 
 - `pico_generate_pio_header(... msx_bus.pio)`
 - `hardware_pio`

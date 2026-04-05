@@ -4,12 +4,11 @@ The PicoVerse 2350 cartridge can boot either a MultiROM menu or a single ROM tha
 
 `loadrom.exe` bundles the Pico firmware blob, a configuration record (game name, mapper code, ROM size, and flash offset), and one MSX ROM file into an RP2350-compatible UF2 image. Copy the generated UF2 to the board in BOOTSEL mode and the MSX will boot straight into the embedded ROM.
 
-For RP2350, both firmware packages are available:
+For RP2350, the current LoadROM package is:
 
-- `2350/software/loadrom` (legacy bit-banged bus handling).
-- `2350/software/loadrom.pio` (PIO-based bus handling, recommended).
+- `2350/software/loadrom.pio`.
 
-> **Important:** SCC/SCC+ emulation options (`-scc`, `-sccplus`) are supported **only** by the PIO firmware package (`2350/software/loadrom.pio`). They are not supported in the legacy `2350/software/loadrom` package.
+> **Important:** SCC/SCC+ emulation options (`-scc`, `-sccplus`) are supported by the current RP2350 LoadROM package (`2350/software/loadrom.pio`).
 
 ---
 
@@ -161,7 +160,7 @@ The UF2 writer sets `UF2_FLAG_FAMILYID_PRESENT` and uses the RP2350 family ID (`
 - Linux/macOS binaries are not provided (use Windows or build from source).
 - The tool does not verify ROM integrity beyond size and mapper heuristics.
 - SCC/SCC+ flags are applied for Konami SCC mapper (type 3) and Manbow2 mapper (type 14) ROMs; otherwise they are ignored with a warning.
-- SCC/SCC+ emulation is available only in the PIO firmware variant (`loadrom.pio`).
+- SCC/SCC+ emulation is available in the current RP2350 LoadROM package.
 - Excessive flashing can wear out flash memory.
 
 ---

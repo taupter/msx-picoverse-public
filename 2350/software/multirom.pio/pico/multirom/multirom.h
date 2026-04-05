@@ -12,6 +12,16 @@
 // This work is licensed  under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 // License". https://creativecommons.org/licenses/by-nc-sa/4.0/
 
+#ifndef MULTIROM_H
+#define MULTIROM_H
+
+#define ROM_NAME_MAX    50   // Maximum size of the ROM name
+#define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2)) // Name + mapper + size + offset
+#define CACHE_SIZE      262144     // 256KB cache size for ROM data
+#define MAPPER_SIZE     262144     // 256 KB memory mapper RAM
+#define MAPPER_PAGES    16         // 256 KB / 16 KB = 16 pages
+#define MAPPER_PAGE_SIZE 16384     // 16 KB per mapper page
+
 #define PIN_A0     0 
 #define PIN_A1     1
 #define PIN_A2     2
@@ -76,3 +86,13 @@ void __no_inline_not_in_flash_func(loadrom_ascii8)(uint32_t offset, bool cache_e
 void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset);
+void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type);
+void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, bool cache_enable);
+
+#endif

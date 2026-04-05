@@ -40,9 +40,11 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 add_executable(multirom 
+        ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c
         hw_config.c
-        nextor.c 
-    emu2212.c
+        emu2212.c
+        sunrise_ide.c
+        sunrise_sd.c
         multirom.c 
 )
 
@@ -62,9 +64,11 @@ target_link_libraries(multirom
         pico_stdlib
         no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
         pico_multicore
-    pico_audio_i2s
-    hardware_dma
-    hardware_pio
+        pico_audio_i2s
+        hardware_dma
+        hardware_pio
+        tinyusb_board
+        tinyusb_host
         )
 
 target_compile_definitions(multirom PRIVATE

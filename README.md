@@ -123,9 +123,10 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Adds microSD storage, ESP8266 WiFi header, and I2S audio expansion alongside 16 MB flash space.
 - Extra RAM (PSRAM) to support advanced emulation features in future firmware releases.
 - Explorer firmware can load ROMs from both flash and microSD, with source labels and search.
-- USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`loadrom.exe -s2`).
-- microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`loadrom.exe -s1`).
-- Sunrise IDE + 256KB memory mapper mode provides both Nextor disk access and expanded RAM (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB).
+- USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`-s2`).
+- microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`-s1`).
+- Sunrise IDE + 256KB memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
+- Both LoadROM and MultiROM tools support the Sunrise IDE options; MultiROM allows combining them so multiple Nextor modes appear as selectable SYSTEM entries in the menu.
 - Shares the same ROM mapper support list as the 2040 build.
 
 #### Bill of Materials
@@ -161,9 +162,9 @@ Interactive BOM available at [PicoVerse 2350 BOM](https://htmlpreview.github.io/
 1. **Pick your target board**: Select the hardware revision that matches the RP2040 or RP2350 carrier you own, then grab the corresponding Gerber/BOM pack.
 2. **Manufacture or assemble**: Send the Gerbers to your PCB house or build from an ordered kit. Follow the assembly notes included in each hardware bundle.
 3. **Generate the UF2 image**:
-   - For multiple titles, place your `.rom` files beside the MultiROM tool for your cartridge family (`2040/software/multirom/multirom.exe` or `2350/software/multirom/multirom.exe`) and run `multirom.exe` to create `multirom.uf2`.
+   - For multiple titles, place your `.rom` files beside the MultiROM tool for your cartridge family (`2040/software/multirom.pio/tool/multirom.exe` or `2350/software/multirom.pio/tool/multirom.exe`) and run `multirom.exe` to create `multirom.uf2`.
    - For an instant boot into a single game, place the desired `.rom` next to the LoadROM tool for your cartridge family and run `loadrom.exe <file> [-o custom.uf2]` to create a dedicated UF2 that skips the menu.
-   - For a combined flash + microSD menu (on PicoVerse 2350 only), use the Explorer tool (`2350/software/explorer/tool/explorer.exe`) to create `explorer.uf2`, then copy extra `.rom` and `.mp3` files to the microSD card.
+   - For a combined flash + microSD menu (on PicoVerse 2350 only), use the Explorer tool (`2350/software/explorer.pio/tool/explorer.exe`) to create `explorer.uf2`, then copy extra `.rom` and `.mp3` files to the microSD card.
 4. **Flash the firmware**:
    - Hold BOOTSEL while connecting the cartridge to your PC via USB-C.
    - Copy the freshly generated UF2 (`multirom.uf2`, `loadrom.uf2`, or `explorer.uf2`) to the RPI-RP2 drive that appears.
@@ -192,16 +193,19 @@ The LoadROM tool targets situations where you want the PicoVerse to behave like 
 - **Output**: `loadrom.uf2` by default, or any filename you pass via `-o`. The UF2 contains the firmware, a 59-byte configuration record (title, mapper, size, flash offset), and the ROM payload.
 - **Workflow**:
    1. Open a Command Prompt or PowerShell window in your target package folder:
-      - `2350/software/loadrom/tool` (legacy bit-banged firmware), or
-      - `2350/software/loadrom.pio/tool` (PIO-based firmware, recommended).
+      - `2040/software/loadrom.pio/tool`, or
+      - `2350/software/loadrom.pio/tool`.
    2. Run `loadrom.exe -o mygame.uf2 \\path\\to\\Game.ROM` (the tool also accepts drag-and-drop onto the EXE).
       - MSX-MIDI standalone mode: `loadrom.exe -i -o midi.uf2`
       - MIDI-PAC standalone mode: `loadrom.exe -p -o midipac.uf2`
       - USB joystick standalone mode: `loadrom.exe -j -o joystick.uf2`
       - SCC standard emulation (only PicoVerse 2350): `loadrom.exe -scc \\path\\to\\Game.ROM`
       - SCC+ enhanced emulation (only PicoVerse 2350): `loadrom.exe -sccplus \\path\\to\\Game.ROM`
-      - `-scc` and `-sccplus` are mutually exclusive.      - Sunrise IDE standalone (only PicoVerse 2350): `loadrom.exe -s`
-      - Sunrise IDE + 256KB mapper (only PicoVerse 2350): `loadrom.exe -m`      - SCC/SCC+ options are supported only in `2350/software/loadrom.pio/tool` (PIO firmware path), not in legacy `2350/software/loadrom/tool`.
+      - `-scc` and `-sccplus` are mutually exclusive.
+      - Sunrise IDE standalone (PicoVerse 2040): `loadrom.exe -s`
+      - Sunrise IDE + 192KB mapper (PicoVerse 2040): `loadrom.exe -m`
+      - Sunrise IDE standalone (PicoVerse 2350): `loadrom.exe -s1` or `loadrom.exe -s2`
+      - Sunrise IDE + 256KB mapper (PicoVerse 2350): `loadrom.exe -m1` or `loadrom.exe -m2`
    3. Observe the reported ROM name, size, mapper status (auto vs forced), and Pico offset before the UF2 is written.
    4. Put the Pico into BOOTSEL mode and copy the generated UF2 to the `RPI-RP2` drive.
    5. Insert the cartridge into your MSX—on power-up the embedded game launches immediately.

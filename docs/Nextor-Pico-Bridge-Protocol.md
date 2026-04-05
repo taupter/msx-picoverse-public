@@ -3,7 +3,7 @@
 Author: Cristiano Goncalves
 Last updated: November 29, 2025
 
-This document describes the control/data protocol implemented by the Raspberry Pico bridge firmware in `2040/software/multirom/pico/multirom/nextor.c`.
+This document describes the control/data protocol implemented by the Raspberry Pico bridge firmware in `2040/software/multirom.pio/pico/multirom/nextor.c`.
 The bridge provides an interface between an MSX running NEXTOR and a USB Mass Storage Device (MSC) attached to the Pico. The MSX communicates with the Pico via two I/O ports (control and data) using simple commands, addresses and payload transfers.
 
 This specification documents the transport, command set, data formats, read/write sequences, return codes, error handling and implementation notes so other implementers can reproduce the protocol behavior.

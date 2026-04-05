@@ -7,11 +7,10 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.02
+VERSION ?= v2.50
 
 # Sub-project locations
 MSX_DIR       := msx
-NEXTOR_SD_DIR := nextor_sd
 PICO_DIR      := pico/multirom
 PICO_BUILD    := $(PICO_DIR)/build
 PICO_CONFIG   := $(PICO_BUILD)/CMakeCache.txt
@@ -30,17 +29,14 @@ CMAKE_GENERATOR_FLAG := $(if $(CMAKE_GENERATOR),-G "$(CMAKE_GENERATOR)",)
 CMAKE_BUILD_TYPE ?= Release
 CMAKE_MAKE_PROGRAM_FLAG := $(if $(CMAKE_MAKE_PROGRAM),-DCMAKE_MAKE_PROGRAM="$(CMAKE_MAKE_PROGRAM)",)
 
-.PHONY: all msx nextor_sd pico tool clean
+.PHONY: all msx pico tool clean
 
 all: tool
 
 msx:
 	$(MAKE) -C $(MSX_DIR) VERSION=$(VERSION)
 
-nextor_sd: msx
-	$(MAKE) -C $(NEXTOR_SD_DIR) VERSION=$(VERSION)
-
-pico: nextor_sd $(PICO_CONFIG)
+pico: msx $(PICO_CONFIG)
 	$(CMAKE) --build $(PICO_BUILD)
 
 $(PICO_CONFIG):
@@ -51,7 +47,6 @@ tool: pico
 
 clean:
 	-$(MAKE) -C $(MSX_DIR) clean VERSION=$(VERSION)
-	-$(MAKE) -C $(NEXTOR_SD_DIR) clean VERSION=$(VERSION)
 	-@$(CMAKE) --build $(PICO_BUILD) --target clean
 	-$(MAKE) -C $(TOOL_DIR) clean VERSION=$(VERSION)
 	-@$(CMAKE) -E rm -rf $(PICO_BUILD)

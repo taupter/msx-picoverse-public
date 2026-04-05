@@ -173,7 +173,7 @@ The firmware decodes these flags at boot and initialises the emu2212 library wit
 ## Hardware requirements
 
 - **PicoVerse 2350 board** with I2S DAC connected to GPIOs 29–32.
-- **LoadROM PIO firmware** (`loadrom.pio` variant, not the legacy bit-banged version).
+- **LoadROM firmware** (`2350/software/loadrom.pio`).
 - An MSX game ROM that uses the Konami SCC mapper.
 
 ---
@@ -189,7 +189,7 @@ The firmware decodes these flags at boot and initialises the emu2212 library wit
 
 ## Limitations
 
-- SCC emulation is only available in the `loadrom.pio` firmware for the 2350 platform.
+- SCC emulation is available in the current `loadrom` firmware for the 2350 platform.
 - The `-scc` and `-sccplus` flags only apply to Konami SCC mapper ROMs (type 3).
 - Audio output requires an I2S DAC on the PicoVerse board. Without the DAC, the SCC registers are still emulated (reads return correct values) but no sound is produced.
 - The volume boost factor is fixed at compile time.

@@ -23,7 +23,9 @@
 #include "uf2format.h"
 #include "multirom.h"
 #include "menu.h"
-#include "nextor.h"
+#include "nextor_sunrise.h"
+#include "sha1.h"
+#include "romdb.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "v1.00"
@@ -43,15 +45,47 @@
 #define MAX_UF2_FILENAME_LENGTH 512
 
 static const char *MAPPER_DESCRIPTIONS[] = {
-    "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM"
+    "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC16X", "PLN-64", "MANBW2",
+    "SYSTEM", "SYSTEM"
 };
+
+static const char *rom_types[] = {
+    "Unknown",
+    "Plain16",
+    "Plain32",
+    "Konami SCC",
+    "Planar48",
+    "ASCII8",
+    "ASCII16",
+    "Konami",
+    "NEO8",
+    "NEO16",
+    "Sunrise USB",
+    "Sunrise USB+Mapper",
+    "ASCII16-X",
+    "Planar64",
+    "Manbow2",
+    "Sunrise SD",
+    "Sunrise SD+Mapper"
+};
+
+#define ROM_TYPE_SUNRISE 10
+#define ROM_TYPE_SUNRISE_MAPPER 11
+#define ROM_TYPE_ASCII16X 12
+#define ROM_TYPE_PLANAR64 13
+#define ROM_TYPE_MANBOW2 14
+#define ROM_TYPE_SUNRISE_SD 15
+#define ROM_TYPE_SUNRISE_MAPPER_SD 16
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
 static bool equals_ignore_case(const char *a, const char *b) {
+    if (!a || !b) {
+        return false;
+    }
     while (*a && *b) {
-        if (toupper((unsigned char)*a) != toupper((unsigned char)*b)) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
             return false;
         }
         ++a;
@@ -66,6 +100,24 @@ static uint8_t mapper_number_from_description(const char *description) {
             return (uint8_t)(i + 1);
         }
     }
+
+    // Backward-compatible aliases for older tags and verbose planar names.
+    if (equals_ignore_case(description, "PL-16")) {
+        return 1;
+    }
+    if (equals_ignore_case(description, "PL-32")) {
+        return 2;
+    }
+    if (equals_ignore_case(description, "PL-48") || equals_ignore_case(description, "PLN-32") || equals_ignore_case(description, "PLANAR32") || equals_ignore_case(description, "LINEAR") || equals_ignore_case(description, "LINEAR0") || equals_ignore_case(description, "PLANAR48")) {
+        return 4;
+    }
+    if (equals_ignore_case(description, "PL-64") || equals_ignore_case(description, "PLANAR64")) {
+        return ROM_TYPE_PLANAR64;
+    }
+    if (equals_ignore_case(description, "MANBOW2") || equals_ignore_case(description, "MBW-2")) {
+        return ROM_TYPE_MANBOW2;
+    }
+
     return 0;
 }
 
@@ -86,11 +138,6 @@ void create_uf2_file(const uint8_t *data, size_t size, const char *uf2_filename)
 uint32_t file_size(const char *filename);
 uint8_t detect_rom_type(const char *filename, uint32_t size);
 static void print_usage(const char *prog_name);
-
-// Build modes supported by the tool.
-typedef enum {
-    BUILD_MODE_STANDARD = 0,    // Standard MultiROM build scanning for .ROM files
-} BuildMode;
 
 // Return byte length of a file on disk, 0 on failure.
 uint32_t file_size(const char *filename) {
@@ -120,19 +167,13 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     // Define the NEO8 signature
     const char neo8_signature[] = "ROM_NEO8";
     const char neo16_signature[] = "ROM_NE16";
+    const char ascii16x_signature[] = "ASCII16X";
 
-    // Initialize weighted scores for different mapper types
-    int konami_score = 0;
-    int konami_scc_score = 0;
-    int ascii8_score = 0;
-    int ascii16_score = 0;
-
-    // Define weights for specific addresses
-    const int KONAMI_WEIGHT = 2;
-    const int KONAMI_SCC_WEIGHT = 2;
-    const int ASCII8_WEIGHT_HIGH = 3;
-    const int ASCII8_WEIGHT_LOW = 1;
-    const int ASCII16_WEIGHT = 2;
+    // Scores for each mapper type (unit weights, matching openMSX guessRomType)
+    unsigned int konami_score = 0;
+    unsigned int konami_scc_score = 0;
+    unsigned int ascii8_score = 0;
+    unsigned int ascii16_score = 0;
 
     //size_t size = file_size(filename);
     if (size > MAX_ROM_SIZE || size < MIN_ROM_SIZE) {
@@ -146,9 +187,8 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
         return 0; // unknown mapper
     }
 
-    // Determine the size to read (max 128KB or the actual size if smaller)
-    size_t read_size = (size > MAX_ANALYSIS_SIZE) ? MAX_ANALYSIS_SIZE : size;
-    //size_t read_size = size; 
+    // openMSX-style: inspect the full ROM for mapper-write patterns.
+    size_t read_size = size;
     // Dynamically allocate memory for the ROM
     uint8_t *rom = (uint8_t *)malloc(read_size);
     if (!rom) {
@@ -159,6 +199,17 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     fread(rom, 1, read_size, file);
     fclose(file);
+
+    // SHA1 database lookup (openMSX softwaredb) — checked before heuristics.
+    {
+        uint8_t sha1[20];
+        sha1_from_buffer(rom, (uint32_t)read_size, sha1);
+        uint8_t db_type = romdb_lookup(sha1);
+        if (db_type) {
+            free(rom);
+            return db_type;
+        }
+    }
     
     // Check if the ROM has the signature "AB" at 0x0000 and 0x0001
     // Those are the cases for 16KB and 32KB ROMs
@@ -169,10 +220,10 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     if (rom[0] == 'A' && rom[1] == 'B' && size <= 32768) {
 
-        //check if it is a normal 32KB ROM or linear0 32KB ROM
+        // Check if it is a normal 32KB ROM or Planar32/48-style layout.
         if (rom[0x4000] == 'A' && rom[0x4001] == 'B') {
             free(rom);
-            return 4; // Linear0 32KB
+            return 4; // Planar32/48 style (AB at 0x4000)
         }
         
         free(rom);
@@ -181,6 +232,10 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     // Check for the "AB" header at the start
     if (rom[0] == 'A' && rom[1] == 'B') {
+        if (memcmp(&rom[16], ascii16x_signature, sizeof(ascii16x_signature) - 1) == 0) {
+            free(rom);
+            return ROM_TYPE_ASCII16X; // ASCII16-X mapper detected
+        }
         // Check for the NEO8 signature at offset 16
         if (memcmp(&rom[16], neo8_signature, sizeof(neo8_signature) - 1) == 0) {
             free(rom);
@@ -191,85 +246,127 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
         }
     }
 
+    // Manbow 2 detection: 512KB ROM with "Manbow 2" string at offset 0x28000.
+    if (size == 524288u && rom[0] == 'A' && rom[1] == 'B' &&
+        memcmp(&rom[0x28000], "Manbow 2", 8) == 0)
+    {
+        free(rom);
+        return ROM_TYPE_MANBOW2;
+    }
+
     // Check if the ROM has the signature "AB" at 0x4000 and 0x4001
-    // That is the case for 48KB ROMs with Linear page 0 config
+    // That is the case for 48KB Planar mapping.
     if (rom[0x4000] == 'A' && rom[0x4001] == 'B' && size <= 49152) {
         free(rom);
-        return 4; // Linear0 48KB
+        return 4; // Planar48
+    }
+
+    // 64KB planar ROMs may only expose AB at 0x4000.
+    if (size == 65536u) {
+        bool ab4000 = (rom[0x4000] == 'A' && rom[0x4001] == 'B');
+        if (ab4000) {
+            free(rom);
+            return ROM_TYPE_PLANAR64;
+        }
     }
 
     // Heuristic analysis for larger ROMs
     if (size > 32768) {
-        // Scan through the ROM data to detect patterns
+        // Scan through the ROM data to detect ld (nnnn),a patterns.
+        // Scoring matches openMSX guessRomType(): unit weights, no SCC
+        // credit for 0x6000, and >= tie-breaking favoring later types.
         for (size_t i = 0; i < read_size - 3; i++) {
-            if (rom[i] == 0x32) { // Check for 'ld (nnnn),a' instruction
+            if (rom[i] == 0x32) { // ld (nnnn),a
                 uint16_t addr = rom[i + 1] | (rom[i + 2] << 8);
                 switch (addr) {
                     case 0x4000:
                     case 0x8000:
                     case 0xA000:
-                        konami_score += KONAMI_WEIGHT;
+                        konami_score++;
                         break;
                     case 0x5000:
                     case 0x9000:
                     case 0xB000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
+                        konami_scc_score++;
                         break;
                     case 0x6800:
                     case 0x7800:
-                        ascii8_score += ASCII8_WEIGHT_HIGH;
+                        ascii8_score++;
                         break;
                     case 0x77FF:
-                        ascii16_score += ASCII16_WEIGHT;
+                        ascii16_score++;
                         break;
                     case 0x6000:
-                        konami_score += KONAMI_WEIGHT;
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
+                        konami_score++;
+                        ascii8_score++;
+                        ascii16_score++;
                         break;
                     case 0x7000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
+                        konami_scc_score++;
+                        ascii8_score++;
+                        ascii16_score++;
                         break;
-                    // Add more cases as needed
                 }
             }
         }
-         
-        
-        /*
-        printf ("DEBUG: ascii8_score = %d\n", ascii8_score);
-        printf ("DEBUG: ascii16_score = %d\n", ascii16_score);
-        printf ("DEBUG: konami_score = %d\n", konami_score);
-        printf ("DEBUG: konami_scc_score = %d\n\n", konami_scc_score);
-        */
-        
-        if (ascii8_score==1) ascii8_score--;
 
-        // Determine the ROM type based on the highest weighted score
-        if (konami_scc_score > konami_score && konami_scc_score > ascii8_score && konami_scc_score > ascii16_score) {
-            free(rom);
-            return 3; // Konami SCC
-        }
-        if (konami_score > konami_scc_score && konami_score > ascii8_score && konami_score > ascii16_score) {
-            free(rom);
-            return 7; // Konami
-        }
-        if (ascii8_score > konami_score && ascii8_score > konami_scc_score && ascii8_score > ascii16_score) {
-            free(rom);
-            return 5; // ASCII8
-        }
-        if (ascii16_score > konami_score && ascii16_score > konami_scc_score && ascii16_score > ascii8_score) {
-            free(rom);
-            return 6; // ASCII16
-        }
+        // openMSX quirk: subtract 1 from ASCII8 if non-zero.
+        if (ascii8_score) ascii8_score--;
 
-        if (ascii16_score == konami_scc_score)
+        // Pick the winner using >= so that later types win ties.
         {
+            uint8_t best_type = 0;
+            unsigned int best_score = 0;
+            struct { unsigned int score; uint8_t type; } candidates[] = {
+                { konami_scc_score, 3 },  // Konami SCC
+                { konami_score,     7 },  // Konami
+                { ascii8_score,     5 },  // ASCII8
+                { ascii16_score,    6 },  // ASCII16
+            };
+            for (int c = 0; c < 4; c++) {
+                if (candidates[c].score && candidates[c].score >= best_score) {
+                    best_score = candidates[c].score;
+                    best_type = candidates[c].type;
+                }
+            }
+            if (best_type) {
+                free(rom);
+                return best_type;
+            }
+        }
+
+        // Fallbacks when no mapper writes were identified.
+        if (konami_score == 0 && konami_scc_score == 0 && ascii8_score == 0 && ascii16_score == 0)
+        {
+            bool ab0 = (rom[0x0000] == 'A' && rom[0x0001] == 'B');
+            bool ab4000 = (rom[0x4000] == 'A' && rom[0x4001] == 'B');
+
+            if (size == 65536u && (ab0 || ab4000))
+            {
+                free(rom);
+                return ROM_TYPE_PLANAR64;
+            }
+
+            if (size > 65536u && ab0 && ((size % 16384u) == 0u))
+            {
+                unsigned int raw_77ff = 0u;
+                unsigned int raw_6800 = 0u;
+                unsigned int raw_7800 = 0u;
+
+                for (size_t i = 0; i + 1 < read_size; ++i)
+                {
+                    uint16_t raw = (uint16_t)(rom[i] | (rom[i + 1] << 8));
+                    if (raw == 0x77FFu) ++raw_77ff;
+                    else if (raw == 0x6800u) ++raw_6800;
+                    else if (raw == 0x7800u) ++raw_7800;
+                }
+
+                free(rom);
+                return (raw_77ff > (raw_6800 + raw_7800)) ? 6 : 5; // ASCII16 : ASCII8
+            }
+
             free(rom);
-            return 6; // Konami SCC
+            return 0; // unknown mapper
         }
 
         free(rom);
@@ -282,21 +379,37 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
 // Print usage information
 static void print_usage(const char *prog_name) {
+    size_t i;
+    bool first = true;
 
-    printf("Usage: %s [-h|-n|-o <filename>]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-scc] [-sccplus] [-o <filename>]\n", prog_name);
     printf("  without options, the tool scans the current directory for .ROM files to include in the MultiROM image\n");
     printf("Options:\n");
     printf("  -h   Show this help message\n");
-    printf("  -n, --nextor  Include embedded Nextor ROM in the MultiROM image (experimental, only MSX2)\n");
+    printf("  -s1, --sunrise-sd  Include Sunrise IDE Nextor ROM (microSD card)\n");
+    printf("  -m1, --mapper-sd   Include Sunrise IDE Nextor ROM + 256KB mapper (microSD card)\n");
+    printf("  -s2, --sunrise-usb Include Sunrise IDE Nextor ROM (USB pendrive)\n");
+    printf("  -m2, --mapper-usb  Include Sunrise IDE Nextor ROM + 256KB mapper (USB pendrive)\n");
+    printf("  Options -s1, -m1, -s2, -m2 can be combined to add multiple Nextor entries\n");
+    printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC / Manbow2 mappers only)\n");
+    printf("  -sccplus, --sccplus  Enable SCC+ (enhanced) sound emulation (Konami SCC / Manbow2 mappers only)\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
-    printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
-    printf("  e.g., \"Knight Mare.PL-32.ROM\" forces PL-32; \"SYSTEM\" tags are ignored\n\n");
-    printf("  here are the mapper descriptions you can use to force a specific mapper type:\n");
-    for (size_t i = 0; i < MAPPER_DESCRIPTION_COUNT-1; ++i) {
-        printf("  %s", MAPPER_DESCRIPTIONS[i]);
+    printf("Mapper forcing: append tags (case-insensitive) before the ROM extension.\n");
+    printf("Forceable tags: ");
+    for (i = 0; i < MAPPER_DESCRIPTION_COUNT; ++i) {
+        uint8_t mapper_id = (uint8_t)(i + 1u);
+        if (mapper_id == 10u || mapper_id == 11u || mapper_id == 15u || mapper_id == 16u) {
+            continue;
+        }
+        if (!first) {
+            printf(", ");
+        }
+        printf("%s", MAPPER_DESCRIPTIONS[i]);
+        first = false;
     }
     printf("\n");
+    printf("Example: \"Knight Mare.PLA-32.ROM\" forces PLA-32; \"SYSTEM\" tags are ignored.\n");
     printf("UF2 output file: %s\n", UF2FILENAME);
 }
 
@@ -376,10 +489,14 @@ int main(int argc, char *argv[])
     printf("MSX PICOVERSE 2350 MultiROM UF2 Creator %s\n", APP_VERSION);
     printf("(c) 2025 The Retro Hacker\n\n");
 
-    bool include_nextor = false;
     bool show_help = false;
+    bool use_sunrise_sd = false;
+    bool use_mapper_sd = false;
+    bool use_sunrise_usb = false;
+    bool use_mapper_usb = false;
+    bool scc_emulation = false;
+    bool scc_plus = false;
     const char *bad_option = NULL;
-    BuildMode build_mode = BUILD_MODE_STANDARD;
     const char *missing_output_option = NULL;
     char uf2_output_filename[MAX_UF2_FILENAME_LENGTH];
 
@@ -388,10 +505,20 @@ int main(int argc, char *argv[])
 
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
-        if ((strcmp(argv[i], "-n") == 0) || (strcmp(argv[i], "--nextor") == 0)) {
-            include_nextor = true;
-        } else if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
+        if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
             show_help = true;
+        } else if ((strcmp(argv[i], "-s1") == 0) || (strcmp(argv[i], "--sunrise-sd") == 0)) {
+            use_sunrise_sd = true;
+        } else if ((strcmp(argv[i], "-m1") == 0) || (strcmp(argv[i], "--mapper-sd") == 0)) {
+            use_mapper_sd = true;
+        } else if ((strcmp(argv[i], "-s2") == 0) || (strcmp(argv[i], "--sunrise-usb") == 0)) {
+            use_sunrise_usb = true;
+        } else if ((strcmp(argv[i], "-m2") == 0) || (strcmp(argv[i], "--mapper-usb") == 0)) {
+            use_mapper_usb = true;
+        } else if ((strcmp(argv[i], "-scc") == 0) || (strcmp(argv[i], "--scc") == 0)) {
+            scc_emulation = true;
+        } else if ((strcmp(argv[i], "-sccplus") == 0) || (strcmp(argv[i], "--sccplus") == 0)) {
+            scc_plus = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
             if (i + 1 >= argc) {
                 missing_output_option = argv[i];
@@ -425,6 +552,13 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    if (scc_emulation && scc_plus) {
+        printf("Error: -scc and -sccplus are mutually exclusive. Use only one.\n");
+        return 1;
+    }
+
+    bool include_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb;
+
     // Standard MultiROM build mode
     printf("Scanning current directory for .ROM files...\n\n");
     DIR *dir;
@@ -435,6 +569,7 @@ int main(int argc, char *argv[])
     uint32_t base_offset = TARGET_FILE_SIZE; // Start appending ROMs after the MENU + config area
     size_t total_rom_size = 0;
     size_t config_offset = 0;
+    int nextor_entry_count = 0;
     uint8_t *config_buffer = (uint8_t *)malloc(CONFIG_AREA_SIZE); // Configuration area buffer
     if (!config_buffer) {
         printf("Failed to allocate configuration buffer\n");
@@ -442,30 +577,44 @@ int main(int argc, char *argv[])
     }
     memset(config_buffer, 0xFF, CONFIG_AREA_SIZE); // Initialize config area to 0xFF
 
-    // Include embedded Nextor ROM if requested
+    // Include embedded Sunrise IDE Nextor ROM entries (one per flag)
     if (include_nextor) {
-        char nextor_rom_name[MAX_FILE_NAME_LENGTH] = {0};
-        strncpy(nextor_rom_name, "Nextor SD (IO)", MAX_FILE_NAME_LENGTH);
-        memcpy(config_buffer + config_offset, nextor_rom_name, MAX_FILE_NAME_LENGTH);
-        config_offset += MAX_FILE_NAME_LENGTH;
-        config_buffer[config_offset++] = 10;
-        uint32_t nextor_size = sizeof(___nextor_sd_dist_nextor_rom);
-        memcpy(config_buffer + config_offset, &nextor_size, sizeof(nextor_size));
-        config_offset += sizeof(nextor_size);
-        uint32_t nextor_offset = base_offset;
-        memcpy(config_buffer + config_offset, &nextor_offset, sizeof(nextor_offset));
-        config_offset += sizeof(nextor_offset);
-        printf("File %02d: Name = %-50s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
-               file_index, "Nextor SD (IO)", nextor_size, nextor_offset, mapper_description(10));
-        total_rom_size += nextor_size;
-        if (total_rom_size > MAX_TOTAL_ROM_SIZE) {
-            printf("Total ROM data exceeds maximum supported size of %u bytes.\n", (unsigned)MAX_TOTAL_ROM_SIZE);
-            free(config_buffer);
-            return 1;
-        }
+        struct { bool enabled; uint8_t mapper; const char *name; } nextor_entries[] = {
+            { use_sunrise_sd,  ROM_TYPE_SUNRISE_SD,        "Nextor Sunrise IDE (SD)"     },
+            { use_mapper_sd,   ROM_TYPE_SUNRISE_MAPPER_SD, "Nextor Sunrise+Mapper (SD)"  },
+            { use_sunrise_usb, ROM_TYPE_SUNRISE,           "Nextor Sunrise IDE (USB)"    },
+            { use_mapper_usb,  ROM_TYPE_SUNRISE_MAPPER,    "Nextor Sunrise+Mapper (USB)" },
+        };
 
-        file_index++;
-        base_offset += nextor_size;
+        uint32_t nextor_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
+
+        for (int ne = 0; ne < 4; ne++) {
+            if (!nextor_entries[ne].enabled) continue;
+
+            char nextor_rom_name[MAX_FILE_NAME_LENGTH] = {0};
+            strncpy(nextor_rom_name, nextor_entries[ne].name, MAX_FILE_NAME_LENGTH);
+            memcpy(config_buffer + config_offset, nextor_rom_name, MAX_FILE_NAME_LENGTH);
+            config_offset += MAX_FILE_NAME_LENGTH;
+            config_buffer[config_offset++] = nextor_entries[ne].mapper;
+            memcpy(config_buffer + config_offset, &nextor_size, sizeof(nextor_size));
+            config_offset += sizeof(nextor_size);
+            uint32_t nextor_offset = base_offset;
+            memcpy(config_buffer + config_offset, &nextor_offset, sizeof(nextor_offset));
+            config_offset += sizeof(nextor_offset);
+            printf("File %02d: Name = %-50s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
+                   file_index, nextor_entries[ne].name, nextor_size, nextor_offset,
+                   mapper_description(nextor_entries[ne].mapper));
+            total_rom_size += nextor_size;
+            if (total_rom_size > MAX_TOTAL_ROM_SIZE) {
+                printf("Total ROM data exceeds maximum supported size of %u bytes.\n", (unsigned)MAX_TOTAL_ROM_SIZE);
+                free(config_buffer);
+                return 1;
+            }
+
+            nextor_entry_count++;
+            file_index++;
+            base_offset += nextor_size;
+        }
     }
 
     // Scan the current directory for .ROM files
@@ -524,7 +673,7 @@ int main(int argc, char *argv[])
                     mapper_token[token_length] = '\0';
 
                     uint8_t candidate = mapper_number_from_description(mapper_token);
-                    if (candidate == 10) {
+                    if (candidate == 10 || candidate == 11 || candidate == 15 || candidate == 16) {
                         printf("Ignoring SYSTEM mapper tag in %s (cannot be forced)\n", entry->d_name);
                     } else if (candidate != 0) {
                         mapper_forced = true;
@@ -565,6 +714,14 @@ int main(int argc, char *argv[])
             continue;
         }
 
+        // Apply SCC flags for compatible mappers
+        if (scc_emulation && (mapper_byte == 3 || mapper_byte == ROM_TYPE_MANBOW2)) {
+            mapper_byte |= 0x80;
+        }
+        if (scc_plus && (mapper_byte == 3 || mapper_byte == ROM_TYPE_MANBOW2)) {
+            mapper_byte |= 0x40;
+        }
+
         // Check if ROM fits in the remaining space
         if (config_offset + CONFIG_RECORD_SIZE > CONFIG_AREA_SIZE) {
             printf("Configuration area capacity exceeded\n");
@@ -583,9 +740,14 @@ int main(int argc, char *argv[])
         config_offset += sizeof(fl_offset);
 
         // Print ROM information
-         printf("File %02d: Name = %-50s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s%s\n",
-             file_index, rom_name, rom_size, fl_offset, mapper_description(mapper_byte),
-             mapper_forced ? " (forced)" : "");
+        {
+            const char *scc_label = "";
+            if (mapper_byte & 0x80) scc_label = " +SCC";
+            else if (mapper_byte & 0x40) scc_label = " +SCC+";
+            printf("File %02d: Name = %-50s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s%s%s\n",
+                file_index, rom_name, rom_size, fl_offset, mapper_description(mapper_byte & 0x3F),
+                scc_label, mapper_forced ? " (forced)" : "");
+        }
 
         strncpy(files[file_count].file_name, entry->d_name, sizeof(files[file_count].file_name));
         files[file_count].file_name[sizeof(files[file_count].file_name) - 1] = '\0';
@@ -634,7 +796,7 @@ int main(int argc, char *argv[])
     }
 
     // Sanity check embedded Nextor ROM size
-    const size_t nextor_rom_size = sizeof(___nextor_sd_dist_nextor_rom);
+    const size_t nextor_rom_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
     if (include_nextor && nextor_rom_size == 0) {
         printf("Embedded Nextor ROM payload is empty\n");
         free(config_buffer);
@@ -685,8 +847,10 @@ int main(int argc, char *argv[])
 #endif
 
     if (include_nextor) {
-        memcpy(combined_buffer + offset, ___nextor_sd_dist_nextor_rom, nextor_rom_size);
-        offset += nextor_rom_size;
+        for (int ne = 0; ne < nextor_entry_count; ne++) {
+            memcpy(combined_buffer + offset, ___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM, nextor_rom_size);
+            offset += nextor_rom_size;
+        }
     }
 
     uint8_t io_buffer[4096];
