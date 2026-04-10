@@ -12,28 +12,6 @@ PicoVerse is designed as an open-source, independent, and documented MSX cartrid
 
 If you find any issues, have questions, or want to contribute, please open an issue or reach out via the contact information in the repository.
 
-## Whats New in PicoVerse?
-
-- PicoVerse 2040 LoadROM and MultiROM v2.56 released!!
-  - There is now a dedicated loadrom -j option that allows the use of USB gamepads (HID, Xbox 360, Xbox One, or Xbox Series X|S) with MSX computers with discrete PSGs.
-  - Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
-  - Improved cache algorithm for mega mappers (NEO-8, NEO-16, ASCII16-X).
-  - Added Manbow2 mapper (Type 14) support (e.g., Space Manbow 2). There is no SCC emulation, but the cartridge emulates the flash-based storage used by the game for saves. Manbow2 ROMs are auto-detected by size (512 KB) and mapper type, and save data is volatile (SRAM-backed).
-  - Enhanced ASCII16-X support, now compatible with MSXDEV25 titles like NOP Asteroids and Neon Horizon.
-  - Increased stability during heavy flash write operations (required to support Manbow2 and some ASCII16-X games).
-  - Updated documentation:
-    - Added a detailed compatibility table for the new joystick firmware.
-    - New PicoVerse 2040 USB Joystick documentation with technical details on the architecture and implementation of the joystick firmware.
-    - New PicoVerse 2040 MegaROMs documentation covering the handling of large ROMs, mapper support, and performance optimizations for all the ROM mappers supported.
-- PicoVerse 2350 LoadROM v2.50 released!!
-  - Added support for the Sunrise IDE Nextor ROM and Sunrise + Mapper configurations on the PicoVerse 2350, using either the on-board microSD card (`-s1`/`-m1`) or USB mass storage (`-s2`/`-m2`). These options embed the Nextor 2.1.4 Sunrise IDE kernel and bridge storage through the cartridge, allowing the MSX to see a standard Sunrise IDE hard disk.
-  - Equalized all mapper support between the 2040 and 2350 variants, including ASCII16-X, the Sunrise IDE options and Manbow2 mapper support.
-  - Added SCC/SCC+ emulation support for Manbow2 mapper on the PicoVerse 2350. 
-  - Improved mapper detection accuracy, aligned with openMSX and enhanced via SHA1 database.
-  - Updated documentation:
-    - New PicoVerse 2350 Sunrise IDE Emulation for Nextor documentation covering the architecture, implementation details, and usage instructions for the Sunrise IDE features on the PicoVerse 2350.
-    - LoadRom manual updates to reflect the new options and features.
-
 ## Project Highlights
 
 - Single-ROM LoadROM workflow for instant and easy booting of one title.
@@ -41,7 +19,7 @@ If you find any issues, have questions, or want to contribute, please open an is
 - Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds MP3 playback, and supports on-device search.
 - Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or microSD card (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
 - Sunrise IDE + 192KB memory mapper on PicoVerse 2040 (`loadrom.exe -m`), or Sunrise IDE standalone (`loadrom.exe -s`).
-- Sunrise IDE + 256KB memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`). 
+- Sunrise IDE + 1MB PSRAM memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`). 
 - SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. 
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
@@ -125,7 +103,7 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Explorer firmware can load ROMs from both flash and microSD, with source labels and search.
 - USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`-s2`).
 - microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`-s1`).
-- Sunrise IDE + 256KB memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
+- Sunrise IDE + 1MB PSRAM memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
 - Both LoadROM and MultiROM tools support the Sunrise IDE options; MultiROM allows combining them so multiple Nextor modes appear as selectable SYSTEM entries in the menu.
 - Shares the same ROM mapper support list as the 2040 build.
 
@@ -205,7 +183,7 @@ The LoadROM tool targets situations where you want the PicoVerse to behave like 
       - Sunrise IDE standalone (PicoVerse 2040): `loadrom.exe -s`
       - Sunrise IDE + 192KB mapper (PicoVerse 2040): `loadrom.exe -m`
       - Sunrise IDE standalone (PicoVerse 2350): `loadrom.exe -s1` or `loadrom.exe -s2`
-      - Sunrise IDE + 256KB mapper (PicoVerse 2350): `loadrom.exe -m1` or `loadrom.exe -m2`
+      - Sunrise IDE + 1MB PSRAM mapper (PicoVerse 2350): `loadrom.exe -m1` or `loadrom.exe -m2`
    3. Observe the reported ROM name, size, mapper status (auto vs forced), and Pico offset before the UF2 is written.
    4. Put the Pico into BOOTSEL mode and copy the generated UF2 to the `RPI-RP2` drive.
    5. Insert the cartridge into your MSX—on power-up the embedded game launches immediately.

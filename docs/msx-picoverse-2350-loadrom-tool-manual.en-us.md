@@ -24,7 +24,7 @@ Key characteristics:
 - Supports ROM sizes from 8 KB up to 16 MB (subject to flash capacity).
 - Mapper auto-detection plus optional filename tags to force the mapper.
 - Embedded SHA-1 database derived from openMSX `softwaredb.xml` for improved mapper identification.
-- Built-in Sunrise IDE Nextor ROM for standalone Nextor boot or Nextor + 256KB mapper, using either the on-board microSD card (`-s1`/`-m1`) or a USB flash drive (`-s2`/`-m2`).
+- Built-in Sunrise IDE Nextor ROM for standalone Nextor boot or Nextor + 1MB PSRAM mapper, using either the on-board microSD card (`-s1`/`-m1`) or a USB flash drive (`-s2`/`-m2`).
 - UF2 uses RP2350 family ID (`0xE48BFF59`).
 
 ---
@@ -39,9 +39,9 @@ loadrom.exe [options] [romfile]
 
 - `-h`, `--help` : Print usage information and exit.
 - `-s1`, `--sunrise-sd` : Build a UF2 with the embedded Sunrise IDE Nextor ROM using the on-board microSD card slot for storage. No external ROM file is needed.
-- `-m1`, `--mapper-sd` : Same as `-s1` plus a 256KB memory mapper (16 × 16KB pages) in an expanded sub-slot architecture. No external ROM file is needed.
+- `-m1`, `--mapper-sd` : Same as `-s1` plus a 1MB memory mapper (64 × 16KB pages) backed by external PSRAM on GPIO47 / QMI CS1 in an expanded sub-slot architecture. No external ROM file is needed.
 - `-s2`, `--sunrise-usb` : Build a UF2 with the embedded Sunrise IDE Nextor ROM using the cartridge's USB-C port for storage (USB mass storage). No external ROM file is needed.
-- `-m2`, `--mapper-usb` : Same as `-s2` plus a 256KB memory mapper (16 × 16KB pages) in an expanded sub-slot architecture. No external ROM file is needed.
+- `-m2`, `--mapper-usb` : Same as `-s2` plus a 1MB memory mapper (64 × 16KB pages) backed by external PSRAM on GPIO47 / QMI CS1 in an expanded sub-slot architecture. No external ROM file is needed.
 - `-scc`, `--scc` : Enable SCC (standard) sound emulation flag (Konami SCC or Manbow2 mapper only).
 - `-sccplus`, `--sccplus` : Enable SCC+ (enhanced) sound emulation flag (Konami SCC or Manbow2 mapper only).
 - `-o <filename>`, `--output <filename>` : Override the UF2 output name (default `loadrom.uf2`).
@@ -84,7 +84,7 @@ Tags are case-insensitive. If no valid tag is present, the tool first computes t
    loadrom.exe -s1
    loadrom.exe -s1 -o nextor_sd.uf2
    ```
-   Sunrise IDE + 256KB mapper (microSD):
+   Sunrise IDE + 1MB PSRAM mapper (microSD):
    ```
    loadrom.exe -m1
    loadrom.exe -m1 -o nextor_mapper_sd.uf2
@@ -94,7 +94,7 @@ Tags are case-insensitive. If no valid tag is present, the tool first computes t
    loadrom.exe -s2
    loadrom.exe -s2 -o nextor_usb.uf2
    ```
-   Sunrise IDE + 256KB mapper (USB):
+   Sunrise IDE + 1MB PSRAM mapper (USB):
    ```
    loadrom.exe -m2
    loadrom.exe -m2 -o nextor_mapper_usb.uf2
@@ -156,7 +156,7 @@ The UF2 writer sets `UF2_FLAG_FAMILYID_PRESENT` and uses the RP2350 family ID (`
 - Only one ROM per UF2 (use the MultiROM or Explorer tools for multiple titles).
 - The `-s1` and `-m1` options require a FAT-formatted microSD card in the cartridge's microSD slot.
 - The `-s2` and `-m2` options require a USB flash drive connected to the cartridge's USB-C port (via OTG adapter) for disk access.
-- The `-m1` and `-m2` options provide 256KB mapper RAM (16 × 16KB pages) backed by RP2350 SRAM.
+- The `-m1` and `-m2` options provide 1MB mapper RAM (64 × 16KB pages) backed by external PSRAM on GPIO47 / QMI CS1.
 - Linux/macOS binaries are not provided (use Windows or build from source).
 - The tool does not verify ROM integrity beyond size and mapper heuristics.
 - SCC/SCC+ flags are applied for Konami SCC mapper (type 3) and Manbow2 mapper (type 14) ROMs; otherwise they are ignored with a warning.

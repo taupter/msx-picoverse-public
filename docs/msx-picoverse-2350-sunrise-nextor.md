@@ -1,6 +1,6 @@
 # MSX PicoVerse 2350 — Sunrise IDE Emulation for Nextor
 
-This document describes the implementation of the four Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone or combined with a 256KB memory mapper.
+This document describes the implementation of the four Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone or combined with a 1MB PSRAM-backed memory mapper.
 
 ## 1. Overview
 
@@ -9,9 +9,9 @@ The MSX PicoVerse 2350 provides a complete Sunrise IDE emulation that allows the
 | Option | Mapper Type | Storage Backend | Description |
 |--------|-------------|-----------------|-------------|
 | `-s1` / `--sunrise-sd` | 15 | microSD (SPI) | Sunrise IDE with microSD card |
-| `-m1` / `--mapper-sd` | 16 | microSD (SPI) | Sunrise IDE + 256KB mapper with microSD card |
+| `-m1` / `--mapper-sd` | 16 | microSD (SPI) | Sunrise IDE + 1MB PSRAM mapper with microSD card |
 | `-s2` / `--sunrise-usb` | 10 | USB-C (MSC) | Sunrise IDE with USB pendrive |
-| `-m2` / `--mapper-usb` | 11 | USB-C (MSC) | Sunrise IDE + 256KB mapper with USB pendrive |
+| `-m2` / `--mapper-usb` | 11 | USB-C (MSC) | Sunrise IDE + 1MB PSRAM mapper with USB pendrive |
 
 All four modes:
 
@@ -21,7 +21,7 @@ All four modes:
 - Run the Nextor 2.1.4 Sunrise IDE driver (Master Only edition)
 - Use the RP2350's dual-core architecture: Core 0 for PIO bus and IDE register handling, Core 1 for storage backend
 
-The mapper variants (`-m1`, `-m2`) additionally provide 256KB of mapper RAM (16 × 16KB pages) in an expanded sub-slot architecture, with mapper page registers intercepted via PIO1.
+The mapper variants (`-m1`, `-m2`) additionally provide 1MB of mapper RAM (64 × 16KB pages) in an expanded sub-slot architecture, with mapper page registers intercepted via PIO1.
 
 ## 2. Architecture
 
@@ -216,12 +216,12 @@ After restart detection, the firmware reinitializes PIO and sets up:
 | Sub-slot | Content | Address Range |
 |----------|---------|---------------|
 | 0 | Nextor ROM (128KB, 8 pages) + IDE registers | `0x4000`–`0x7FFF` |
-| 1 | Mapper RAM (256KB, 16 pages) | All four 16KB pages |
+| 1 | Mapper RAM (1MB, 64 pages) | All four 16KB pages |
 
 - **Sub-slot register** (`0xFFFF`): Read returns bitwise complement; write sets sub-slot configuration
 - **Mapper page registers** (I/O ports `0xFC`–`0xFF`): Intercepted by PIO1 state machines, controlling which 16KB page of mapper RAM is visible in each CPU page
-- **256KB mapper RAM**: Backed by the RP2350's SRAM pool (`sram_pool.mapper.mapper_ram`)
-- The ROM cache is disabled (`rom_cache_capacity = 0`) so all 256KB SRAM is available for mapper RAM
+- **1MB mapper RAM**: Backed by external PSRAM mapped at the uncached QMI CS1 window (`0x15000000`)
+- The ROM cache is disabled (`rom_cache_capacity = 0`) because mapper RAM now lives in external PSRAM instead of the internal SRAM cache pool
 
 ### PIO1 Usage in Mapper Mode
 
@@ -289,9 +289,9 @@ loadrom.exe [-h] [-s1] [-m1] [-s2] [-m2] [-scc] [-sccplus] [-o <filename>] [romf
 | Option | Long Form | Description |
 |--------|-----------|-------------|
 | `-s1` | `--sunrise-sd` | Sunrise IDE with microSD card |
-| `-m1` | `--mapper-sd` | Sunrise IDE + 256KB mapper with microSD card |
+| `-m1` | `--mapper-sd` | Sunrise IDE + 1MB PSRAM mapper with microSD card |
 | `-s2` | `--sunrise-usb` | Sunrise IDE with USB pendrive |
-| `-m2` | `--mapper-usb` | Sunrise IDE + 256KB mapper with USB pendrive |
+| `-m2` | `--mapper-usb` | Sunrise IDE + 1MB PSRAM mapper with USB pendrive |
 
 The four options are mutually exclusive. Each embeds the same Nextor 2.1.4 Sunrise IDE ROM (128KB) but sets different mapper type codes in the configuration record.
 
@@ -302,14 +302,14 @@ The four options are mutually exclusive. Each embeds the same Nextor 2.1.4 Sunri
 loadrom.exe -s1
 loadrom.exe -s1 -o nextor_sd.uf2
 
-# microSD + 256KB mapper
+# microSD + 1MB PSRAM mapper
 loadrom.exe -m1
 
 # USB standalone
 loadrom.exe -s2
 loadrom.exe -s2 -o nextor_usb.uf2
 
-# USB + 256KB mapper
+# USB + 1MB PSRAM mapper
 loadrom.exe -m2
 ```
 
@@ -388,10 +388,10 @@ All paths are relative to `2350/software/loadrom.pio/`.
 | Feature | PicoVerse 2040 | PicoVerse 2350 |
 |---------|----------------|----------------|
 | USB Sunrise IDE | Yes (`-s`) | Yes (`-s2`) |
-| USB Sunrise + Mapper | Yes (`-m`, 192KB) | Yes (`-m2`, 256KB) |
+| USB Sunrise + Mapper | Yes (`-m`, 192KB) | Yes (`-m2`, 1MB) |
 | microSD Sunrise IDE | No | Yes (`-s1`) |
-| microSD Sunrise + Mapper | No | Yes (`-m1`, 256KB) |
-| Mapper RAM | 192KB (12 pages) | 256KB (16 pages) |
+| microSD Sunrise + Mapper | No | Yes (`-m1`, 1MB) |
+| Mapper RAM | 192KB (12 pages) | 1MB (64 pages) |
 | SD card slot | No | Yes (SPI0, GPIO 33–36) |
 | Nextor ROM | Nextor 2.1.4 Sunrise IDE | Nextor 2.1.4 Sunrise IDE |
 | ATA front-end | Identical | Identical |

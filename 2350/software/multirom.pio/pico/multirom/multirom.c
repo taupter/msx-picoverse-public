@@ -2034,7 +2034,7 @@ void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool ca
 int __no_inline_not_in_flash_func(main)()
 {
     qmi_hw->m[0].timing = 0x40000202;
-    set_sys_clock_khz(250000, true);
+    set_sys_clock_khz(210000, true);
 
     stdio_init_all();
     setup_gpio();

@@ -22,8 +22,10 @@
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
+#include "hardware/regs/qmi.h"
 #include "hardware/sync.h"
 #include "hardware/structs/qmi.h"
+#include "hardware/structs/xip_ctrl.h"
 #include "loadrom.h"
 #include "emu2212.h"
 #include "msx_bus.pio.h"
@@ -73,6 +75,128 @@ static uint32_t rom_cache_capacity = CACHE_SIZE;
 
 static SCC scc_instance;
 static struct audio_buffer_pool *audio_pool;
+
+// -----------------------------------------------------------------------
+// External PSRAM mapper backing (QMI CS1)
+// -----------------------------------------------------------------------
+static inline void __not_in_flash_func(psram_delay_cycles)(uint32_t cycles)
+{
+    for (volatile uint32_t cycle = 0; cycle < cycles; ++cycle)
+    {
+        __asm volatile ("nop");
+    }
+}
+
+static inline void __not_in_flash_func(psram_wait_direct_done)(void)
+{
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_TXEMPTY_BITS) == 0)
+    {
+    }
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) != 0)
+    {
+    }
+}
+
+static inline void __not_in_flash_func(psram_send_direct_cmd)(uint8_t cmd, bool quad_width)
+{
+    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    if (quad_width)
+    {
+        qmi_hw->direct_tx = QMI_DIRECT_TX_OE_BITS |
+                            (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB) |
+                            cmd;
+    }
+    else
+    {
+        qmi_hw->direct_tx = cmd;
+    }
+    psram_wait_direct_done();
+    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    (void)qmi_hw->direct_rx;
+}
+
+static bool __no_inline_not_in_flash_func(psram_init)(void)
+{
+    gpio_set_function(PIN_PSRAM, GPIO_FUNC_XIP_CS1);
+
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    qmi_hw->direct_csr = (30u << QMI_DIRECT_CSR_CLKDIV_LSB) | QMI_DIRECT_CSR_EN_BITS;
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) != 0)
+    {
+    }
+
+    // Warm restart path: if PSRAM remained powered it may still be in QPI mode.
+    psram_send_direct_cmd(0xF5u, true);
+    psram_delay_cycles(128u);
+
+    psram_send_direct_cmd(0x66u, false);
+    psram_delay_cycles(128u);
+    psram_send_direct_cmd(0x99u, false);
+    psram_delay_cycles(50000u);
+    psram_send_direct_cmd(0x35u, false);
+    psram_delay_cycles(128u);
+    psram_send_direct_cmd(0xC0u, false);
+    psram_delay_cycles(128u);
+
+    qmi_hw->direct_csr &= ~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS);
+
+    qmi_hw->m[1].timing =
+        (QMI_M0_TIMING_PAGEBREAK_VALUE_1024 << QMI_M0_TIMING_PAGEBREAK_LSB) |
+        (3u << QMI_M0_TIMING_SELECT_HOLD_LSB) |
+        (1u << QMI_M0_TIMING_COOLDOWN_LSB) |
+        (2u << QMI_M0_TIMING_RXDELAY_LSB) |
+        (26u << QMI_M0_TIMING_MAX_SELECT_LSB) |
+        (11u << QMI_M0_TIMING_MIN_DESELECT_LSB) |
+        (2u << QMI_M0_TIMING_CLKDIV_LSB);
+    qmi_hw->m[1].rfmt =
+        (QMI_M0_RFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_PREFIX_WIDTH_LSB) |
+        (QMI_M0_RFMT_ADDR_WIDTH_VALUE_Q << QMI_M0_RFMT_ADDR_WIDTH_LSB) |
+        (QMI_M0_RFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_SUFFIX_WIDTH_LSB) |
+        (QMI_M0_RFMT_DUMMY_WIDTH_VALUE_Q << QMI_M0_RFMT_DUMMY_WIDTH_LSB) |
+        (QMI_M0_RFMT_DUMMY_LEN_VALUE_24 << QMI_M0_RFMT_DUMMY_LEN_LSB) |
+        (QMI_M0_RFMT_DATA_WIDTH_VALUE_Q << QMI_M0_RFMT_DATA_WIDTH_LSB) |
+        (QMI_M0_RFMT_PREFIX_LEN_VALUE_8 << QMI_M0_RFMT_PREFIX_LEN_LSB) |
+        (QMI_M0_RFMT_SUFFIX_LEN_VALUE_NONE << QMI_M0_RFMT_SUFFIX_LEN_LSB);
+    qmi_hw->m[1].rcmd = (0xEBu << QMI_M0_RCMD_PREFIX_LSB);
+    qmi_hw->m[1].wfmt =
+        (QMI_M0_WFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_WFMT_PREFIX_WIDTH_LSB) |
+        (QMI_M0_WFMT_ADDR_WIDTH_VALUE_Q << QMI_M0_WFMT_ADDR_WIDTH_LSB) |
+        (QMI_M0_WFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M0_WFMT_SUFFIX_WIDTH_LSB) |
+        (QMI_M0_WFMT_DUMMY_WIDTH_VALUE_Q << QMI_M0_WFMT_DUMMY_WIDTH_LSB) |
+        (QMI_M0_WFMT_DUMMY_LEN_VALUE_NONE << QMI_M0_WFMT_DUMMY_LEN_LSB) |
+        (QMI_M0_WFMT_DATA_WIDTH_VALUE_Q << QMI_M0_WFMT_DATA_WIDTH_LSB) |
+        (QMI_M0_WFMT_PREFIX_LEN_VALUE_8 << QMI_M0_WFMT_PREFIX_LEN_LSB) |
+        (QMI_M0_WFMT_SUFFIX_LEN_VALUE_NONE << QMI_M0_WFMT_SUFFIX_LEN_LSB);
+    qmi_hw->m[1].wcmd = (0x38u << QMI_M0_WCMD_PREFIX_LSB);
+
+    xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+
+    restore_interrupts(irq_state);
+
+    volatile uint32_t *psram_words = (volatile uint32_t *)PSRAM_BASE_ADDR;
+    psram_words[0] = 0x12345678u;
+    return psram_words[0] == 0x12345678u;
+}
+
+static void __not_in_flash_func(mapper_fill_ff)(void)
+{
+    uint32_t *mapper_words = (uint32_t *)PSRAM_BASE_ADDR;
+    for (uint32_t index = 0; index < (MAPPER_SIZE / sizeof(uint32_t)); ++index)
+    {
+        mapper_words[index] = 0xFFFFFFFFu;
+    }
+}
+
+static inline void __not_in_flash_func(mapper_write_byte)(uint32_t offset, uint8_t data)
+{
+    ((uint8_t *)PSRAM_BASE_ADDR)[offset] = data;
+}
+
+static inline uint8_t __not_in_flash_func(mapper_read_byte)(uint32_t offset)
+{
+    return ((const uint8_t *)PSRAM_BASE_ADDR)[offset];
+}
 
 // -----------------------------------------------------------------------
 // ROM source preparation (cache to SRAM, flash fallback for large ROMs)
@@ -831,11 +955,11 @@ void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_
 }
 
 // -----------------------------------------------------------------------
-// loadrom_sunrise_mapper - Sunrise IDE Nextor + 256KB Memory Mapper
+// loadrom_sunrise_mapper - Sunrise IDE Nextor + 1MB Memory Mapper
 // -----------------------------------------------------------------------
 // Implements expanded slot with two sub-slots:
 //   Sub-slot 0: Nextor ROM (Sunrise IDE) — 16KB window at 0x4000-0x7FFF
-//   Sub-slot 1: 256KB Memory Mapper RAM — all 4 pages (0x0000-0xFFFF)
+//   Sub-slot 1: 1MB Memory Mapper RAM — all 4 pages (0x0000-0xFFFF)
 //
 // The sub-slot register at 0xFFFF controls which sub-slot is selected
 // for each 16KB page (bits 1:0 = page 0, bits 3:2 = page 1, etc.).
@@ -850,8 +974,8 @@ void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_
 //
 // Reset values per BIOS convention: FC=3, FD=2, FE=1, FF=0
 //
-// The mapper RAM is 256KB = 16 pages of 16KB. Page registers are treated
-// as 8-bit values and normalized to 0..15 when accessing RAM.
+// The mapper RAM is 1MB = 64 pages of 16KB. Page registers are treated
+// as 8-bit values and normalized to 0..63 when accessing RAM.
 void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable)
 {
     (void)cache_enable;
@@ -977,8 +1101,8 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
     // Value: 0b00010000 = 0x10
     uint8_t subslot_reg = 0x10;
 
-    // Clear mapper RAM
-    memset(mapper_ram, 0xFF, MAPPER_SIZE);
+    // Clear mapper RAM in external PSRAM
+    mapper_fill_ff();
 
     // Initialise PIO I/O bus FIRST (mapper port handlers must be ready
     // before the memory bus releases WAIT and the BIOS starts probing).
@@ -1023,7 +1147,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                         // Sub-slot 1: Memory mapper RAM — write to mapped page
                         uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                         uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
-                        mapper_ram[mapper_offset] = wdata;
+                        mapper_write_byte(mapper_offset, wdata);
                     }
                     // Sub-slots 2 and 3: unused, writes are ignored
                 }
@@ -1039,7 +1163,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                 uint8_t port = io_addr & 0xFFu;
                 if (port >= 0xFCu && port <= 0xFFu)
                 {
-                    mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
                 }
             }
         }
@@ -1056,7 +1180,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                 if (port >= 0xFCu && port <= 0xFFu)
                 {
                     in_window = true;
-                    data = (uint8_t)(0xF0u | (mapper_reg[port - 0xFCu] & 0x0Fu));
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
                 }
 
                 pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
@@ -1110,7 +1234,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                     in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                     uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
-                    data = mapper_ram[mapper_offset];
+                    data = mapper_read_byte(mapper_offset);
                 }
                 // Sub-slots 2 and 3: unused, return 0xFF (not in window)
             }
@@ -1180,7 +1304,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cac
 }
 
 // -----------------------------------------------------------------------
-// Case 16: Sunrise IDE + 256KB memory mapper via microSD card
+// Case 16: Sunrise IDE + 1MB memory mapper via microSD card
 // -----------------------------------------------------------------------
 // Identical to loadrom_sunrise_mapper (case 11) but launches the SD
 // backend on Core 1 instead of the USB backend.
@@ -1261,7 +1385,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
     uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
     uint8_t subslot_reg = 0x10;
 
-    memset(mapper_ram, 0xFF, MAPPER_SIZE);
+    mapper_fill_ff();
 
     msx_pio_io_bus_init();
     msx_pio_bus_init();
@@ -1290,7 +1414,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                     {
                         uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                         uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
-                        mapper_ram[mapper_offset] = wdata;
+                        mapper_write_byte(mapper_offset, wdata);
                     }
                 }
             }
@@ -1303,7 +1427,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
             {
                 uint8_t port = io_addr & 0xFFu;
                 if (port >= 0xFCu && port <= 0xFFu)
-                    mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
             }
         }
 
@@ -1318,7 +1442,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                 if (port >= 0xFCu && port <= 0xFFu)
                 {
                     in_window = true;
-                    data = (uint8_t)(0xF0u | (mapper_reg[port - 0xFCu] & 0x0Fu));
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
                 }
                 pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
             }
@@ -1362,7 +1486,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                     in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                     uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
-                    data = mapper_ram[mapper_offset];
+                    data = mapper_read_byte(mapper_offset);
                 }
                 // Sub-slots 2 and 3: unused, return 0xFF (not in window)
             }
@@ -2239,7 +2363,7 @@ int __no_inline_not_in_flash_func(main)()
 {
     // Keep existing RP2350 flash timing setup.
     qmi_hw->m[0].timing = 0x40000202;
-    set_sys_clock_khz(250000, true);
+    set_sys_clock_khz(210000, true);
 
     setup_gpio();
 
@@ -2250,6 +2374,14 @@ int __no_inline_not_in_flash_func(main)()
     bool scc_emulation = (rom_type & SCC_FLAG) != 0;
     bool scc_plus = (rom_type & SCC_PLUS_FLAG) != 0;
     uint8_t base_rom_type = rom_type & ~(SCC_FLAG | SCC_PLUS_FLAG);
+
+    if ((base_rom_type == 11u || base_rom_type == 16u) && !psram_init())
+    {
+        while (true)
+        {
+            tight_loop_contents();
+        }
+    }
 
     uint32_t rom_size;
     memcpy(&rom_size, rom + ROM_NAME_MAX + 1, sizeof(uint32_t));

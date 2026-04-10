@@ -393,9 +393,9 @@ static void print_usage(const char *prog_name) {
     printf("Options:\n");
     printf("  -h, --help         Show this help message\n");
     printf("  -s1, --sunrise-sd  Build UF2 with Sunrise IDE Nextor ROM (microSD card)\n");
-    printf("  -m1, --mapper-sd   Build UF2 with Sunrise IDE Nextor ROM + 256KB mapper (microSD card)\n");
+    printf("  -m1, --mapper-sd   Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (microSD card)\n");
     printf("  -s2, --sunrise-usb Build UF2 with Sunrise IDE Nextor ROM (USB pendrive)\n");
-    printf("  -m2, --mapper-usb  Build UF2 with Sunrise IDE Nextor ROM + 256KB mapper (USB pendrive)\n");
+    printf("  -m2, --mapper-usb  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (USB pendrive)\n");
     printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC mapper only)\n");
     printf("  -sccplus, --sccplus  Enable SCC+ (enhanced) sound emulation (Konami SCC mapper only)\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);

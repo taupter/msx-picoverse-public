@@ -92,13 +92,13 @@ The implementation uses `jmp pin` polling to re-check slot/IORQ validity while w
 ### Clocking and flash timing
 
 - Firmware sets QMI flash timing (`qmi_hw->m[0].timing = 0x40000202`).
-- System clock is configured to **285 MHz**.
+- System clock is configured to **210 MHz**.
 
 ### ROM serving
 
 - Uses a 256 KB SRAM cache with flash fallback for ROMs exceeding cache capacity.
 - GPIO input hysteresis is enabled on address (A0–A15) and data (D0–D7) pins to filter bus glitches.
-- Mapper support includes Plain16/32, Planar48, Planar64, Konami SCC, Konami, ASCII8, ASCII16, ASCII16-X, NEO8, NEO16, Manbow2, Sunrise IDE, and Sunrise IDE + 256KB Mapper.
+- Mapper support includes Plain16/32, Planar48, Planar64, Konami SCC, Konami, ASCII8, ASCII16, ASCII16-X, NEO8, NEO16, Manbow2, Sunrise IDE, and Sunrise IDE + 1MB PSRAM Mapper.
 
 ### Sunrise IDE integration
 
@@ -132,7 +132,7 @@ For microSD modes (`-s1`/`-m1`):
 In mapper mode (`-m`), additionally:
 
 - PIO1 SM0/SM1 run `msx_io_read_responder` / `msx_io_write_captor` to intercept I/O ports FC–FF.
-- 256KB SRAM is used as mapper RAM (16 × 16KB pages) instead of ROM cache.
+- For `loadrom.pio` `-m1`/`-m2`, 1MB of external PSRAM on QMI CS1 (GPIO47) is used as mapper RAM (64 × 16KB pages), accessed through the uncached CS1 window.
 - An expanded sub-slot architecture provides sub-slot 0 (Nextor ROM) and sub-slot 1 (mapper RAM).
 - A bootstrap ROM phase ensures clean cold-boot before the expanded-slot mapper is activated.
 
