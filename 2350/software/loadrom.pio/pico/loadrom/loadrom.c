@@ -141,13 +141,20 @@ static bool __no_inline_not_in_flash_func(psram_init)(void)
 
     qmi_hw->direct_csr &= ~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS);
 
+    // PSRAM QMI timing — tuned for 210 MHz system clock.
+    // CLKDIV=2 → SCK = 52.5 MHz (safe for all APS6404L/IPS6404L grades).
+    // SELECT_HOLD=1 → 4.76 ns ≥ 3 ns tCSS.
+    // MIN_DESELECT=5 → 23.8 ns ≥ 18 ns tCPH.
+    // RXDELAY=2 → sample at 9.52 ns after SCK rise (mid-cycle at CLKDIV=2).
+    // Performance comes from the XIP cache (PSRAM_BASE_ADDR = 0x11000000,
+    // cached write-through window) rather than raw QSPI throughput.
     qmi_hw->m[1].timing =
         (QMI_M0_TIMING_PAGEBREAK_VALUE_1024 << QMI_M0_TIMING_PAGEBREAK_LSB) |
-        (3u << QMI_M0_TIMING_SELECT_HOLD_LSB) |
+        (1u << QMI_M0_TIMING_SELECT_HOLD_LSB) |
         (1u << QMI_M0_TIMING_COOLDOWN_LSB) |
         (2u << QMI_M0_TIMING_RXDELAY_LSB) |
         (26u << QMI_M0_TIMING_MAX_SELECT_LSB) |
-        (11u << QMI_M0_TIMING_MIN_DESELECT_LSB) |
+        (5u << QMI_M0_TIMING_MIN_DESELECT_LSB) |
         (2u << QMI_M0_TIMING_CLKDIV_LSB);
     qmi_hw->m[1].rfmt =
         (QMI_M0_RFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_PREFIX_WIDTH_LSB) |
@@ -174,9 +181,12 @@ static bool __no_inline_not_in_flash_func(psram_init)(void)
 
     restore_interrupts(irq_state);
 
-    volatile uint32_t *psram_words = (volatile uint32_t *)PSRAM_BASE_ADDR;
-    psram_words[0] = 0x12345678u;
-    return psram_words[0] == 0x12345678u;
+    // Verify PSRAM is functional via uncached window (bypass XIP cache
+    // to guarantee the write reaches the device and the read comes back
+    // from the device, not from a stale cache line).
+    volatile uint32_t *psram_test = (volatile uint32_t *)0x15000000u;
+    psram_test[0] = 0x12345678u;
+    return psram_test[0] == 0x12345678u;
 }
 
 static void __not_in_flash_func(mapper_fill_ff)(void)
@@ -253,6 +263,56 @@ static inline void __not_in_flash_func(prepare_rom_source)(
         if (available_length <= rom_cache_capacity)
         {
             // Entire ROM fits in SRAM cache
+            rom_base = rom_sram;
+        }
+    }
+    else
+    {
+        rom_cached_size = 0;
+    }
+
+    *rom_base_out = rom_base;
+    *available_length_out = available_length;
+}
+
+static inline void __not_in_flash_func(prepare_sunrise_mapper_rom_source)(
+    uint32_t offset,
+    bool cache_enable,
+    const uint8_t **rom_base_out,
+    uint32_t *available_length_out)
+{
+    // On RP2350 the mapper RAM lives in external PSRAM, so the internal
+    // 256KB SRAM cache can be used for the embedded Nextor ROM as well.
+    // The caller has already frozen the MSX bus with /WAIT asserted, so
+    // this path must not release /WAIT while the cache DMA is running.
+    const uint8_t *rom_base = rom + offset;
+    uint32_t available_length = active_rom_size;
+
+    rom_cache_capacity = CACHE_SIZE;
+
+    if (cache_enable && available_length > 0u)
+    {
+        uint32_t bytes_to_cache = (available_length > rom_cache_capacity)
+                                  ? rom_cache_capacity
+                                  : available_length;
+
+        int dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dma_cfg = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_8);
+        channel_config_set_read_increment(&dma_cfg, true);
+        channel_config_set_write_increment(&dma_cfg, true);
+        dma_channel_configure(dma_chan, &dma_cfg,
+            rom_sram,
+            rom_base,
+            bytes_to_cache,
+            true);
+        dma_channel_wait_for_finish_blocking(dma_chan);
+        dma_channel_unclaim(dma_chan);
+
+        rom_cached_size = bytes_to_cache;
+
+        if (available_length <= rom_cache_capacity)
+        {
             rom_base = rom_sram;
         }
     }
@@ -1074,12 +1134,9 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
     gpio_put(PIN_WAIT, 0);            // Assert WAIT — freeze MSX bus
 
-    // Mapper mode: disable ROM cache and reserve full SRAM for mapper RAM.
-    rom_cache_capacity = 0u;
-
     const uint8_t *rom_base;
     uint32_t available_length;
-    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
 
     // Initialise Sunrise IDE state
     static sunrise_ide_t ide;
@@ -1370,11 +1427,9 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
     gpio_put(PIN_WAIT, 0);
 
-    rom_cache_capacity = 0u;
-
     const uint8_t *rom_base;
     uint32_t available_length;
-    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
 
     static sunrise_ide_t ide;
     sunrise_ide_init(&ide);

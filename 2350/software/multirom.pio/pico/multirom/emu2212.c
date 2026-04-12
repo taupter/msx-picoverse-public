@@ -50,12 +50,22 @@
 
 #define GETA_BITS 22
 
+// Oversampling divisor for quality=1 mode.  The original emulator uses 2
+// (internal rate = clk/2 ≈ 1.79 MHz, ~41 update_output calls per sample at
+// 44.1 kHz).  At 210 MHz system clock the RP2350 cannot sustain that on a
+// single core.  Using 8 (internal rate ≈ 448 kHz, ~10 calls per sample)
+// reduces Core-1 CPU usage by 4× while the product base_incr × iterations
+// is preserved, keeping pitch and audio quality identical.
+#ifndef SCC_OVERSAMPLE_DIV
+#define SCC_OVERSAMPLE_DIV 8
+#endif
+
 static void
 internal_refresh (SCC *scc) {
     if (scc->quality) {
-        scc->base_incr = 2 << GETA_BITS;
+        scc->base_incr = SCC_OVERSAMPLE_DIV << GETA_BITS;
         scc->realstep = (uint32_t)((1 << 31) / scc->rate);
-        scc->sccstep = (uint32_t)((1 << 31) / (scc->clk / 2));
+        scc->sccstep = (uint32_t)((1 << 31) / (scc->clk / SCC_OVERSAMPLE_DIV));
         scc->scctime = 0;
     } else {
         scc->base_incr = (uint32_t)((double)scc->clk * (1 << GETA_BITS) / scc->rate);

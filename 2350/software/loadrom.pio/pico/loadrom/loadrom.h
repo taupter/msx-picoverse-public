@@ -20,7 +20,7 @@
 #define MAPPER_SIZE     1048576    // 1 MB memory mapper RAM in external PSRAM
 #define MAPPER_PAGES    64         // 1 MB / 16 KB = 64 pages
 #define MAPPER_PAGE_SIZE 16384     // 16 KB per mapper page
-#define PSRAM_BASE_ADDR 0x15000000u // Uncached CS1 QMI window for external PSRAM
+#define PSRAM_BASE_ADDR 0x11000000u // Cached CS1 QMI window for external PSRAM (write-through)
 
 // -----------------------
 // User-defined pin assignments for the Raspberry Pi Pico
