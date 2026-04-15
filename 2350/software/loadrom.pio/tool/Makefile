@@ -45,7 +45,7 @@ all: clean compile package
 
 compile: $(BINDIR)/$(OUTFILE)
 
-package: $(DISDIR)/loadrom_$(VERSION).exe
+package: $(DISDIR)/loadrom.exe
 
 $(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE)
 	@echo "Compiling $@"
@@ -65,7 +65,7 @@ $(BINDIR):
 $(DISDIR):
 	@mkdir $@
 
-$(DISDIR)/loadrom_$(VERSION).exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
+$(DISDIR)/loadrom.exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
 	@echo "Packaging $@"
 	cp $(BINDIR)/$(OUTFILE) $@
 

@@ -269,11 +269,13 @@ Note: The keyboard firmware is not compatible with FPGA-based MSX implementation
 | --- | --- | --- | --- | 
 | Canon V20 | MSX1 | OK | Verified operation |
 | Gradiente Expert | MSX1 | OK | Verified operation |
+| Panasonic FS-A1 | MSX2 | OK | Verified operation |
 | Panasonic FS-A1FX | MSX2+ | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
 | Panasonic FS-A1GT | TurboR | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
 | Panasonic FS-A1ST | TurboR | Not OK | Keyboard does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PPI, the firmware is not compatible. |
 | Sharp HotBit HB8000 | MSX1 | OK | Verified operation |
 | Sony HB-101P| MSX1 | OK | Verified operation |
+| Sony HB-F1XD | MSX2 | Not OK | Keyboard does not function correctly. This computer uses the Yamaha S1985 (MSX-SYSTEMII) made by Yamaha for ASCII Corporation. It integrates the PPI thus, not supporting the PicoVerse PPI emulation |
 
 The MSX-MIDI firmware (option `-i`) has been tested on the following MSX models:
 
@@ -298,12 +300,14 @@ Note: The joystick firmware is not compatible with FPGA-based MSX implementation
 | MSX Model | Type | Status | USB Controllers | Comments |
 | --- | --- | --- | --- | --- |  
 | Gradiente Expert | MSX1 | OK | Xbox 360 Controller for Windows, Xbox One Controller (wired), Xbox Series X|S Controller (wired) | Verified operation with multiple controllers; tested with games that use both joystick ports |
+| Panasonic FS-A1 | MSX2 | OK | Custom USB joystick |Verified operation |
 | Panasonic FS-A1FX | MSX2+ | Not OK | N/A | Joystick does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PSG, the firmware is not compatible. |
 | Panasonic FS-A1GT | TurboR | Not OK | N/A | Joystick does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PSG, the firmware is not compatible. |
 | Panasonic FS-A1ST | TurboR | Not OK | N/A | Joystick does not function correctly. This computer uses the T9769 MSX-ENGINE with the integrated PSG, the firmware is not compatible. |
 | Sharp HotBit HB8000 | MSX1 | OK | Xbox 360 Controller for Windows, Xbox One Controller (wired), Xbox Series X|S Controller (wired) | Verified operation with multiple controllers; tested with games that use both joystick ports |
+| Sony HB-F1XD | MSX2 | Not OK |N/A|Joystick does not function correctly. This computer uses the Yamaha S1985 (MSX-SYSTEMII) made by Yamaha for ASCII Corporation. It integrates the PSG, the firmware is not compatible. |
 |TRHMSX | MSX2+ (FPGA clone) | Not OK | N/A | Joystick does not function correctly. This is an FPGA-based MSX implementation, the firmware is not compatible. |
 | uMSX | MSX2+ (FPGA clone) | Not OK | N/A | Joystick does not function correctly. This is an FPGA-based MSX implementation, the firmware is not compatible. |
 
 Author: Cristiano Almeida Goncalves
-Last updated: 03/29/2026
+Last updated: 04/12/2026

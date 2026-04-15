@@ -56,7 +56,7 @@ all: clean compile package
 
 compile: $(BINDIR)/$(OUTFILE)
 
-package: $(DISDIR)/explorer_$(VERSION).exe
+package: $(DISDIR)/explorer.exe
 
 $(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(MSXMENU_H) $(MSXMENU) $(NEXTOR_H) $(NEXTOR)
 	@echo "Compiling $@"
@@ -80,7 +80,7 @@ $(BINDIR):
 $(DISDIR):
 	@mkdir $@
 
-$(DISDIR)/explorer_$(VERSION).exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
+$(DISDIR)/explorer.exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
 	@echo "Packaging $@"
 	cp $(BINDIR)/$(OUTFILE) $@
 
