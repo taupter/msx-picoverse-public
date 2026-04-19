@@ -50,6 +50,7 @@ add_executable(loadrom
     emu2212.c
     sunrise_ide.c
     sunrise_sd.c
+    c2_emu.c
     hw_config.c
     )
 
@@ -74,7 +75,7 @@ target_link_libraries(loadrom
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
 
 target_compile_definitions(loadrom PRIVATE
-    PICO_AUDIO_I2S_PIO=1
+    PICO_AUDIO_I2S_PIO=0
 )
 
 # Add the standard include files to the build

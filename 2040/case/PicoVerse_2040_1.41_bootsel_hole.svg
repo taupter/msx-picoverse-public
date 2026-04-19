@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="600mm"
+   height="400mm"
+   viewBox="0 0 600 400"
+   version="1.1"
+   id="svg19"
+   sodipodi:docname="PicoVerse_2040_1.41_bootsel_hole.svg"
+   inkscape:version="1.2-alpha1 (unknown)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview21"
+     pagecolor="#ffffff"
+     bordercolor="#999999"
+     borderopacity="1"
+     inkscape:pageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     showgrid="false"
+     inkscape:zoom="2.4103542"
+     inkscape:cx="508.63895"
+     inkscape:cy="536.43569"
+     inkscape:window-width="3840"
+     inkscape:window-height="2054"
+     inkscape:window-x="-11"
+     inkscape:window-y="-11"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer3" />
+  <defs
+     id="defs16" />
+  <g
+     inkscape:label="CORTE"
+     inkscape:groupmode="layer"
+     id="layer1"
+     inkscape:power="50"
+     inkscape:feed="50"
+     inkscape:engrave="0"
+     inkscape:highlight-color="#e13535" />
+  <g
+     inkscape:groupmode="layer"
+     id="layer2"
+     inkscape:power="50"
+     inkscape:feed="50"
+     inkscape:engrave="2"
+     inkscape:label="CONTORNO" />
+  <g
+     inkscape:groupmode="layer"
+     id="layer3"
+     inkscape:power="50"
+     inkscape:feed="50"
+     inkscape:engrave="1"
+     inkscape:label="PREENCHIMENTO"
+     inkscape:highlight-color="#818181">
+    <rect
+       style="fill:none;stroke:#000000;stroke-width:0.0921824;stroke-opacity:1"
+       id="rect283"
+       width="109.90781"
+       height="69.907814"
+       x="70.046089"
+       y="70.046089"
+       rx="3.0664064e-06"
+       ry="3.0664062e-06"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0" />
+    <circle
+       id="path3851"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"
+       cx="89.434891"
+       cy="66.339066"
+       r="0.024738545"
+       style="fill:#000000;stroke:#000000;stroke-width:0.264583" />
+    <path
+       style="fill:none;stroke:#000000;stroke-width:0.170069;stroke-opacity:1"
+       d="m 120.59217,66.182818 -0.49294,77.574192"
+       id="path3918"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0" />
+    <path
+       style="fill:none;stroke:#000000;stroke-width:0.209964;stroke-opacity:1"
+       d="m 65.635196,84.107484 118.729594,0.49089"
+       id="path3918-7"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0" />
+    <ellipse
+       style="fill:none;stroke:#000000;stroke-width:0.246885;stroke-opacity:1"
+       id="path11830"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"
+       cx="120.4808"
+       cy="84.459846"
+       rx="1.6072505"
+       ry="1.7249066" />
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:35.2777px;font-family:Verdana;-inkscape-font-specification:'Verdana Bold';text-align:center;writing-mode:vertical-lr;text-anchor:middle;fill:none;stroke:#000000;stroke-width:0.2;stroke-opacity:1"
+       x="86.868156"
+       y="81.308594"
+       id="text15119"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"><tspan
+         sodipodi:role="line"
+         id="tspan15117"
+         style="stroke-width:0.2"></tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:35.2777px;font-family:Verdana;-inkscape-font-specification:'Verdana Bold';text-align:center;writing-mode:lr-tb;text-anchor:middle;fill:none;stroke:#000000;stroke-width:0.2;stroke-opacity:1"
+       x="37.092701"
+       y="61.155182"
+       id="text15123"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"><tspan
+         sodipodi:role="line"
+         id="tspan15121"
+         style="writing-mode:lr-tb;stroke-width:0.2"
+         x="37.092701"
+         y="61.155182" /></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:3.52777px;font-family:Verdana;-inkscape-font-specification:'Verdana, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;writing-mode:lr-tb;text-anchor:middle;fill:none;stroke:#000000;stroke-width:0.2;stroke-opacity:1"
+       x="128.69696"
+       y="76.645607"
+       id="text15780"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"><tspan
+         sodipodi:role="line"
+         id="tspan15778"
+         style="stroke-width:0.2"
+         x="128.69696"
+         y="76.645607">14 mm</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:3.52777px;font-family:Verdana;-inkscape-font-specification:'Verdana, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;writing-mode:lr-tb;text-anchor:middle;fill:none;stroke:#000000;stroke-width:0.2;stroke-opacity:1"
+       x="94.18222"
+       y="82.458099"
+       id="text16090"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"><tspan
+         sodipodi:role="line"
+         id="tspan16088"
+         style="stroke-width:0.2"
+         x="94.18222"
+         y="82.458099">50 mm</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-style:normal;font-variant:normal;font-weight:bold;font-stretch:normal;font-size:3.52777px;font-family:Verdana;-inkscape-font-specification:'Verdana, Bold';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-variant-east-asian:normal;text-align:center;writing-mode:lr-tb;text-anchor:middle;fill:none;stroke:#000000;stroke-width:0.2;stroke-opacity:1"
+       x="145.44456"
+       y="134.79692"
+       id="text19089"
+       inkscape:power="50"
+       inkscape:feed="50"
+       inkscape:engrave="0"><tspan
+         sodipodi:role="line"
+         id="tspan19087"
+         style="stroke-width:0.2"
+         x="145.44456"
+         y="134.79692">back</tspan></text>
+  </g>
+</svg>

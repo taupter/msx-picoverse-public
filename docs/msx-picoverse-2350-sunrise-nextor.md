@@ -1,19 +1,21 @@
 # MSX PicoVerse 2350 — Sunrise IDE Emulation for Nextor
 
-This document describes the implementation of the four Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone or combined with a 1MB PSRAM-backed memory mapper.
+This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, or combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`.
 
 ## 1. Overview
 
-The MSX PicoVerse 2350 provides a complete Sunrise IDE emulation that allows the MSX to boot Nextor DOS and access mass storage through either the on-board microSD card slot or the USB-C port. Four firmware modes are available:
+The MSX PicoVerse 2350 provides a complete Sunrise IDE emulation that allows the MSX to boot Nextor DOS and access mass storage through either the on-board microSD card slot or the USB-C port. Six firmware modes are available:
 
 | Option | Mapper Type | Storage Backend | Description |
 |--------|-------------|-----------------|-------------|
 | `-s1` / `--sunrise-sd` | 15 | microSD (SPI) | Sunrise IDE with microSD card |
 | `-m1` / `--mapper-sd` | 16 | microSD (SPI) | Sunrise IDE + 1MB PSRAM mapper with microSD card |
+| `-c1` / `--carnivore2-sd` | 17 | microSD (SPI) | Sunrise IDE + 1MB PSRAM mapper + Carnivore2 RAM-mode target for `SROM.COM /D15` |
 | `-s2` / `--sunrise-usb` | 10 | USB-C (MSC) | Sunrise IDE with USB pendrive |
 | `-m2` / `--mapper-usb` | 11 | USB-C (MSC) | Sunrise IDE + 1MB PSRAM mapper with USB pendrive |
+| `-c2` / `--carnivore2-usb` | 18 | USB-C (MSC) | Sunrise IDE + 1MB PSRAM mapper + Carnivore2 RAM-mode target for `SROM.COM /D15` |
 
-All four modes:
+All six modes:
 
 - Emulate the Sunrise IDE FlashROM banking for the 128KB Nextor ROM image (8 × 16KB pages)
 - Emulate the full ATA task-file register set at `0x7C00`–`0x7EFF`
@@ -23,9 +25,11 @@ All four modes:
 
 The mapper variants (`-m1`, `-m2`) additionally provide 1MB of mapper RAM (64 × 16KB pages) in an expanded sub-slot architecture, with mapper page registers intercepted via PIO1.
 
+The Carnivore2 RAM-mode variants (`-c1`, `-c2`) build on that same mapper architecture and add a Carnivore2-compatible control/register surface plus banked RAM windows so `SROM.COM /D15` can upload ROM images into PSRAM and launch them directly from RAM.
+
 ## 2. Architecture
 
-All four modes share an identical ATA front-end on Core 0. Core 1 runs the appropriate storage backend depending on the mapper type.
+All six modes share an identical ATA front-end on Core 0. Core 1 runs the appropriate storage backend depending on the mapper type.
 
 ### Shared ATA Front-End
 

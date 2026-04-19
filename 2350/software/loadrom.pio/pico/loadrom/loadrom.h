@@ -21,6 +21,14 @@
 #define MAPPER_PAGES    64         // 1 MB / 16 KB = 64 pages
 #define MAPPER_PAGE_SIZE 16384     // 16 KB per mapper page
 #define PSRAM_BASE_ADDR 0x11000000u // Cached CS1 QMI window for external PSRAM (write-through)
+#define PSRAM_TOTAL_SIZE 0x800000u  // 8 MB total external PSRAM
+
+// PSRAM region descriptor returned by the memory manager.
+typedef struct {
+    uint32_t offset;    // Offset from PSRAM base
+    uint32_t size;      // Size of this region in bytes
+    uint8_t *ptr;       // Memory-mapped pointer (PSRAM_BASE_ADDR + offset)
+} psram_region_t;
 
 // -----------------------
 // User-defined pin assignments for the Raspberry Pi Pico

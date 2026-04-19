@@ -32,6 +32,7 @@
 #include "pico/audio_i2s.h"
 #include "sunrise_ide.h"
 #include "sunrise_sd.h"
+#include "c2_emu.h"
 
 // -----------------------------------------------------------------------
 // PIO bus context
@@ -75,6 +76,8 @@ static uint32_t rom_cache_capacity = CACHE_SIZE;
 
 static SCC scc_instance;
 static struct audio_buffer_pool *audio_pool;
+static bool scc_audio_ready = false;
+static int scc_dma_channel = -1;
 
 // -----------------------------------------------------------------------
 // External PSRAM mapper backing (QMI CS1)
@@ -189,23 +192,61 @@ static bool __no_inline_not_in_flash_func(psram_init)(void)
     return psram_test[0] == 0x12345678u;
 }
 
+// -----------------------------------------------------------------------
+// PSRAM Memory Manager — bump allocator for 8MB external PSRAM
+// -----------------------------------------------------------------------
+static psram_region_t mapper_region;
+static psram_region_t c2_rom_region;
+
+static struct {
+    uint32_t next_free;
+} psram_mgr;
+
+static void psram_mem_init(void)
+{
+    psram_mgr.next_free = 0;
+    memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&c2_rom_region, 0, sizeof(c2_rom_region));
+}
+
+static bool psram_alloc(uint32_t size, psram_region_t *region)
+{
+    if (psram_mgr.next_free + size > PSRAM_TOTAL_SIZE)
+        return false;
+    region->offset = psram_mgr.next_free;
+    region->size = size;
+    region->ptr = (uint8_t *)(PSRAM_BASE_ADDR + psram_mgr.next_free);
+    psram_mgr.next_free += size;
+    return true;
+}
+
+static void psram_free_all(void)
+{
+    psram_mgr.next_free = 0;
+    memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&c2_rom_region, 0, sizeof(c2_rom_region));
+}
+
+// -----------------------------------------------------------------------
+// PSRAM region helpers — mapper RAM
+// -----------------------------------------------------------------------
 static void __not_in_flash_func(mapper_fill_ff)(void)
 {
-    uint32_t *mapper_words = (uint32_t *)PSRAM_BASE_ADDR;
-    for (uint32_t index = 0; index < (MAPPER_SIZE / sizeof(uint32_t)); ++index)
+    uint32_t *words = (uint32_t *)mapper_region.ptr;
+    for (uint32_t index = 0; index < (mapper_region.size / sizeof(uint32_t)); ++index)
     {
-        mapper_words[index] = 0xFFFFFFFFu;
+        words[index] = 0xFFFFFFFFu;
     }
 }
 
 static inline void __not_in_flash_func(mapper_write_byte)(uint32_t offset, uint8_t data)
 {
-    ((uint8_t *)PSRAM_BASE_ADDR)[offset] = data;
+    mapper_region.ptr[offset] = data;
 }
 
 static inline uint8_t __not_in_flash_func(mapper_read_byte)(uint32_t offset)
 {
-    return ((const uint8_t *)PSRAM_BASE_ADDR)[offset];
+    return mapper_region.ptr[offset];
 }
 
 // -----------------------------------------------------------------------
@@ -241,7 +282,7 @@ static inline void __not_in_flash_func(prepare_rom_source)(
         gpio_set_dir(PIN_WAIT, GPIO_OUT);
         gpio_put(PIN_WAIT, 0);
 
-        // DMA bulk copy from flash XIP to SRAM.
+        // DMA bulk copy from flash/PSRAM XIP to SRAM.
         // Byte transfers are used because rom_base may not be 4-byte aligned
         // (ROM data starts at __flash_binary_end + 55-byte header).
         int dma_chan = dma_claim_unused_channel(true);
@@ -251,12 +292,14 @@ static inline void __not_in_flash_func(prepare_rom_source)(
         channel_config_set_write_increment(&dma_cfg, true);
         dma_channel_configure(dma_chan, &dma_cfg,
             rom_sram,                        // write address (SRAM)
-            rom_base,                        // read address (flash XIP)
+            rom_base,                        // read address (flash/PSRAM XIP)
             bytes_to_cache,                  // transfer count (bytes)
             true);                           // start immediately
         dma_channel_wait_for_finish_blocking(dma_chan);
         dma_channel_unclaim(dma_chan);
-        gpio_put(PIN_WAIT, 1);
+        // WAIT stays asserted; msx_pio_bus_init() will release it
+        // atomically when the read SM starts (side-set 1 on first
+        // instruction), guaranteeing PIO is ready before the MSX resumes.
 
         rom_cached_size = bytes_to_cache;
 
@@ -665,6 +708,9 @@ static void __no_inline_not_in_flash_func(banked8_loop)(
     }
 }
 
+// Forward declarations for functions called from the RAM-target launch dispatch
+void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable);
+
 void __no_inline_not_in_flash_func(loadrom_plain32)(uint32_t offset, bool cache_enable)
 {
     const uint8_t *rom_base;
@@ -738,11 +784,39 @@ static void __no_inline_not_in_flash_func(core1_scc_audio)(void)
     }
 }
 
+void __not_in_flash_func(service_scc_audio)(void)
+{
+    if (!scc_audio_ready || !audio_pool)
+        return;
+
+    struct audio_buffer *buffer = take_audio_buffer(audio_pool, false);
+    if (!buffer)
+        return;
+
+    int16_t *samples = (int16_t *)buffer->buffer->bytes;
+    for (int i = 0; i < SCC_AUDIO_BUFFER_SAMPLES; i++)
+    {
+        int16_t raw = SCC_calc(&scc_instance);
+        int32_t boosted = (int32_t)raw << SCC_VOLUME_SHIFT;
+        if (boosted > 32767) boosted = 32767;
+        else if (boosted < -32768) boosted = -32768;
+        int16_t s = (int16_t)boosted;
+        samples[i * 2]     = s;
+        samples[i * 2 + 1] = s;
+    }
+    buffer->sample_count = SCC_AUDIO_BUFFER_SAMPLES;
+    give_audio_buffer(audio_pool, buffer);
+}
+
 // -----------------------------------------------------------------------
-// I2S audio initialisation (pico_audio_i2s on PIO1)
+// I2S audio initialisation. The mapper/C2 modes keep their I/O responder on
+// PIO1, so audio must stay on PIO0 and avoid SM0/SM1 used by the MSX bus.
 // -----------------------------------------------------------------------
 static void i2s_audio_init(void)
 {
+    if (scc_audio_ready)
+        return;
+
     // Unmute DAC (active-high mute: low = unmuted)
     gpio_init(I2S_MUTE_PIN);
     gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
@@ -761,16 +835,36 @@ static void i2s_audio_init(void)
 
     audio_pool = audio_new_producer_pool(&producer_format, 3, SCC_AUDIO_BUFFER_SAMPLES);
 
+    if (scc_dma_channel < 0)
+    {
+        for (int ch = 0; ch < NUM_DMA_CHANNELS; ++ch)
+        {
+            if (!dma_channel_is_claimed((uint)ch))
+            {
+                scc_dma_channel = ch;
+                break;
+            }
+        }
+    }
+    if (scc_dma_channel < 0)
+    {
+        audio_pool = NULL;
+        return;
+    }
+
     static struct audio_i2s_config i2s_config = {
         .data_pin = I2S_DATA_PIN,
         .clock_pin_base = I2S_BCLK_PIN,
         .dma_channel = 0,
-        .pio_sm = 0,
+        .pio_sm = 2,
     };
+
+    i2s_config.dma_channel = (uint)scc_dma_channel;
 
     audio_i2s_setup(&audio_format, &i2s_config);
     audio_i2s_connect(audio_pool);
     audio_i2s_set_enabled(true);
+    scc_audio_ready = true;
 }
 
 // -----------------------------------------------------------------------
@@ -1436,6 +1530,13 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
 
     sunrise_sd_set_ide_ctx(&ide);
     multicore_launch_core1(sunrise_sd_task);
+
+    // Allocate 1MB mapper RAM from the PSRAM memory manager
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
 
     uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
     uint8_t subslot_reg = 0x10;
@@ -2414,6 +2515,454 @@ void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool ca
     }
 }
 
+// -----------------------------------------------------------------------
+// Cases 17/18: Sunrise IDE + 1MB memory mapper + Carnivore2 RAM emulation
+// -----------------------------------------------------------------------
+// Targets Nextor's SROM /D15 path. Structurally identical to case 16
+// (sunrise_mapper_sd) / case 11 (sunrise_mapper_usb): bootstrap warm-
+// restart, then expanded-slot main loop with Nextor on sub-slot 0,
+// 1 MB mapper RAM on sub-slot 1. On top of that the main loop:
+//   * decodes I/O writes/reads on port 0xF0 + PFXN for SROM detection
+//   * decodes memory accesses in the 64-byte Carnivore2 register window
+//     (default 0x4F80-0x4FBF) and the four programmable bank windows,
+//     routing reads/writes to a separate 1 MB PSRAM region (c2_rom_region)
+//     that backs the emulated Carnivore2 RAM.
+// Writes only touch c2 RAM when the owning bank has R*Mult[5]=1 (RAM select)
+// and R*Mult[4]=1 (write enable). This mirrors the VHDL bank decode exactly
+// enough for SROM to upload and launch a ROM image.
+
+typedef void (*c2_core1_task_t)(void);
+
+static void __no_inline_not_in_flash_func(loadrom_c2_common)(uint32_t offset,
+                                                             bool cache_enable,
+                                                             c2_core1_task_t core1_task,
+                                                             void (*attach_ctx)(sunrise_ide_t *))
+{
+    (void)cache_enable;
+
+    uint8_t rom_type = rom[ROM_NAME_MAX];
+    bool scc_emulation = (rom_type & SCC_FLAG) != 0;
+    bool scc_plus = (rom_type & SCC_PLUS_FLAG) != 0;
+    bool c2_scc_enabled = scc_emulation || scc_plus;
+
+    // ---------------------------------------------------------------
+    // Phase 1 — Bootstrap: serve a tiny ROM that restarts the MSX so
+    // the BIOS sees the final expanded-slot layout on its next probe.
+    // ---------------------------------------------------------------
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,            // 'AB' ROM header
+        0x0A, 0x40,            // INIT = 0x400A
+        0x00, 0x00,            // STATEMENT = none
+        0x00, 0x00,            // DEVICE = none
+        0x00, 0x00,            // TEXT = none
+        0xF3,                  // DI
+        0xDB, 0xF4,            // IN A, (0xF4)
+        0xF6, 0x80,            // OR 0x80
+        0xD3, 0xF4,            // OUT (0xF4), A
+        0xC7                   // RST 0x00
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        { uint16_t waddr; uint8_t wdata; while (pio_try_get_write(&waddr, &wdata)) { } }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+                restart_detected = true;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 2 — freeze MSX before it probes slots again, then wire
+    // expanded slot + Nextor + mapper RAM + Carnivore2 emulation.
+    // ---------------------------------------------------------------
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, true, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    attach_ctx(&ide);
+    multicore_launch_core1(core1_task);
+
+    // PSRAM regions: 1 MB mapper RAM + 1 MB Carnivore2 RAM.
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region) ||
+        !psram_alloc(MAPPER_SIZE, &c2_rom_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    mapper_fill_ff();
+
+    // Initialise Carnivore2 state. We report primary slot 1 by default
+    // (matches the typical factory layout; SROM only uses this value to
+    // verify the port 0xF0 handshake, not to perform bus routing).
+    static c2_state_t c2;
+    c2_init(&c2, c2_rom_region.ptr, c2_rom_region.size, 0x01u);
+
+    static const uint8_t c2_descr[8] = {
+        'C', 'M', 'F', 'C', 'C', 'F', 'R', 'C'
+    };
+    bool c2_signature_overlay_armed = false;
+    uint8_t c2_signature_overlay_index = 0u;
+
+    if (c2_scc_enabled)
+    {
+        memset(&scc_instance, 0, sizeof(SCC));
+        scc_instance.clk = SCC_CLOCK;
+        scc_instance.rate = SCC_SAMPLE_RATE;
+        SCC_set_quality(&scc_instance, 1);
+        scc_instance.type = scc_plus ? SCC_ENHANCED : SCC_STANDARD;
+        SCC_reset(&scc_instance);
+        i2s_audio_init();
+    }
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    // Main loop: service memory + I/O traffic for Nextor, mapper RAM,
+    // mapper page registers (FC-FF), Carnivore2 register window, and
+    // Carnivore2 bank windows.
+    while (true)
+    {
+        // --- Drain memory writes ---
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                // Expanded sub-slot register write at 0xFFFF.
+                if (waddr == 0xFFFFu)
+                {
+                    subslot_reg = wdata;
+                    continue;
+                }
+
+                uint8_t page = (waddr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                if (active_subslot == 1)
+                {
+                    // Sub-slot 1 = Nextor (IDE BIOS, matches real C2 Sltsl_D).
+                    if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                        sunrise_ide_handle_write(&ide, waddr, wdata);
+                }
+                else if (active_subslot == 0)
+                {
+                    // Sub-slot 0 = Carnivore2 main (reg window + banks,
+                    // matches real C2 Sltsl_C). Addresses not claimed by
+                    // the register window or an enabled bank are ignored,
+                    // exactly like the real card (no fallback to mapper
+                    // RAM — that lives on sub-slot 2).
+                    if (c2_addr_is_regwin(&c2, waddr))
+                    {
+                        c2_reg_write(&c2, waddr, wdata);
+                    }
+                    else
+                    {
+                        if (c2_scc_enabled)
+                            SCC_write(&scc_instance, waddr, wdata);
+
+                        // Konami-style mapper-latch: BxMask/BxAddr match
+                        // updates RxReg on every bank. This is a write
+                        // side-channel independent of the data-window
+                        // decode below.
+                        c2_bank_switch_write(&c2, waddr, wdata);
+
+                        uint8_t bank_idx;
+                        uint32_t linear;
+                        if (c2_decode_addr(&c2, waddr, &bank_idx, &linear))
+                        {
+                            uint8_t mult = c2.bank_regs[bank_idx][C2_BANK_MULT];
+                            bool is_ram_we = (mult & (C2_MULT_RAM | C2_MULT_WRITE_EN)) ==
+                                             (C2_MULT_RAM | C2_MULT_WRITE_EN);
+                            bool is_flash_we = (mult & (C2_MULT_RAM | C2_MULT_WRITE_EN)) ==
+                                               C2_MULT_WRITE_EN;
+                            if (is_ram_we)
+                            {
+                                if (linear < c2.ram_size)
+                                {
+                                    c2.ram_ptr[linear] = wdata;
+                                    if (linear + 1u > c2.max_written) c2.max_written = linear + 1u;
+                                }
+                            }
+                            else if (is_flash_we)
+                            {
+                                // Flash-mode bank: feed the AMD autoselect
+                                // state machine so c2ramldr's chip-ID
+                                // probe succeeds. Absorbed writes never
+                                // reach RAM (flash window is read-only
+                                // from the PicoVerse side).
+                                c2_flash_cmd_write(&c2, waddr, wdata);
+                            }
+                        }
+                    }
+                }
+                else if (active_subslot == 2)
+                {
+                    // Sub-slot 2 = MSX memory mapper RAM
+                    // (matches real C2 Sltsl_M).
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                    mapper_write_byte(mapper_offset, wdata);
+                }
+            }
+        }
+
+        // --- Drain I/O writes (mapper page registers FC-FF + Carnivore2 port F0+PFXN) ---
+        {
+            uint16_t io_addr; uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+                }
+                else if ((port & 0xFCu) == 0xF0u &&
+                         (port & 0x03u) == (c2.pfxn & 0x03u))
+                {
+                    // SROM's C2 detection path probes PF0 first and then
+                    // reads 0x4010+index sequentially. Arm the signature
+                    // overlay from that handshake instead of exposing it
+                    // unconditionally in page 1.
+                    if (io_data == 'C' || io_data == 'S')
+                    {
+                        c2_signature_overlay_armed = true;
+                        c2_signature_overlay_index = 0u;
+                    }
+                    c2_port_write(&c2, io_data);
+                }
+            }
+        }
+
+        // --- Handle I/O reads (mapper page registers FC-FF + Carnivore2 port F0+PFXN) ---
+        {
+            uint16_t io_addr;
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+                }
+                else if ((port & 0xFCu) == 0xF0u &&
+                         (port & 0x03u) == (c2.pfxn & 0x03u) &&
+                         c2.pf0_state != C2_PF0_IDLE)
+                {
+                    // Only drive the bus when the detection latch is armed,
+                    // matching the VHDL `not(PF0_RV = "00")` gate so we do
+                    // not conflict with other devices on the same port.
+                    in_window = true;
+                    data = c2_port_read(&c2);
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        // --- Handle memory reads ---
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            // Sub-slot register read.
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                // Expose the Carnivore2 firmware signature on any active
+                // page-1 ROM view while the register block is enabled.
+                // Real C2 serves these bytes from ordinary cartridge ROM;
+                // our split Nextor/C2 sub-slot layout means SROM can reach
+                // either sub-slot depending on how it ENASLTs the cart, so
+                // keep the signature slot-independent for detection.
+                if (c2_signature_overlay_armed &&
+                    c2_signature_overlay_index < sizeof(c2_descr) &&
+                    addr == (uint16_t)(0x4010u + c2_signature_overlay_index) &&
+                    (c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u)
+                {
+                    in_window = true;
+                    data = c2_descr[c2_signature_overlay_index++];
+                    if (c2_signature_overlay_index >= sizeof(c2_descr))
+                    {
+                        c2_signature_overlay_armed = false;
+                    }
+                    pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read,
+                                        pio_build_token(in_window, data));
+                    continue;
+                }
+                else if (c2_signature_overlay_armed &&
+                         addr >= 0x4010u && addr <= 0x4017u &&
+                         (c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u)
+                {
+                    // Any out-of-sequence access means this is not the
+                    // SROM detector loop anymore, so stop overlaying.
+                    c2_signature_overlay_armed = false;
+                    c2_signature_overlay_index = 0u;
+                }
+
+                if (active_subslot == 1)
+                {
+                    // Sub-slot 1 = Nextor (IDE BIOS, matches real C2 Sltsl_D).
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 0)
+                {
+                    // Sub-slot 0 = Carnivore2 (reg window + banks,
+                    // matches real C2 Sltsl_C). Read priority order:
+                    //   1. Register window reads (regs enabled AND reg
+                    //      readback enabled) — highest priority so SROM
+                    //      can read back CardMDR / Rx registers during
+                    //      detection / setup.
+                    //   2. Bank decode — serves uploaded ROM bytes from
+                    //      PSRAM via R1..R4 configs. Takes over once
+                    //      SROM has programmed any bank.
+                    //   3. Carnivore2 firmware signature "CMFCCFRC" at
+                    //      0x4010-0x4017 — SROM's cartridge-detect
+                    //      routine (at 0x2051) copies 7 bytes from
+                    //      0x4010 via LD HL,0x4010; ADD HL,DE. At
+                    //      detection time no banks are armed yet and
+                    //      CardMDR=0x30 (bit0=0), so the fallback runs.
+                    //      Once banks are live the ROM shadows it.
+                    //   4. Open bus (in_window=false).
+                    bool regwin_read_active =
+                        ((c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u) &&
+                        ((c2.cardmdr & C2_CARDMDR_REG_RD_OFF) == 0u) &&
+                        c2_addr_is_regwin(&c2, addr);
+
+                    if (regwin_read_active)
+                    {
+                        in_window = true;
+                        data = c2_reg_read(&c2, addr);
+                    }
+                    else
+                    {
+                        bool is_scc_read = false;
+                        if (c2_scc_enabled)
+                        {
+                            if (scc_instance.active)
+                            {
+                                uint32_t scc_reg_start = scc_instance.base_adr + 0x800u;
+                                if (addr >= scc_reg_start && addr <= (scc_reg_start + 0xFFu))
+                                    is_scc_read = true;
+                            }
+                            if (scc_plus && (addr & 0xFFFEu) == 0xBFFEu)
+                                is_scc_read = true;
+                        }
+
+                        if (is_scc_read)
+                        {
+                            in_window = true;
+                            data = (uint8_t)SCC_read(&scc_instance, addr);
+                        }
+                        else
+                        {
+                            uint8_t bank_idx;
+                            uint32_t linear;
+                            if (c2_decode_addr(&c2, addr, &bank_idx, &linear))
+                            {
+                                in_window = true;
+                                uint8_t mult = c2.bank_regs[bank_idx][C2_BANK_MULT];
+                                bool is_flash = (mult & C2_MULT_RAM) == 0u;
+                                if (is_flash)
+                                {
+                                    data = c2_flash_read(&c2, addr, linear);
+                                }
+                                else
+                                {
+                                    data = (linear < c2.ram_size) ? c2.ram_ptr[linear] : 0xFFu;
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (active_subslot == 2)
+                {
+                    // Sub-slot 2 = MSX memory mapper RAM
+                    // (matches real C2 Sltsl_M).
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_c2_sd)(uint32_t offset, bool cache_enable)
+{
+    loadrom_c2_common(offset, cache_enable, sunrise_sd_task, sunrise_sd_set_ide_ctx);
+}
+
+void __no_inline_not_in_flash_func(loadrom_c2_usb)(uint32_t offset, bool cache_enable)
+{
+    loadrom_c2_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx);
+}
+
 int __no_inline_not_in_flash_func(main)()
 {
     // Keep existing RP2350 flash timing setup.
@@ -2430,7 +2979,8 @@ int __no_inline_not_in_flash_func(main)()
     bool scc_plus = (rom_type & SCC_PLUS_FLAG) != 0;
     uint8_t base_rom_type = rom_type & ~(SCC_FLAG | SCC_PLUS_FLAG);
 
-    if ((base_rom_type == 11u || base_rom_type == 16u) && !psram_init())
+    if ((base_rom_type == 11u || base_rom_type == 16u
+         || base_rom_type == 17u || base_rom_type == 18u) && !psram_init())
     {
         while (true)
         {
@@ -2495,6 +3045,12 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 16:
             loadrom_sunrise_mapper_sd(ROM_RECORD_SIZE, true);
+            break;
+        case 17:
+            loadrom_c2_sd(ROM_RECORD_SIZE, true);
+            break;
+        case 18:
+            loadrom_c2_usb(ROM_RECORD_SIZE, true);
             break;
         default:
             break;

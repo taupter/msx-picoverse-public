@@ -156,4 +156,8 @@ void sunrise_ide_set_device_info(uint32_t block_count, uint32_t block_size,
                                 const char *vendor, const char *product,
                                 const char *revision);
 
+// Feed one SCC audio buffer when SCC/I2S is enabled for loader modes that
+// use Core 1 for storage backends instead of a dedicated audio worker.
+void __not_in_flash_func(service_scc_audio)(void);
+
 #endif // SUNRISE_IDE_H

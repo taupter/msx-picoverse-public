@@ -349,7 +349,7 @@ bool __not_in_flash_func(sunrise_ide_handle_write)(sunrise_ide_t *ide, uint16_t 
     // --- Segment/IDE control register at 0x4104 ---
     // The Sunrise IDE chgbnk routine bit-reverses the bank number before
     // writing: bank bit0→reg bit7, bit1→reg bit6, bit2→reg bit5.
-    // The real hardware (and Carnivore2 VHDL) reverses them back:
+    // The real hardware reverses them back:
     //   IDEROMADDR <= cReg(5) & cReg(6) & cReg(7) & Addr(13..0)
     // We must do the same reversal to recover the actual page number.
     if (addr == SUNRISE_CTRL_REG_ADDR)
@@ -687,6 +687,7 @@ void __not_in_flash_func(sunrise_usb_task)(void)
     while (true)
     {
         tuh_task();
+        service_scc_audio();
 
         if (usb_ide_ctx == NULL)
             continue;

@@ -1,5 +1,5 @@
 // MSX PICOVERSE PROJECT
-// (c) 2025 Cristiano Goncalves
+// (c) 2026 Cristiano Goncalves
 // The Retro Hacker
 //
 // loadrom.c - Windows console application to create a loadrom UF2 file for the MSX PICOVERSE 2350
@@ -10,7 +10,7 @@
 // 
 // The configuration record has the following structure:
 //  game - Game name                            - 20 bytes (padded by 0x00)
-//  mapp - Mapper code                          - 01 byte  (1 - Plain16, 2 - Plain32, 3 - KonamiSCC, 4 - Planar48, 5 - ASCII8, 6 - ASCII16, 7 - Konami, 8 - NEO8, 9 - NEO16, 10 - Sunrise, 11 - Sunrise+Mapper, 12 - ASCII16-X, 13 - Planar64, 14 - Manbow2, 15 - Sunrise SD, 16 - Sunrise SD+Mapper)
+//  mapp - Mapper code                          - 01 byte  (1 - Plain16, 2 - Plain32, 3 - KonamiSCC, 4 - Planar48, 5 - ASCII8, 6 - ASCII16, 7 - Konami, 8 - NEO8, 9 - NEO16, 10 - Sunrise, 11 - Sunrise+Mapper, 12 - ASCII16-X, 13 - Planar64, 14 - Manbow2, 15 - Sunrise SD, 16 - Sunrise SD+Mapper, 17 - Carnivore2 SD, 18 - Carnivore2 USB)
 //  size - Size of the ROM in bytes             - 04 bytes 
 //  offset - Offset of the game in the flash    - 04 bytes 
 //
@@ -54,7 +54,7 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
     "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC-16X", "PLN-64", "MANBW2",
-    "SYSTEM", "SYSTEM"
+    "SYSTEM", "SYSTEM", "SYSTEM", "SYSTEM"
 };
 
 static const char *rom_types[] = {
@@ -74,7 +74,9 @@ static const char *rom_types[] = {
     "Planar64",
     "Manbow2",
     "Sunrise SD",
-    "Sunrise SD+Mapper"
+    "Sunrise SD+Mapper",
+    "Carnivore2 SD",
+    "Carnivore2 USB"
 };
 
 #define ROM_TYPE_SUNRISE 10
@@ -84,6 +86,8 @@ static const char *rom_types[] = {
 #define ROM_TYPE_MANBOW2 14
 #define ROM_TYPE_SUNRISE_SD 15
 #define ROM_TYPE_SUNRISE_MAPPER_SD 16
+#define ROM_TYPE_C2_SD 17
+#define ROM_TYPE_C2_USB 18
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
@@ -388,7 +392,7 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-c1] [-c2] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help         Show this help message\n");
@@ -396,6 +400,8 @@ static void print_usage(const char *prog_name) {
     printf("  -m1, --mapper-sd   Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (microSD card)\n");
     printf("  -s2, --sunrise-usb Build UF2 with Sunrise IDE Nextor ROM (USB pendrive)\n");
     printf("  -m2, --mapper-usb  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (USB pendrive)\n");
+    printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation for SROM /D15 (microSD card)\n");
+    printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation for SROM /D15 (USB pendrive)\n");
     printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC mapper only)\n");
     printf("  -sccplus, --sccplus  Enable SCC+ (enhanced) sound emulation (Konami SCC mapper only)\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
@@ -404,7 +410,8 @@ static void print_usage(const char *prog_name) {
     printf("Forceable tags: ");
     for (i = 0; i < MAPPER_DESCRIPTION_COUNT; ++i) {
         uint8_t mapper_id = (uint8_t)(i + 1u);
-        if (mapper_id == 10u || mapper_id == 11u) {
+        if (mapper_id == 10u || mapper_id == 11u || mapper_id == 15u || mapper_id == 16u
+            || mapper_id == 17u || mapper_id == 18u) {
             continue;
         }
 
@@ -553,7 +560,7 @@ cleanup:
 int main(int argc, char *argv[])
 {
     printf("MSX PICOVERSE 2350 LoadROM UF2 Creator %s\n", APP_VERSION);
-    printf("(c) 2025 The Retro Hacker\n\n");
+    printf("(c) 2026 The Retro Hacker\n\n");
 
     const char *output_filename = UF2FILENAME;
     const char *rom_filename = NULL;
@@ -561,6 +568,8 @@ int main(int argc, char *argv[])
     bool use_mapper_sd = false;
     bool use_sunrise_usb = false;
     bool use_mapper_usb = false;
+    bool use_c2_sd = false;
+    bool use_c2_usb = false;
     bool scc_emulation = false;
     bool scc_plus = false;
 
@@ -576,6 +585,10 @@ int main(int argc, char *argv[])
             use_sunrise_usb = true;
         } else if ((strcmp(argv[i], "-m2") == 0) || (strcmp(argv[i], "--mapper-usb") == 0)) {
             use_mapper_usb = true;
+        } else if ((strcmp(argv[i], "-c1") == 0) || (strcmp(argv[i], "--carnivore2-sd") == 0)) {
+            use_c2_sd = true;
+        } else if ((strcmp(argv[i], "-c2") == 0) || (strcmp(argv[i], "--carnivore2-usb") == 0)) {
+            use_c2_usb = true;
         } else if ((strcmp(argv[i], "-scc") == 0) || (strcmp(argv[i], "--scc") == 0)) {
             scc_emulation = true;
         } else if ((strcmp(argv[i], "-sccplus") == 0) || (strcmp(argv[i], "--sccplus") == 0)) {
@@ -599,14 +612,21 @@ int main(int argc, char *argv[])
 
     {
         int nextor_count = (use_sunrise_sd ? 1 : 0) + (use_mapper_sd ? 1 : 0)
-                         + (use_sunrise_usb ? 1 : 0) + (use_mapper_usb ? 1 : 0);
+                         + (use_sunrise_usb ? 1 : 0) + (use_mapper_usb ? 1 : 0)
+                         + (use_c2_sd ? 1 : 0) + (use_c2_usb ? 1 : 0);
         if (nextor_count > 1) {
-            printf("Options -s1, -m1, -s2 and -m2 are mutually exclusive.\n");
+            printf("Options -s1, -m1, -s2, -m2, -c1 and -c2 are mutually exclusive.\n");
             return 1;
         }
     }
 
-    bool use_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb;
+    bool use_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb
+                   || use_c2_sd || use_c2_usb;
+
+    if (scc_emulation && scc_plus) {
+        printf("Error: -scc and -sccplus are mutually exclusive. Use only one.\n");
+        return 1;
+    }
 
     if (use_nextor) {
         if (rom_filename) {
@@ -627,10 +647,29 @@ int main(int argc, char *argv[])
         } else if (use_mapper_usb) {
             rom_type = ROM_TYPE_SUNRISE_MAPPER;
             sunrise_name = "Nextor Sunrise+Mapper (USB)";
+        } else if (use_c2_sd) {
+            rom_type = ROM_TYPE_C2_SD;
+            sunrise_name = "Nextor Sunrise+Mapper+C2 (SD)";
+        } else if (use_c2_usb) {
+            rom_type = ROM_TYPE_C2_USB;
+            sunrise_name = "Nextor Sunrise+Mapper+C2 (USB)";
         } else {
             rom_type = ROM_TYPE_SUNRISE;
             sunrise_name = "Nextor Sunrise IDE (USB)";
         }
+
+        if (use_c2_sd || use_c2_usb) {
+            if (scc_emulation) {
+                rom_type |= 0x80u;
+                printf("SCC Emulation: Enabled for SROM-loaded Konami SCC ROMs\n");
+            } else if (scc_plus) {
+                rom_type |= 0x40u;
+                printf("SCC+ Emulation: Enabled for SROM-loaded Konami SCC ROMs\n");
+            }
+        } else if (scc_emulation || scc_plus) {
+            printf("Warning: -scc/-sccplus ignored for this Sunrise mode (supported with -c1/-c2 only)\n");
+        }
+
         uint32_t base_offset = CONFIG_RECORD_SIZE;
 
         if (sunrise_rom_size == 0) {
@@ -638,7 +677,8 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        printf("ROM Type: %s [Embedded]\n", rom_types[rom_type]);
+        uint8_t base_rom_type = (uint8_t)(rom_type & 0x3Fu);
+        printf("ROM Type: %s [Embedded]\n", rom_types[base_rom_type]);
         printf("ROM Name: %s\n", sunrise_name);
         printf("ROM Size: %u bytes\n", sunrise_rom_size);
         printf("Pico Offset: 0x%08X\n", base_offset);
@@ -692,7 +732,7 @@ int main(int argc, char *argv[])
             mapper_token[token_length] = '\0';
 
             uint8_t candidate = mapper_number_from_description(mapper_token);
-            if (candidate == 10 || candidate == 11 || candidate == 15 || candidate == 16) {
+            if (candidate == 10 || candidate == 11 || candidate == 15 || candidate == 16 || candidate == 17 || candidate == 18) {
                 printf("Ignoring SYSTEM mapper tag in %s (cannot be forced)\n", base_name);
             } else if (candidate != 0) {
                 mapper_forced_by_tag = true;
@@ -722,11 +762,6 @@ int main(int argc, char *argv[])
         mapper_label = "[Auto-detected]";
     }
     printf("ROM Type: %s %s\n", rom_types[rom_type], mapper_label);
-
-    if (scc_emulation && scc_plus) {
-        printf("Error: -scc and -sccplus are mutually exclusive. Use only one.\n");
-        return 1;
-    }
 
     if (scc_emulation) {
         if (rom_type == 3 || rom_type == ROM_TYPE_MANBOW2) {

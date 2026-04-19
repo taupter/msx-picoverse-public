@@ -161,6 +161,8 @@ void __not_in_flash_func(sunrise_sd_task)(void)
 
     while (true)
     {
+        service_scc_audio();
+
         if (sd_ide_ctx == NULL)
             continue;
 

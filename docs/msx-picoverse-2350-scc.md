@@ -99,7 +99,7 @@ loadrom.exe [options] <romfile>
   -o <filename>         Set UF2 output filename (default loadrom.uf2)
 ```
 
-The `-scc` and `-sccplus` flags are **mutually exclusive** — use only one. Both flags require the ROM mapper to be Konami SCC (type 3); the tool prints a warning and ignores the flag for other mapper types.
+The `-scc` and `-sccplus` flags are **mutually exclusive** — use only one. For embedded-ROM builds, both flags require the ROM mapper to be Konami SCC (type 3); the tool prints a warning and ignores the flag for other mapper types. For the `-c1` and `-c2` loader modes, these flags enable SCC or SCC+ playback for compatible ROMs uploaded later through `SROM.COM /D15`.
 
 ### Examples
 
@@ -118,6 +118,15 @@ loadrom.exe -sccplus "Snatcher.KonSCC.rom"
 **With custom output filename:**
 
 ```
+
+**For `SROM.COM /D15` uploads on Carnivore2 loader modes:**
+
+```
+loadrom.exe -c1 -scc -o srom_c2_sd_scc.uf2
+loadrom.exe -c2 -scc -o srom_c2_usb_scc.uf2
+```
+
+Flash one of those UF2 files first, boot Nextor, and then upload a Konami SCC ROM with `SROM.COM /D15`. The loader keeps the ROM in PSRAM while the SCC emulator intercepts the standard Konami SCC bank and register accesses from the launched title.
 loadrom.exe -scc -o manbow.uf2 "Space Manbow.rom"
 ```
 
