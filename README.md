@@ -19,7 +19,9 @@ If you find any issues, have questions, or want to contribute, please open an is
 - Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds MP3 playback, and supports on-device search.
 - Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or microSD card (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
 - Sunrise IDE + 192KB memory mapper on PicoVerse 2040 (`loadrom.exe -m`), or Sunrise IDE standalone (`loadrom.exe -s`).
-- Sunrise IDE + 1MB PSRAM memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`). 
+- Sunrise IDE + 1MB PSRAM memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`).
+- Carnivore2-compatible RAM-mode loader on PicoVerse 2350 (`loadrom.exe -c1` / `loadrom.exe -c2`) for `SROM.COM /D15` uploads into the 1MB PSRAM mapper.
+- ESP-01 WiFi support for PicoVerse 2350 Sunrise IDE LoadROM builds (`loadrom.exe -s1 -w`, `-m1 -w`, `-s2 -w`, `-m2 -w`).
 - SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. 
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
@@ -45,6 +47,7 @@ If you find any issues, have questions, or want to contribute, please open an is
 **Reference Material** 
 - [PicoVerse 2040 Features Overview](/docs/msx-picoverse-2040-features.md)
 - [PicoVerse 2350 Features Overview](/docs/msx-picoverse-2350-features.md)
+- [MSX PicoVerse 2350 WiFi Support](/docs/msx-picoverse-2350-wifi.md)
 - [MSX PicoVerse 2040 PIO Strategy](/docs/msx-picoverse-2040-pio.md) 
 - [MSX PicoVerse 2350 PIO Strategy](/docs/msx-picoverse-2350-pio.md) 
 - [MSX PicoVerse 2350 SCC Emulation Guide](/docs/msx-picoverse-2350-scc.md)
@@ -99,11 +102,13 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 
 - Targets RP2350 boards exposing all 48 GPIO pins (not compatible with standard Pico 2 boards).
 - Adds microSD storage, ESP8266 WiFi header, and I2S audio expansion alongside 16 MB flash space.
-- Extra RAM (PSRAM) to support advanced emulation features in future firmware releases.
+- Extra RAM (PSRAM) now backs the 1MB mapper modes and the Carnivore2-compatible RAM loader, with room for additional advanced firmware features.
 - Explorer firmware can load ROMs from both flash and microSD, with source labels and search.
 - USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`-s2`).
 - microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`-s1`).
 - Sunrise IDE + 1MB PSRAM memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
+- Carnivore2-compatible RAM-mode loading lets `SROM.COM /D15` upload ROMs into the 1MB PSRAM mapper (`-c1` for microSD, `-c2` for USB).
+- LoadROM Sunrise builds can also expose ESP-01 WiFi support with `-w` on top of the `-s1`/`-m1`/`-s2`/`-m2` modes.
 - Both LoadROM and MultiROM tools support the Sunrise IDE options; MultiROM allows combining them so multiple Nextor modes appear as selectable SYSTEM entries in the menu.
 - Shares the same ROM mapper support list as the 2040 build.
 
@@ -184,6 +189,9 @@ The LoadROM tool targets situations where you want the PicoVerse to behave like 
       - Sunrise IDE + 192KB mapper (PicoVerse 2040): `loadrom.exe -m`
       - Sunrise IDE standalone (PicoVerse 2350): `loadrom.exe -s1` or `loadrom.exe -s2`
       - Sunrise IDE + 1MB PSRAM mapper (PicoVerse 2350): `loadrom.exe -m1` or `loadrom.exe -m2`
+      - Sunrise IDE + WiFi (PicoVerse 2350): `loadrom.exe -s1 -w`, `loadrom.exe -s2 -w`, `loadrom.exe -m1 -w`, or `loadrom.exe -m2 -w`
+      - Carnivore2-compatible RAM loader (PicoVerse 2350): `loadrom.exe -c1` or `loadrom.exe -c2`
+      - `-w` is currently supported only with `-s1`, `-m1`, `-s2`, or `-m2`.
    3. Observe the reported ROM name, size, mapper status (auto vs forced), and Pico offset before the UF2 is written.
    4. Put the Pico into BOOTSEL mode and copy the generated UF2 to the `RPI-RP2` drive.
    5. Insert the cartridge into your MSX—on power-up the embedded game launches immediately.
@@ -246,6 +254,13 @@ The MSX-MIDI firmware was developed using the MSX-MIDI specification, USB MIDI 1
 
 The algorithm to emulate ATA devices is original and based on the implementation for the Carnivore2 cartridge, Copyright (c) 2017-2024 by the RBSC group. Portions (c) Mitsutaka Okazaki and (c) Kazuhiro Tsujikawa. Available at https://github.com/RBSC/Carnivore2/tree/master/Firmware/Sources
 
+**WiFi support on PicoVerse 2350** was implemented with direct reference to the ESP8266 / MSX WiFi work by Oduvaldo Pavan Junior (`ducasp`). The PicoVerse WiFi ROM integration, memio register layout, fixed-`859372` UART behavior, FIFO clear command handling, quick-receive behavior, and ESP-side protocol compatibility were based on public source and documentation from Oduvaldo's projects. Important references used include:
+- `MSXPICO/UNAPI_BIOS_CUSTOM_ESP_MSXPICO/ESP8266_memio.asm` from `ducasp/MSX-Development` for the memory-mapped ROM and register model.
+- `MSX-SM/WiFi/UNAPI_BIOS_CUSTOM_ESP_FIRMWARE` and related WiFi utilities from `ducasp/MSX-Development` for the ROM/driver lineage and behavior.
+- `ducasp/ESP8266-UNAPI-Firmware` and its documentation for the serial protocol, command/response structure, and ESP firmware behavior.
+
+Those projects remain copyright by Oduvaldo Pavan Junior and their respective contributors under their original terms. PicoVerse reuses the public technical design references and keeps its own RP2350 cartridge-side implementation.
+
 **Mapper detection heuristics and filename tag forcing schemes** in the LoadROM and MultiROM tools are original implementations by the OpenMSX developers for the Romfactory module and licensed under the GNU Public License (GPL). Available at https://github.com/openMSX/openMSX/blob/6f8aa9865eeccdb0b31043d8851b822538440204/src/memory/RomFactory.cc
 
 **The softwaredb database** used for ROM mapper detection is built upon contributions from across the MSX community, including the initial work by Nicolas Beyaert, later expanded by the BlueMSX Team (2004–2013) and continuously maintained by the openMSX Team (2005–present). It also incorporates MSX ID data generated by Generation MSX (www.generation-msx.nl). Special thanks go to the Generation MSX / Sylvester project for its extensive reference data, as well as to contributors such as p_gimeno and diedel for ROM additions and validation, and GDX for further ROM information, corrections, and verification efforts. Part of OpenMSX effort. Available at https://github.com/openMSX
@@ -255,4 +270,4 @@ The algorithm to emulate ATA devices is original and based on the implementation
 Questions, test reports, and build photos are welcome. Open an issue on the public repository or reach out through the MSX retro hardware forums where PicoVerse updates are posted.
 
 Author: Cristiano Goncalves
-Last updated: 03/29/2026
+Last updated: 04/21/2026

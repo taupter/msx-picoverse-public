@@ -25,6 +25,7 @@ Key characteristics:
 - Mapper auto-detection plus optional filename tags to force the mapper.
 - Embedded SHA-1 database derived from openMSX `softwaredb.xml` for improved mapper identification.
 - Built-in Sunrise IDE Nextor ROM for standalone Nextor boot or Nextor + 1MB PSRAM mapper, using either the on-board microSD card (`-s1`/`-m1`) or a USB flash drive (`-s2`/`-m2`).
+- Optional ESP-01 WiFi support for those Sunrise IDE modes via `-w`, adding an embedded ESP8266P system ROM and memio UART backend.
 - ROM loading into the 1MB PSRAM mapper through Carnivore2-compatible RAM emulation for `SROM.COM /D15`, using either microSD (`-c1`) or USB mass storage (`-c2`) as the Nextor backend.
 - UF2 uses RP2350 family ID (`0xE48BFF59`).
 
@@ -45,12 +46,13 @@ loadrom.exe [options] [romfile]
 - `-m2`, `--mapper-usb` : Same as `-s2` plus a 1MB memory mapper (64 × 16KB pages) backed by external PSRAM on GPIO47 / QMI CS1 in an expanded sub-slot architecture. No external ROM file is needed.
 - `-c1`, `--carnivore2-sd` : Build a UF2 with Sunrise IDE Nextor on microSD plus the 1MB PSRAM mapper and Carnivore2 RAM-mode emulation for `SROM.COM /D15`. In this mode, `SROM.COM` can upload a ROM image into the PSRAM-backed mapper and launch it from RAM without reflashing the cartridge.
 - `-c2`, `--carnivore2-usb` : Same as `-c1`, but uses USB mass storage on the cartridge's USB-C port as the Nextor backend.
+- `-w`, `--wifi` : Enable ESP-01 WiFi support for `-s1`, `-m1`, `-s2`, or `-m2`. This adds the ESP8266P system ROM plus a memory-mapped UART backend expected by the WiFi ROM/software stack.
 - `-scc`, `--scc` : Enable SCC (standard) sound emulation. For embedded ROM builds, this applies to Konami SCC or Manbow2 mapper ROMs. With `-c1` or `-c2`, it enables SCC playback for Konami SCC ROMs uploaded later through `SROM.COM /D15`.
 - `-sccplus`, `--sccplus` : Enable SCC+ (enhanced) sound emulation. For embedded ROM builds, this applies to Konami SCC or Manbow2 mapper ROMs. With `-c1` or `-c2`, it enables SCC+ playback for compatible ROMs uploaded later through `SROM.COM /D15`.
 - `-o <filename>`, `--output <filename>` : Override the UF2 output name (default `loadrom.uf2`).
 - Positional argument: the ROM file to embed. Required for normal ROM loading; not accepted with `-s1`/`-m1`/`-s2`/`-m2`/`-c1`/`-c2`.
 
-`-s1`, `-m1`, `-s2`, `-m2`, `-c1`, and `-c2` are mutually exclusive. `-scc` and `-sccplus` are mutually exclusive. If conflicting options are provided, the tool exits with an error.
+`-s1`, `-m1`, `-s2`, `-m2`, `-c1`, and `-c2` are mutually exclusive. `-w` is valid only with `-s1`, `-m1`, `-s2`, or `-m2`. `-scc` and `-sccplus` are mutually exclusive. If conflicting options are provided, the tool exits with an error.
 
 ### Mapper forcing via filename tags
 
@@ -87,20 +89,40 @@ Tags are case-insensitive. If no valid tag is present, the tool first computes t
    loadrom.exe -s1
    loadrom.exe -s1 -o nextor_sd.uf2
    ```
+   Sunrise IDE standalone with WiFi (microSD):
+   ```
+   loadrom.exe -s1 -w
+   loadrom.exe -s1 -w -o nextor_sd_wifi.uf2
+   ```
    Sunrise IDE + 1MB PSRAM mapper (microSD):
    ```
    loadrom.exe -m1
    loadrom.exe -m1 -o nextor_mapper_sd.uf2
+   ```
+   Sunrise IDE + 1MB PSRAM mapper with WiFi (microSD):
+   ```
+   loadrom.exe -m1 -w
+   loadrom.exe -m1 -w -o nextor_mapper_sd_wifi.uf2
    ```
    Sunrise IDE standalone (Nextor from USB flash drive):
    ```
    loadrom.exe -s2
    loadrom.exe -s2 -o nextor_usb.uf2
    ```
+   Sunrise IDE standalone with WiFi (USB):
+   ```
+   loadrom.exe -s2 -w
+   loadrom.exe -s2 -w -o nextor_usb_wifi.uf2
+   ```
    Sunrise IDE + 1MB PSRAM mapper (USB):
    ```
    loadrom.exe -m2
    loadrom.exe -m2 -o nextor_mapper_usb.uf2
+   ```
+   Sunrise IDE + 1MB PSRAM mapper with WiFi (USB):
+   ```
+   loadrom.exe -m2 -w
+   loadrom.exe -m2 -w -o nextor_mapper_usb_wifi.uf2
    ```
    Carnivore2 RAM-mode loader for `SROM.COM /D15` (microSD):
    ```
@@ -128,7 +150,8 @@ Tags are case-insensitive. If no valid tag is present, the tool first computes t
 7. Insert the cartridge into the MSX and power on.
 8. For `-s1`/`-m1` modes, insert a FAT-formatted microSD card into the cartridge's microSD slot before powering the MSX.
 9. For `-s2`/`-m2` modes, connect a USB flash drive (via OTG adapter if needed) to the cartridge's USB-C port before powering the MSX.
-10. For `-c1`/`-c2` modes, boot Nextor first and then use `SROM.COM /D15` to upload the ROM into the PicoVerse PSRAM mapper. The cartridge is presented as a Carnivore2-compatible RAM target so the uploaded ROM can be launched directly from RAM.
+10. For `-w` builds, install the ESP-01 module on the PicoVerse 2350 before power-up. The WiFi system ROM and memio UART interface are then available to compatible MSX software.
+11. For `-c1`/`-c2` modes, boot Nextor first and then use `SROM.COM /D15` to upload the ROM into the PicoVerse PSRAM mapper. The cartridge is presented as a Carnivore2-compatible RAM target so the uploaded ROM can be launched directly from RAM.
 
 ---
 
@@ -142,6 +165,7 @@ The UF2 image contains:
    - 1 byte : mapper ID and optional SCC/SCC+ flags:
      - Bit 7 (`0x80`) = SCC emulation enabled.
      - Bit 6 (`0x40`) = SCC+ emulation enabled.
+       - Bit 5 (`0x20`) = WiFi support enabled for Sunrise IDE modes.
      - Bits 0..5 = base mapper ID.
    - 4 bytes: ROM size (little-endian).
    - 4 bytes: ROM flash offset (little-endian).
@@ -159,8 +183,10 @@ The UF2 writer sets `UF2_FLAG_FAMILYID_PRESENT` and uses the RP2350 family ID (`
 | "Failed to detect the ROM type" | Mapper heuristics failed | Add a mapper tag (e.g., `.Konami.ROM`). |
 | "Sunrise options are mutually exclusive" | More than one of `-s1`/`-m1`/`-s2`/`-m2`/`-c1`/`-c2` passed | Use only one firmware mode at a time. The `-m` variants add mapper RAM; the `-c` variants add Carnivore2 RAM-mode loading on top of the mapper architecture. |
 | "Sunrise options do not accept an external ROM file" | ROM file passed with a Sunrise/Carnivore2 option | Remove the ROM file argument when using `-s1`/`-m1`/`-s2`/`-m2`/`-c1`/`-c2`. |
+| "Error: -w/--wifi is supported only with -s1, -m1, -s2 or -m2" | `-w` was used without a supported Sunrise mode | Pair `-w` only with `-s1`, `-m1`, `-s2`, or `-m2`. |
 | USB pendrive not detected with `-s2`/`-m2` | VBUS not connected or no OTG adapter | Ensure the USB-C port has VBUS power (use an OTG adapter that supplies VBUS). |
 | microSD card not detected with `-s1`/`-m1` | Card not inserted or not FAT-formatted | Insert a FAT16/FAT32-formatted microSD card before powering on. |
+| WiFi software does not detect the adapter with `-w` | Missing ESP-01 module, incompatible ESP firmware, or wrong WiFi-capable UF2 | Reflash a `-w` build, verify the ESP-01 is installed, and use software targeting the ESP8266P memio interface. |
 | `SROM.COM /D15` does not list the cartridge with `-c1`/`-c2` | Wrong firmware mode or outdated build | Reflash with the correct `-c1` or `-c2` UF2 and use a build that includes Carnivore2 RAM-mode emulation. |
 | `SROM.COM /D15` upload succeeds but the launched ROM fails | ROM/runtime compatibility issue in the emulation path | Try the latest firmware build and retest; this mode depends on Carnivore2-compatible bank/window presentation from PSRAM. |
 | "Disk driver not found. System halted." with `-m1`/`-m2` | Firmware issue | Rebuild with latest firmware; check that the PIO bus init guard is present. |
@@ -177,8 +203,11 @@ The UF2 writer sets `UF2_FLAG_FAMILYID_PRESENT` and uses the RP2350 family ID (`
 - Only one ROM per UF2 (use the MultiROM or Explorer tools for multiple titles).
 - The `-s1` and `-m1` options require a FAT-formatted microSD card in the cartridge's microSD slot.
 - The `-s2` and `-m2` options require a USB flash drive connected to the cartridge's USB-C port (via OTG adapter) for disk access.
+- The `-w` option is available only with `-s1`, `-m1`, `-s2`, or `-m2`.
+- `-w` requires an ESP-01 module and compatible ESP-side firmware; the PicoVerse firmware provides the ROM mapping and serial transport, not the ESP application layer itself.
 - The `-m1` and `-m2` options provide 1MB mapper RAM (64 × 16KB pages) backed by external PSRAM on GPIO47 / QMI CS1.
 - The `-c1` and `-c2` options reuse that same 1MB PSRAM-backed mapper RAM and expose it through Carnivore2-compatible RAM-mode behavior intended for `SROM.COM /D15`.
+- WiFi support is not currently exposed in MultiROM, Explorer, or the `-c1`/`-c2` Carnivore2 loader modes.
 - The `-c1` and `-c2` modes are loader modes, not direct ROM-embedding modes. They boot Nextor first; the ROM is uploaded later from DOS into PSRAM.
 - SCC/SCC+ audio for `SROM.COM /D15` uploads is enabled by building the loader UF2 with `-c1/-c2` plus `-scc` or `-sccplus` before flashing the cartridge.
 - Linux/macOS binaries are not provided (use Windows or build from source).
@@ -197,4 +226,4 @@ The UF2 writer sets `UF2_FLAG_FAMILYID_PRESENT` and uses the RP2350 family ID (`
 - Additional mapper heuristics.
 
 Author: Cristiano Almeida Goncalves  
-Last updated: 03/29/2026
+Last updated: 04/21/2026

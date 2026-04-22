@@ -22,6 +22,9 @@
 #include "c2_emu.h"
 #include "pico.h"
 
+// Forward decl: rebuild the decoder cache from current register state.
+static void c2_rebuild_cache(c2_state_t *c2);
+
 // -----------------------------------------------------------------------
 // Initialisation — matches the hardware power-on defaults documented in
 // mcscc.vhd (CardMDR=0x30, Bank1 enabled as 16KB at 0x4000..0x7FFF, rest
@@ -55,6 +58,8 @@ void c2_init(c2_state_t *c2, uint8_t *ram_ptr, uint32_t ram_size, uint8_t crslt)
     {
         memset(ram_ptr, 0xFFu, ram_size);
     }
+
+    c2_rebuild_cache(c2);
 }
 
 // -----------------------------------------------------------------------
@@ -152,6 +157,7 @@ void __not_in_flash_func(c2_reg_write)(c2_state_t *c2, uint16_t addr, uint8_t da
         uint8_t bank_idx = (uint8_t)(rel / C2_REG_BANK_SIZE);
         uint8_t field = (uint8_t)(rel % C2_REG_BANK_SIZE);
         c2->bank_regs[bank_idx][field] = data;
+        c2_rebuild_cache(c2);
         return;
     }
 
@@ -178,7 +184,10 @@ void __not_in_flash_func(c2_reg_write)(c2_state_t *c2, uint16_t addr, uint8_t da
             c2_datm0_inc(c2);
             break;
         }
-        case C2_REG_ADDRFR:   c2->addrfr = (uint8_t)(data & 0x7Fu); break;
+        case C2_REG_ADDRFR:
+            c2->addrfr = (uint8_t)(data & 0x7Fu);
+            c2_rebuild_cache(c2);
+            break;
         case C2_REG_MCONF:    c2->mconf = data; break;
         case C2_REG_CONFFL:   c2->conffl = (uint8_t)(data & 0x07u); break;
         case C2_REG_NSREG:    c2->nsreg = data; break;
@@ -245,6 +254,11 @@ uint8_t __not_in_flash_func(c2_reg_read)(const c2_state_t *c2, uint16_t addr)
 // -----------------------------------------------------------------------
 // Bank-window decoder (data-read / data-write window).
 //
+// The per-read fast path now lives inline in c2_emu.h (`c2_decode_addr`),
+// reading only the precomputed `cache[]` table. This function rebuilds
+// that cache whenever a register write could have changed the decode
+// result (bank cfg block, AddrFR).
+//
 // Per mcscc.vhd "Adress Flash/ROM mapping" process:
 //   - BxAdrD defines the base address of the bank's data window.
 //   - The number of high-order BxAdrD bits that must match pSltAdr[15:8]
@@ -253,6 +267,7 @@ uint8_t __not_in_flash_func(c2_reg_read)(const c2_state_t *c2, uint16_t addr)
 //         32K: AdrD[7]     == addr[15]         — match mask 0x80
 //         16K: AdrD[7:6]   == addr[15:14]      — match mask 0xC0
 //          8K: AdrD[7:5]   == addr[15:13]      — match mask 0xE0
+//                         (AdrD[7] only if RxMult[6]=1)
 //          4K: AdrD[7:4]   == addr[15:12]      — match mask 0xF0
 //   - Inside the window the linear RAM/flash offset is:
 //         (RxReg & BxMaskR) * bank_size + (addr & (bank_size-1))
@@ -260,56 +275,78 @@ uint8_t __not_in_flash_func(c2_reg_read)(const c2_state_t *c2, uint16_t addr)
 //
 // BxMask / BxAddr are NOT the data-window selector — they define the
 // Konami-style write trigger that latches RxReg (mapper bank-switch),
-// handled separately in c2_bank_switch_write() below. RxMult bit 7 only
-// controls that page-register latch; it does NOT gate the bank window
-// itself. A bank window is active whenever bit 3 is clear and the size
-// code is valid.
-//
-// Banks are scanned in order; on overlap, the first match wins (priority
-// encoder). Banks with ENABLE=0 or DISABLE=1 are skipped.
+// handled by c2_bank_switch_write() below. RxMult bit 7 only controls
+// that page-register latch; it does NOT gate the bank window itself.
 // -----------------------------------------------------------------------
-bool __not_in_flash_func(c2_decode_addr)(const c2_state_t *c2, uint16_t addr,
-                                         uint8_t *bank_idx_out, uint32_t *linear_off_out)
+static void c2_rebuild_cache(c2_state_t *c2)
 {
-    uint8_t addr_high = (uint8_t)(addr >> 8);
+    uint32_t addrfr_base = (uint32_t)c2->addrfr * 0x10000u;
 
     for (uint8_t b = 0; b < 4u; ++b)
     {
         const uint8_t *r = c2->bank_regs[b];
         uint8_t mult = r[C2_BANK_MULT];
-        if ((mult & C2_MULT_DISABLE) != 0u) continue;
 
-        uint32_t size = c2_mult_size(mult);
-        if (size == 0u) continue;
+        // --- Data window cache ---
+        uint8_t  active = 0u;
+        uint8_t  match_mask = 0u;
+        uint8_t  match_value = 0u;
+        uint32_t size_mask = 0u;
+        uint32_t base_linear = 0u;
+        uint8_t  is_ram = (mult & C2_MULT_RAM)      ? 1u : 0u;
+        uint8_t  is_we  = (mult & C2_MULT_WRITE_EN) ? 1u : 0u;
 
-        uint8_t adrd = r[C2_BANK_ADRD];
-        uint8_t match_mask;
-        switch (mult & C2_MULT_SIZE_MASK)
+        if ((mult & C2_MULT_DISABLE) == 0u)
         {
-            case 0x07u: match_mask = 0x00u; break; // 64K
-            case 0x06u: match_mask = 0x80u; break; // 32K
-            case 0x05u: match_mask = 0xC0u; break; // 16K
-            case 0x04u:
-                // 8K: always match AdrD[6:5] to A14:A13; AdrD[7] only
-                // participates when RxMult[6]=1.
-                match_mask = (uint8_t)(0x60u | ((mult & C2_MULT_A15_MATCH) ? 0x80u : 0x00u));
-                break;
-            case 0x03u: match_mask = 0xF0u; break;  // 4K
-            default:    continue;
+            uint32_t size = c2_mult_size(mult);
+            if (size != 0u)
+            {
+                uint8_t adrd = r[C2_BANK_ADRD];
+                switch (mult & C2_MULT_SIZE_MASK)
+                {
+                    case 0x07u: match_mask = 0x00u; break; // 64K
+                    case 0x06u: match_mask = 0x80u; break; // 32K
+                    case 0x05u: match_mask = 0xC0u; break; // 16K
+                    case 0x04u:
+                        // 8K: AdrD[6:5] always, AdrD[7] only when Mult[6]=1.
+                        match_mask = (uint8_t)(0x60u | ((mult & C2_MULT_A15_MATCH) ? 0x80u : 0x00u));
+                        break;
+                    case 0x03u: match_mask = 0xF0u; break; // 4K
+                    default:    match_mask = 0x00u; size = 0u; break;
+                }
+                if (size != 0u)
+                {
+                    active = 1u;
+                    match_value = (uint8_t)(adrd & match_mask);
+                    size_mask = size - 1u;
+                    uint32_t reg_part = (uint32_t)(r[C2_BANK_REG] & r[C2_BANK_MASKR]);
+                    base_linear = reg_part * size + addrfr_base;
+                }
+            }
         }
-        if (((addr_high ^ adrd) & match_mask) != 0u) continue;
 
-        uint32_t low_mask = size - 1u;
-        uint32_t reg_part = (uint32_t)(r[C2_BANK_REG] & r[C2_BANK_MASKR]);
-        uint32_t linear = (reg_part * size) + (addr & low_mask);
-        linear += (uint32_t)c2->addrfr * 0x10000u;
+        c2->cache[b].active      = active;
+        c2->cache[b].match_mask  = match_mask;
+        c2->cache[b].match_value = match_value;
+        c2->cache[b].size_mask   = size_mask;
+        c2->cache[b].base_linear = base_linear;
+        c2->cache[b].is_ram      = is_ram;
+        c2->cache[b].is_we       = is_we;
 
-        if (bank_idx_out)  *bank_idx_out = b;
-        if (linear_off_out) *linear_off_out = linear;
-        return true;
+        // --- Page-latch (Konami-style bank-switch trigger) cache ---
+        uint8_t mask   = r[C2_BANK_MASK];
+        uint8_t target = r[C2_BANK_ADDR];
+        uint8_t latch_active = 0u;
+        if ((mult & C2_MULT_PAGE_REG_EN) != 0u &&
+            (mult & C2_MULT_DISABLE)     == 0u &&
+            mask != 0u)
+        {
+            latch_active = 1u;
+        }
+        c2->cache[b].page_latch_active = latch_active;
+        c2->cache[b].page_latch_mask   = mask;
+        c2->cache[b].page_latch_value  = (uint8_t)(target & mask);
     }
-
-    return false;
 }
 
 // -----------------------------------------------------------------------
@@ -328,19 +365,13 @@ bool __not_in_flash_func(c2_bank_switch_write)(c2_state_t *c2, uint16_t addr, ui
 
     for (uint8_t b = 0; b < 4u; ++b)
     {
-        uint8_t *r = c2->bank_regs[b];
-        uint8_t mult = r[C2_BANK_MULT];
-        if ((mult & C2_MULT_PAGE_REG_EN) == 0u) continue;
-        if ((mult & C2_MULT_DISABLE) != 0u) continue;
-
-        uint8_t mask = r[C2_BANK_MASK];
-        uint8_t target = r[C2_BANK_ADDR];
-        if (mask == 0u) continue; // mask=0 disables the trigger
-        if (((addr_high ^ target) & mask) != 0u) continue;
-
-        r[C2_BANK_REG] = data;
+        if (!c2->cache[b].page_latch_active) continue;
+        if (((addr_high ^ c2->cache[b].page_latch_value) & c2->cache[b].page_latch_mask) != 0u)
+            continue;
+        c2->bank_regs[b][C2_BANK_REG] = data;
         latched = true;
     }
+    if (latched) c2_rebuild_cache(c2);
     return latched;
 }
 

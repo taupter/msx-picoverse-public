@@ -26,6 +26,7 @@
 #include "uf2format.h"
 #include "loadrom.h"
 #include "nextor_sunrise.h"
+#include "esp8266p_rom.h"
 #include "sha1.h"
 #include "romdb.h"
 
@@ -48,7 +49,8 @@
 uint32_t file_size(const char *filename);
 uint8_t detect_rom_type(const char *filename, uint32_t size);
 void write_padding(FILE *file, size_t current_size, size_t target_size, uint8_t padding_byte);
-void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint32_t rom_size, uint8_t rom_type,
+void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint32_t rom_size,
+                     const uint8_t *extra_embedded_rom, uint32_t extra_rom_size, uint8_t rom_type,
                      const char *rom_name, uint32_t base_offset, const char *uf2_filename);
 
 static const char *MAPPER_DESCRIPTIONS[] = {
@@ -88,6 +90,8 @@ static const char *rom_types[] = {
 #define ROM_TYPE_SUNRISE_MAPPER_SD 16
 #define ROM_TYPE_C2_SD 17
 #define ROM_TYPE_C2_USB 18
+
+#define ROM_TYPE_WIFI_FLAG 0x20
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
 
@@ -392,7 +396,7 @@ static void print_usage(const char *prog_name) {
     size_t i;
     bool first = true;
 
-    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-c1] [-c2] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-c1] [-c2] [-w] [-scc] [-sccplus] [-o <filename>] [romfile]\n", prog_name);
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help         Show this help message\n");
@@ -402,6 +406,7 @@ static void print_usage(const char *prog_name) {
     printf("  -m2, --mapper-usb  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (USB pendrive)\n");
     printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation for SROM /D15 (microSD card)\n");
     printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation for SROM /D15 (USB pendrive)\n");
+    printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2 only)\n");
     printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC mapper only)\n");
     printf("  -sccplus, --sccplus  Enable SCC+ (enhanced) sound emulation (Konami SCC mapper only)\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
@@ -428,7 +433,8 @@ static void print_usage(const char *prog_name) {
 // create_uf2_file - Create the UF2 file
 // This function streams the firmware binary, a single configuration record, and the ROM payload into UF2 blocks.
 
-void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint32_t rom_size, uint8_t rom_type,
+void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint32_t rom_size,
+                     const uint8_t *extra_embedded_rom, uint32_t extra_rom_size, uint8_t rom_type,
                      const char *rom_name, uint32_t base_offset, const char *uf2_filename) {
     if (!rom_name || rom_size == 0) {
         printf("Invalid parameters provided for UF2 generation.\n");
@@ -480,13 +486,14 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
     bl.targetAddr = FLASH_START;
     bl.payloadSize = 256;
 
-    const size_t total_binary_size = firmware_size + CONFIG_RECORD_SIZE + (size_t)rom_size;
+    const size_t total_binary_size = firmware_size + CONFIG_RECORD_SIZE + (size_t)rom_size + (size_t)extra_rom_size;
     bl.numBlocks = (uint32_t)((total_binary_size + bl.payloadSize - 1) / bl.payloadSize);
     bl.fileSize = RP2350_FAMILY_ID;
 
     size_t firmware_offset = 0;
     size_t config_offset = 0;
     size_t rom_bytes_written = 0;
+    size_t extra_rom_bytes_written = 0;
     size_t total_written = 0;
     uint32_t block_no = 0;
     bool success = false;
@@ -508,12 +515,8 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
                 to_copy = remaining < (bl.payloadSize - chunk_filled) ? remaining : (bl.payloadSize - chunk_filled);
                 memcpy(bl.data + chunk_filled, config_record + config_offset, to_copy);
                 config_offset += to_copy;
-            } else {
+            } else if (rom_bytes_written < (size_t)rom_size) {
                 size_t remaining = (size_t)rom_size - rom_bytes_written;
-                if (remaining == 0) {
-                    break;
-                }
-
                 if (rom_file) {
                     size_t request = remaining < (bl.payloadSize - chunk_filled) ? remaining : (bl.payloadSize - chunk_filled);
                     size_t read_now = fread(bl.data + chunk_filled, 1, request, rom_file);
@@ -529,6 +532,16 @@ void create_uf2_file(const char *rom_filename, const uint8_t *embedded_rom, uint
                     rom_bytes_written += to_embed;
                     to_copy = to_embed;
                 }
+            } else {
+                size_t remaining = (size_t)extra_rom_size - extra_rom_bytes_written;
+                if (remaining == 0) {
+                    break;
+                }
+
+                size_t to_embed = remaining < (bl.payloadSize - chunk_filled) ? remaining : (bl.payloadSize - chunk_filled);
+                memcpy(bl.data + chunk_filled, extra_embedded_rom + extra_rom_bytes_written, to_embed);
+                extra_rom_bytes_written += to_embed;
+                to_copy = to_embed;
             }
 
             chunk_filled += to_copy;
@@ -570,6 +583,7 @@ int main(int argc, char *argv[])
     bool use_mapper_usb = false;
     bool use_c2_sd = false;
     bool use_c2_usb = false;
+    bool use_wifi = false;
     bool scc_emulation = false;
     bool scc_plus = false;
 
@@ -589,6 +603,8 @@ int main(int argc, char *argv[])
             use_c2_sd = true;
         } else if ((strcmp(argv[i], "-c2") == 0) || (strcmp(argv[i], "--carnivore2-usb") == 0)) {
             use_c2_usb = true;
+        } else if ((strcmp(argv[i], "-w") == 0) || (strcmp(argv[i], "--wifi") == 0)) {
+            use_wifi = true;
         } else if ((strcmp(argv[i], "-scc") == 0) || (strcmp(argv[i], "--scc") == 0)) {
             scc_emulation = true;
         } else if ((strcmp(argv[i], "-sccplus") == 0) || (strcmp(argv[i], "--sccplus") == 0)) {
@@ -623,6 +639,11 @@ int main(int argc, char *argv[])
     bool use_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb
                    || use_c2_sd || use_c2_usb;
 
+    if (use_wifi && !(use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb)) {
+        printf("Error: -w/--wifi is supported only with -s1, -m1, -s2 or -m2.\n");
+        return 1;
+    }
+
     if (scc_emulation && scc_plus) {
         printf("Error: -scc and -sccplus are mutually exclusive. Use only one.\n");
         return 1;
@@ -636,6 +657,8 @@ int main(int argc, char *argv[])
 
         const uint8_t *sunrise_rom = ___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM;
         uint32_t sunrise_rom_size = (uint32_t)___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM_len;
+        const uint8_t *wifi_rom = NULL;
+        uint32_t wifi_rom_size = 0u;
         uint8_t rom_type;
         const char *sunrise_name;
         if (use_sunrise_sd) {
@@ -670,6 +693,13 @@ int main(int argc, char *argv[])
             printf("Warning: -scc/-sccplus ignored for this Sunrise mode (supported with -c1/-c2 only)\n");
         }
 
+        if (use_wifi) {
+            rom_type |= ROM_TYPE_WIFI_FLAG;
+            printf("WiFi Support: Enabled (ESP8266P system ROM + UART support)\n");
+            wifi_rom = ___wifi_ESP8266P_rom;
+            wifi_rom_size = (uint32_t)___wifi_ESP8266P_rom_len;
+        }
+
         uint32_t base_offset = CONFIG_RECORD_SIZE;
 
         if (sunrise_rom_size == 0) {
@@ -677,14 +707,14 @@ int main(int argc, char *argv[])
             return 1;
         }
 
-        uint8_t base_rom_type = (uint8_t)(rom_type & 0x3Fu);
+        uint8_t base_rom_type = (uint8_t)(rom_type & ~(0x80u | 0x40u | ROM_TYPE_WIFI_FLAG));
         printf("ROM Type: %s [Embedded]\n", rom_types[base_rom_type]);
         printf("ROM Name: %s\n", sunrise_name);
         printf("ROM Size: %u bytes\n", sunrise_rom_size);
         printf("Pico Offset: 0x%08X\n", base_offset);
         printf("UF2 Output: %s\n", output_filename);
 
-        create_uf2_file(NULL, sunrise_rom, sunrise_rom_size, rom_type, sunrise_name, base_offset, output_filename);
+        create_uf2_file(NULL, sunrise_rom, sunrise_rom_size, wifi_rom, wifi_rom_size, rom_type, sunrise_name, base_offset, output_filename);
         return 0;
     }
 
@@ -801,6 +831,6 @@ int main(int argc, char *argv[])
     printf("Pico Offset: 0x%08X\n", base_offset);
     printf("UF2 Output: %s\n", output_filename);
 
-    create_uf2_file(rom_filename, NULL, rom_size, rom_type, rom_name, base_offset, output_filename);
+    create_uf2_file(rom_filename, NULL, rom_size, NULL, 0u, rom_type, rom_name, base_offset, output_filename);
     return 0;
 }

@@ -40,13 +40,15 @@ multirom.exe [options]
 | `-h`, `--help` | Show usage help and exit. |
 | `-o <filename>`, `--output <filename>` | Set UF2 output filename (default `multirom.uf2`). |
 | `-s1`, `--sunrise-sd` | Include Sunrise IDE Nextor ROM (microSD card). |
-| `-m1`, `--mapper-sd` | Include Sunrise IDE Nextor ROM + 256 KB mapper (microSD card). |
+| `-m1`, `--mapper-sd` | Include Sunrise IDE Nextor ROM + 1MB PSRAM mapper (microSD card). |
 | `-s2`, `--sunrise-usb` | Include Sunrise IDE Nextor ROM (USB pendrive). |
-| `-m2`, `--mapper-usb` | Include Sunrise IDE Nextor ROM + 256 KB mapper (USB pendrive). |
+| `-m2`, `--mapper-usb` | Include Sunrise IDE Nextor ROM + 1MB PSRAM mapper (USB pendrive). |
 | `-scc`, `--scc` | Enable SCC sound emulation for Konami SCC and Manbow2 ROMs. |
 | `-sccplus`, `--sccplus` | Enable SCC+ (enhanced) sound emulation for Konami SCC and Manbow2 ROMs. |
 
 The Sunrise options can be freely combined. Each adds a separate SYSTEM entry to the menu, so you can pick the desired Nextor mode on the MSX.
+
+WiFi support is not currently exposed in MultiROM. If you need the ESP-01 WiFi feature, build a dedicated LoadROM UF2 with `loadrom.exe -w` instead.
 
 ### Examples
 
@@ -137,12 +139,12 @@ Knight Mare.PLA-32.ROM
 | 8 | NEO 8 KB | `NEO-8` | FlashROM-compatible 8 KB banking |
 | 9 | NEO 16 KB | `NEO-16` | FlashROM-compatible 16 KB banking |
 | 10 | Sunrise IDE (USB) | SYSTEM | Nextor 2.1.4 Sunrise IDE via USB (`-s2`) |
-| 11 | Sunrise IDE + Mapper (USB) | SYSTEM | Nextor + 256 KB mapper via USB (`-m2`) |
+| 11 | Sunrise IDE + Mapper (USB) | SYSTEM | Nextor + 1MB PSRAM mapper via USB (`-m2`) |
 | 12 | ASCII16-X | `ASC16X` | ASCII16 + SST-compatible flash commands |
 | 13 | Planar 64 KB | `PLN-64` | Full 64 KB linear mapping (0000h–FFFFh) |
 | 14 | Manbow2 | `MANBW2` | Konami SCC banking + AM29F040B flash emulation |
 | 15 | Sunrise IDE (SD) | SYSTEM | Nextor 2.1.4 Sunrise IDE via microSD (`-s1`) |
-| 16 | Sunrise IDE + Mapper (SD) | SYSTEM | Nextor + 256 KB mapper via microSD (`-m1`) |
+| 16 | Sunrise IDE + Mapper (SD) | SYSTEM | Nextor + 1MB PSRAM mapper via microSD (`-m1`) |
 
 ## SCC / SCC+ emulation
 
@@ -169,7 +171,7 @@ The Sunrise IDE options embed the Nextor 2.1.4 Sunrise IDE kernel ROM (128 KB) i
 
 ### Mapper modes (`-m1`, `-m2`)
 
-- Combines Nextor Sunrise IDE with a 256 KB memory mapper (16 × 16 KB pages).
+- Combines Nextor Sunrise IDE with a 1MB PSRAM memory mapper (64 × 16 KB pages).
 - Uses an expanded sub-slot architecture: sub-slot 0 serves the Nextor ROM, sub-slot 1 provides mapper RAM.
 - Mapper page registers (I/O ports FC–FF) are intercepted via PIO1.
 - A bootstrap ROM phase ensures a clean cold-boot before the expanded-slot mapper is activated.
@@ -192,4 +194,4 @@ SYSTEM entries (Sunrise IDE) appear alongside regular ROM entries and are select
 - The Sunrise options (`-s1`, `-m1`, `-s2`, `-m2`) can be combined — each adds its own menu entry.
 
 Author: Cristiano Almeida Goncalves
-Last updated: 03/29/2026
+Last updated: 04/21/2026

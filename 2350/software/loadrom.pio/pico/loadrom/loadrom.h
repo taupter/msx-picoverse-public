@@ -81,6 +81,12 @@ typedef struct {
 #define SCC_CLOCK       3579545
 #define SCC_FLAG        0x80u   // Bit flag in rom_type for SCC emulation
 #define SCC_PLUS_FLAG   0x40u   // Bit flag in rom_type for SCC+ (enhanced) emulation
+#define WIFI_FLAG       0x20u   // Bit flag in rom_type for Sunrise WiFi system ROM + memio UART
+#define WIFI_ROM_SIZE   16384u  // ESP8266P system ROM size appended after the Sunrise ROM payload
+
+// ESP-01 pins on the RP2350 WiFi hardware variant
+#define PIN_ESP_UART_TX 38
+#define PIN_ESP_UART_RX 39
 
 // This symbol marks the end of the main program in flash.
 // The ROM data is concatenated immediately after this point.

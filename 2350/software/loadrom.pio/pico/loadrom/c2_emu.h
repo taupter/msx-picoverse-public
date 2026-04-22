@@ -121,6 +121,34 @@ typedef struct {
     //   0 = idle, 1 = got AA, 2 = got AA/55, 3 = autoselect mode,
     //   4 = byte-program target pending
     uint8_t flash_state;
+
+    // ----- Decoder cache (rebuilt on register writes) -----
+    // Precomputed form of the four bank-config blocks so the hot-path
+    // MSX bus loop can decide enable / data-window match / RAM offset
+    // with a few compares and no multiplies.
+    //
+    //   active       : 1 when the bank has a valid data window
+    //                  (Mult.DISABLE=0 AND size code is one of 3..7).
+    //   match_mask   : high-byte address bits that must match adrd.
+    //   match_value  : (adrd & match_mask).
+    //   size_mask    : (size-1) — used to mask the low address bits.
+    //   base_linear  : (reg & maskR)*size + addrfr*0x10000, precomputed.
+    //   is_ram       : 1 when Mult.RAM=1 (RAM window), 0 for flash/ROM.
+    //   is_we        : 1 when Mult.WRITE_EN=1.
+    //   page_latch_*: Konami-style bank-switch trigger fields (BxMask/
+    //                  BxAddr + PAGE_REG_EN gate), pre-evaluated.
+    struct {
+        uint8_t  active;
+        uint8_t  match_mask;
+        uint8_t  match_value;
+        uint8_t  is_ram;
+        uint8_t  is_we;
+        uint8_t  page_latch_active;
+        uint8_t  page_latch_mask;
+        uint8_t  page_latch_value;
+        uint32_t size_mask;
+        uint32_t base_linear;
+    } cache[4];
 } c2_state_t;
 
 #define C2_BANK_MASK  0u
@@ -152,7 +180,28 @@ static inline bool c2_addr_is_regwin(const c2_state_t *c2, uint16_t addr)
 // Look up which bank (0..3) covers the given MSX address and compute the
 // linear offset inside the Carnivore2 RAM buffer. Returns true if the
 // address is decoded by an enabled bank.
-bool c2_decode_addr(const c2_state_t *c2, uint16_t addr, uint8_t *bank_idx, uint32_t *linear_off);
+//
+// Hot-path variant: reads only the precomputed `cache[]` entries, no
+// multiplies, no switch/case. Rebuilt lazily by c2_reg_write /
+// c2_bank_switch_write whenever the underlying registers change.
+static inline bool c2_decode_addr(const c2_state_t *c2, uint16_t addr,
+                                  uint8_t *bank_idx_out, uint32_t *linear_off_out)
+{
+    uint8_t addr_high = (uint8_t)(addr >> 8);
+    for (uint8_t b = 0; b < 4u; ++b)
+    {
+        if (!c2->cache[b].active) continue;
+        if (((addr_high ^ c2->cache[b].match_value) & c2->cache[b].match_mask) != 0u) continue;
+        if (bank_idx_out)   *bank_idx_out = b;
+        if (linear_off_out) *linear_off_out = c2->cache[b].base_linear + (addr & c2->cache[b].size_mask);
+        return true;
+    }
+    return false;
+}
+
+// Query cached Mult flags for a decoded bank (avoids re-reading bank_regs).
+static inline bool c2_bank_is_ram(const c2_state_t *c2, uint8_t bank_idx) { return c2->cache[bank_idx].is_ram != 0u; }
+static inline bool c2_bank_is_we (const c2_state_t *c2, uint8_t bank_idx) { return c2->cache[bank_idx].is_we  != 0u; }
 
 // Handle a port 0xF0-0xF3 write (command byte). Updates PF0 state and may
 // update CardMDR / Mconf as a side effect. Port must match PFXN selection.

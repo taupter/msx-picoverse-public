@@ -70,6 +70,7 @@ target_link_libraries(loadrom
     pico_audio_i2s
     hardware_dma
     hardware_pio
+    hardware_uart
     tinyusb_board
     tinyusb_host
     no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
