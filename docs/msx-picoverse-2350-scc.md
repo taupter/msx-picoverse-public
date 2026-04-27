@@ -1,6 +1,6 @@
 # MSX PicoVerse 2350 — SCC / SCC+ Sound Emulation
 
-The PicoVerse 2350 LoadROM PIO firmware can emulate the Konami SCC and SCC+ (SCC-I) sound chips in hardware, generating audio through an I2S DAC connected to the RP2350. This gives MSX games that use SCC or SCC+ sound their full soundtrack without requiring an original SCC cartridge.
+The PicoVerse 2350 LoadROM and MultiROM PIO firmware can emulate the Konami SCC and SCC+ (SCC-I) sound chips in hardware, generating audio through an I2S DAC connected to the RP2350. This gives MSX games that use SCC or SCC+ sound their full soundtrack without requiring an original SCC cartridge.
 
 ---
 
@@ -99,7 +99,7 @@ loadrom.exe [options] <romfile>
   -o <filename>         Set UF2 output filename (default loadrom.uf2)
 ```
 
-The `-scc` and `-sccplus` flags are **mutually exclusive** — use only one. For embedded-ROM builds, both flags require the ROM mapper to be Konami SCC (type 3); the tool prints a warning and ignores the flag for other mapper types. For the `-c1` and `-c2` loader modes, these flags enable SCC or SCC+ playback for compatible ROMs uploaded later through `SROM.COM /D15`.
+The `-scc` and `-sccplus` flags are **mutually exclusive** — use only one. For embedded-ROM builds, both flags require the ROM mapper to be Konami SCC (type 3) or Manbow2 (type 14, MultiROM); the tool prints a warning and ignores the flag for other mapper types. For the `-c1` and `-c2` Carnivore2 modes (available in both LoadROM and MultiROM), these flags enable SCC or SCC+ playback for compatible ROMs uploaded later through `SROM.COM /D15`.
 
 ### Examples
 
@@ -119,11 +119,13 @@ loadrom.exe -sccplus "Snatcher.KonSCC.rom"
 
 ```
 
-**For `SROM.COM /D15` uploads on Carnivore2 loader modes:**
+**For `SROM.COM /D15` uploads on Carnivore2 loader modes (LoadROM or MultiROM):**
 
 ```
 loadrom.exe -c1 -scc -o srom_c2_sd_scc.uf2
 loadrom.exe -c2 -scc -o srom_c2_usb_scc.uf2
+multirom.exe -c1 -scc
+multirom.exe -c2 -sccplus
 ```
 
 Flash one of those UF2 files first, boot Nextor, and then upload a Konami SCC ROM with `SROM.COM /D15`. The loader keeps the ROM in PSRAM while the SCC emulator intercepts the standard Konami SCC bank and register accesses from the launched title.
@@ -173,17 +175,22 @@ The firmware decodes these flags at boot and initialises the emu2212 library wit
 | SCC clock | 3,579,545 Hz (MSX master clock) |
 | Sample rate | 44,100 Hz |
 | Quality mode | 1 (interpolated) |
+| Oversampling divisor | 8 (`SCC_OVERSAMPLE_DIV`) |
 | Volume boost | 4× (2-bit left shift with clipping) |
 | Audio buffer | 256 stereo samples per block, 3 blocks |
-| I2S PIO instance | PIO1, state machine 0 |
+| I2S PIO instance | PIO1, state machine 0 (Konami SCC / Manbow2 modes) or state machine 2 (Sunrise / Carnivore2 modes, polled from the storage Core 1 task) |
+
+### Oversampling tuning
+
+The upstream emu2212 library uses an internal oversampling divisor of 2 in `quality=1` mode (internal rate ≈ 1.79 MHz, ~41 `update_output()` calls per output sample at 44.1 kHz). At 210 MHz the RP2350 cannot sustain that on a single core, so the LoadROM, MultiROM, and Explorer firmwares all set `SCC_OVERSAMPLE_DIV = 8` in `emu2212.c`. The product `base_incr × iterations` is preserved (both `base_incr` and `sccstep` scale with the divisor), so pitch and audio quality are unchanged while Core-1 CPU usage drops by roughly 4×.
 
 ---
 
 ## Hardware requirements
 
 - **PicoVerse 2350 board** with I2S DAC connected to GPIOs 29–32.
-- **LoadROM firmware** (`2350/software/loadrom.pio`).
-- An MSX game ROM that uses the Konami SCC mapper.
+- **LoadROM firmware** (`2350/software/loadrom.pio`), **MultiROM firmware** (`2350/software/multirom.pio`), or **Explorer firmware** (`2350/software/explorer.pio`).
+- An MSX game ROM that uses the Konami SCC mapper or the Manbow2 mapper, or any SCC-class ROM uploaded through `SROM.COM /D15` on a `-c1` / `-c2` build.
 
 ---
 
@@ -198,8 +205,8 @@ The firmware decodes these flags at boot and initialises the emu2212 library wit
 
 ## Limitations
 
-- SCC emulation is available in the current `loadrom` firmware for the 2350 platform.
-- The `-scc` and `-sccplus` flags only apply to Konami SCC mapper ROMs (type 3).
+- SCC emulation is available in the current `loadrom` and `multirom` firmware for the 2350 platform.
+- The `-scc` and `-sccplus` flags only apply to Konami SCC mapper ROMs (type 3), Manbow2 ROMs (type 14, MultiROM), and Carnivore2 SROM-uploaded ROMs (`-c1` / `-c2`).
 - Audio output requires an I2S DAC on the PicoVerse board. Without the DAC, the SCC registers are still emulated (reads return correct values) but no sound is produced.
 - The volume boost factor is fixed at compile time.
 

@@ -116,12 +116,12 @@ void show_rom_screen(unsigned int index) {
             }
             send_detect_mapper(index);
             waiting_mapper = 1;
-        } else if (mapper_code == 3) {
+        } else if (mapper_code == 3 || mapper_code == 14) {
             audio_index = 1;
         }
     } else {
         unsigned char mapper_code = record->Mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG | OVERRIDE_FLAG);
-        if (mapper_code == 3) {
+        if (mapper_code == 3 || mapper_code == 14) {
             audio_index = 1;
         }
     }
@@ -165,7 +165,7 @@ void show_rom_screen(unsigned int index) {
                 }
             }
             if ((key == 28 || key == 29) && selection == 0 && !waiting_mapper) {
-                static const unsigned char mapper_cycle[] = {1,2,3,4,5,6,7,8,9};
+                static const unsigned char mapper_cycle[] = {1,2,3,4,5,6,7,8,9,12,13,14};
                 const unsigned int mapper_count = (unsigned int)(sizeof(mapper_cycle) / sizeof(mapper_cycle[0]));
                 unsigned char mapper_code = record->Mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG | OVERRIDE_FLAG);
                 int dir = (key == 28) ? 1 : -1;
@@ -225,7 +225,7 @@ void show_rom_screen(unsigned int index) {
             unsigned char mapper = read_mapper_value();
             if (mapper != 0) {
                 record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG)) | mapper;
-                if (mapper == 3 && audio_index == 0) {
+                if ((mapper == 3 || mapper == 14) && audio_index == 0) {
                     audio_index = 1;
                     build_audio_text(record, audio_index, audio_text, sizeof(audio_text));
                     render_rom_audio_line(audio_text, selection == 1);

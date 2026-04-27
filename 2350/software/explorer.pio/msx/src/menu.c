@@ -805,12 +805,12 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
 // This function will return the description of the mapper type based on the mapper number.
 char* mapper_description(int number) {
     // Array of strings for the descriptions
-    const char *descriptions[] = {"PL-16", "PL-32", "KonSCC", "Linear", "ASC-08", "ASC-16", "Konami","NEO-8","NEO-16","SYSTEM"};	
+    const char *descriptions[] = {"PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08", "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC16X", "PLN-64", "MANBW2"};
     number &= ~(SOURCE_SD_FLAG | FOLDER_FLAG | OVERRIDE_FLAG);
     if (number & MP3_FLAG) {
         return "MP3";
     }
-    if (number <= 0 || number > 10) {
+    if (number <= 0 || number > 14) {
         return "Unknown";
     }
     return descriptions[number - 1];

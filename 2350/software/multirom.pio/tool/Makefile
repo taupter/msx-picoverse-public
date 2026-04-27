@@ -46,6 +46,8 @@ MSXMENU := ../msx/dist/menu.rom
 MSXMENU_H := $(SRCDIR)/menu.h
 NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.MasterOnly.ROM
 NEXTOR_SUNRISE_H := $(SRCDIR)/nextor_sunrise.h
+ESP8266P_ROM := ../../wifi/bios/ESP8266P.rom
+ESP8266P_ROM_H := $(SRCDIR)/esp8266p_rom.h
 
 # Helpers
 RM := rm -f
@@ -58,7 +60,7 @@ compile: $(BINDIR)/$(OUTFILE)
 
 package: $(DISDIR)/multirom.exe
 
-$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(MSXMENU_H) $(MSXMENU) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE)
+$(BINDIR)/$(OUTFILE): $(BINDIR) $(SRCDIR)/$(SOURCES) $(PICOBIN_H) $(PICOBIN) $(MSXMENU_H) $(MSXMENU) $(NEXTOR_SUNRISE_H) $(NEXTOR_SUNRISE) $(ESP8266P_ROM_H) $(ESP8266P_ROM)
 	@echo "Compiling $@"
 	$(CC) $(CCFLAGS) -DAPP_VERSION=\"$(VERSION)\" $(SRCDIR)/$(SOURCES) -o $@
 
@@ -74,6 +76,10 @@ $(NEXTOR_SUNRISE_H): $(NEXTOR_SUNRISE)
 	@echo "Embedding Sunrise Nextor ROM into header"
 	$(UTLDIR)/$(XXD) -i $< $@
 
+$(ESP8266P_ROM_H): $(ESP8266P_ROM)
+	@echo "Embedding ESP8266P WiFi ROM into header"
+	$(UTLDIR)/$(XXD) -i $< $@
+
 $(BINDIR):
 	@mkdir $@
 
@@ -86,5 +92,5 @@ $(DISDIR)/multirom.exe: $(DISDIR) $(BINDIR)/$(OUTFILE)
 
 clean:
 	@echo "Cleaning ...."
-	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/multirom.h $(SRCDIR)/menu.h $(SRCDIR)/nextor_sunrise.h $(BINDIR)/multirom.rom $(BINDIR)/multirom_payload.bin
+	$(RM) $(BINDIR)/*.exe $(BINDIR)/*.uf2 $(SRCDIR)/multirom.h $(SRCDIR)/menu.h $(SRCDIR)/nextor_sunrise.h $(SRCDIR)/esp8266p_rom.h $(BINDIR)/multirom.rom $(BINDIR)/multirom_payload.bin
 	$(RM) $(DISDIR)/*

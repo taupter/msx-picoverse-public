@@ -97,6 +97,7 @@ The implementation uses `jmp pin` polling to re-check slot/IORQ validity while w
 ### ROM serving
 
 - Uses a 256 KB SRAM cache with flash fallback for ROMs exceeding cache capacity.
+- microSD-resident ROMs (Explorer firmware) up to 2 MB are streamed into the cartridge's external 8 MB PSRAM (QMI CS1, 52.5 MHz QPI). The leading window is mirrored into the same 256 KB SRAM cache used by flash ROMs, so the mapper hot-loop accesses go through fast SRAM regardless of source.
 - GPIO input hysteresis is enabled on address (A0–A15) and data (D0–D7) pins to filter bus glitches.
 - Mapper support includes Plain16/32, Planar48, Planar64, Konami SCC, Konami, ASCII8, ASCII16, ASCII16-X, NEO8, NEO16, Manbow2, Sunrise IDE, and Sunrise IDE + 1MB PSRAM Mapper.
 

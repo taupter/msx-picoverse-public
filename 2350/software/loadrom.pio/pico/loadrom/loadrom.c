@@ -22,7 +22,6 @@
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
-#include "hardware/uart.h"
 #include "hardware/regs/qmi.h"
 #include "hardware/sync.h"
 #include "hardware/structs/qmi.h"
@@ -30,6 +29,9 @@
 #include "loadrom.h"
 #include "emu2212.h"
 #include "msx_bus.pio.h"
+#include "hardware/uart.h"
+#include "hardware/gpio.h"
+#include "hardware/irq.h"
 #include "pico/audio_i2s.h"
 #include "sunrise_ide.h"
 #include "sunrise_sd.h"
@@ -88,33 +90,42 @@ static int scc_dma_channel = -1;
 #define WIFI_MEM_DATA_ADDR    0x7F07u
 #define WIFI_RX_FIFO_SIZE     2080u
 #define WIFI_QUICK_WAIT_US    25000u
-#define WIFI_UART_BAUD        859372u
+#define WIFI_UART_DEFAULT_BAUD 859372u
 #define WIFI_STATUS_RX_READY  0x01u
 #define WIFI_STATUS_TX_BUSY   0x02u
 #define WIFI_STATUS_RX_FULL   0x04u
 #define WIFI_STATUS_QUICK_RX  0x08u
 #define WIFI_STATUS_UNDERRUN  0x10u
-#define WIFI_STATUS_FREE_BITS 0xC0u
+#define WIFI_STATUS_FREE_BITS 0x80u
 
-static uart_inst_t *const wifi_uart = uart1;
+// Hardware UART1 backs the ESP-01 link on Core2350B GPIO38/39.
+// On RP2350B these are UART1 TX/RX on FUNCSEL=11 (GPIO_FUNC_UART_AUX).
+// FUNCSEL=2 on these pins maps to UART1 CTS/RTS, NOT data.
+#define WIFI_UART_INSTANCE uart1
 static uint8_t wifi_rx_fifo[WIFI_RX_FIFO_SIZE];
-static uint16_t wifi_rx_head = 0u;
-static uint16_t wifi_rx_tail = 0u;
-static uint16_t wifi_rx_count = 0u;
+static volatile uint16_t wifi_rx_head = 0u;
+static volatile uint16_t wifi_rx_tail = 0u;
+static volatile uint16_t wifi_rx_count = 0u;
 static uint8_t wifi_f2_state = 0xFFu;
 static bool wifi_uart_ready = false;
+static uint32_t wifi_uart_baud = WIFI_UART_DEFAULT_BAUD;
+static uint32_t wifi_tx_busy_deadline_us = 0u;
 static bool wifi_rx_underrun = false;
 
 static inline void __not_in_flash_func(wifi_reset_fifo)(void)
 {
+    uint32_t irq_state = save_and_disable_interrupts();
     wifi_rx_head = 0u;
     wifi_rx_tail = 0u;
     wifi_rx_count = 0u;
     wifi_rx_underrun = false;
+    restore_interrupts(irq_state);
 }
 
 static inline void __not_in_flash_func(wifi_push_rx_byte)(uint8_t data)
 {
+    // Producer side: called from UART RX IRQ on core0. The pop side
+    // disables IRQs while it mutates head/tail/count, so we don't race.
     if (wifi_rx_count >= WIFI_RX_FIFO_SIZE)
     {
         return;
@@ -127,15 +138,46 @@ static inline void __not_in_flash_func(wifi_push_rx_byte)(uint8_t data)
 
 static inline bool __not_in_flash_func(wifi_pop_rx_byte)(uint8_t *data_out)
 {
+    uint32_t irq_state = save_and_disable_interrupts();
     if (wifi_rx_count == 0u)
     {
+        restore_interrupts(irq_state);
         return false;
     }
 
     *data_out = wifi_rx_fifo[wifi_rx_tail];
     wifi_rx_tail = (uint16_t)((wifi_rx_tail + 1u) % WIFI_RX_FIFO_SIZE);
     --wifi_rx_count;
+    restore_interrupts(irq_state);
     return true;
+}
+
+static inline bool __not_in_flash_func(wifi_hw_tx_busy)(void)
+{
+    return (uart_get_hw(WIFI_UART_INSTANCE)->fr & UART_UARTFR_BUSY_BITS) != 0u;
+}
+
+static inline void __not_in_flash_func(wifi_hw_rx_drain)(void)
+{
+    while (uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        (void)uart_getc(WIFI_UART_INSTANCE);
+    }
+}
+
+static inline void __not_in_flash_func(wifi_pio_rx_reset)(void)
+{
+    // Drain any in-flight bytes; FIFO will refill from the wire.
+    wifi_hw_rx_drain();
+}
+
+static inline void __not_in_flash_func(wifi_pio_tx_reset)(void)
+{
+    // Wait for the TX shifter to flush so we don't truncate a frame.
+    while (wifi_hw_tx_busy())
+    {
+    }
+    wifi_tx_busy_deadline_us = 0u;
 }
 
 static inline void __not_in_flash_func(wifi_service_rx)(void)
@@ -145,10 +187,32 @@ static inline void __not_in_flash_func(wifi_service_rx)(void)
         return;
     }
 
-    while (wifi_rx_count < WIFI_RX_FIFO_SIZE && uart_is_readable(wifi_uart))
+    while (wifi_rx_count < WIFI_RX_FIFO_SIZE && uart_is_readable(WIFI_UART_INSTANCE))
     {
-        wifi_push_rx_byte((uint8_t)uart_getc(wifi_uart));
+        wifi_push_rx_byte((uint8_t)uart_getc(WIFI_UART_INSTANCE));
     }
+}
+
+// IRQ handler: drains UART1 RX hardware FIFO into the SW FIFO. Runs on
+// core0 (the core that calls wifi_uart_init_once). Must be in RAM so it
+// is not blocked by XIP cache misses while the bus loop is busy.
+static void __not_in_flash_func(wifi_uart_rx_irq)(void)
+{
+    while (uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        uint8_t b = (uint8_t)uart_getc(WIFI_UART_INSTANCE);
+        if (wifi_rx_count < WIFI_RX_FIFO_SIZE)
+        {
+            wifi_rx_fifo[wifi_rx_head] = b;
+            wifi_rx_head = (uint16_t)((wifi_rx_head + 1u) % WIFI_RX_FIFO_SIZE);
+            ++wifi_rx_count;
+        }
+    }
+}
+
+static inline uint32_t __not_in_flash_func(wifi_uart_frame_time_us)(void)
+{
+    return (10000000u + (wifi_uart_baud - 1u)) / wifi_uart_baud;
 }
 
 static inline void __not_in_flash_func(wifi_uart_init_once)(void)
@@ -158,17 +222,33 @@ static inline void __not_in_flash_func(wifi_uart_init_once)(void)
         return;
     }
 
-    gpio_set_function(PIN_ESP_UART_TX, GPIO_FUNC_UART);
-    gpio_set_function(PIN_ESP_UART_RX, GPIO_FUNC_UART);
-    uart_init(wifi_uart, WIFI_UART_BAUD);
-    uart_set_format(wifi_uart, 8, 1, UART_PARITY_NONE);
-    uart_set_hw_flow(wifi_uart, false, false);
-    uart_set_fifo_enabled(wifi_uart, true);
-    uart_set_translate_crlf(wifi_uart, false);
+    // Initialise hardware UART1 on GPIO38 (TX) / GPIO39 (RX). Both pins
+    // need GPIO_FUNC_UART_AUX (FUNCSEL=11) on RP2350B; the default
+    // GPIO_FUNC_UART (FUNCSEL=2) maps to UART1 CTS/RTS on these pins.
+    (void)uart_init(WIFI_UART_INSTANCE, wifi_uart_baud);
+    gpio_set_function(PIN_ESP_UART_TX, GPIO_FUNC_UART_AUX);
+    gpio_set_function(PIN_ESP_UART_RX, GPIO_FUNC_UART_AUX);
+    uart_set_format(WIFI_UART_INSTANCE, 8, 1, UART_PARITY_NONE);
+    uart_set_hw_flow(WIFI_UART_INSTANCE, false, false);
+    uart_set_fifo_enabled(WIFI_UART_INSTANCE, true);
+
+    // Drain any spurious bytes the line may have latched during init.
+    wifi_hw_rx_drain();
 
     wifi_f2_state = 0xFFu;
     wifi_reset_fifo();
+    wifi_tx_busy_deadline_us = 0u;
     wifi_uart_ready = true;
+
+    // IRQ-driven RX: at 859372 baud the 32-byte HW FIFO fills in ~370us.
+    // Polling from the bus service loop is not reliable when the loop
+    // stalls on pio_sm_put_blocking, so route the RX/RT interrupts to a
+    // dedicated handler that drains the FIFO immediately. RT (receive
+    // timeout) ensures partial bursts don't sit in the FIFO.
+    int uart_irq = (WIFI_UART_INSTANCE == uart0) ? UART0_IRQ : UART1_IRQ;
+    irq_set_exclusive_handler(uart_irq, wifi_uart_rx_irq);
+    irq_set_enabled(uart_irq, true);
+    uart_set_irq_enables(WIFI_UART_INSTANCE, true, false);
 }
 
 static inline void __not_in_flash_func(wifi_handle_cmd_write)(uint8_t cmd)
@@ -178,10 +258,8 @@ static inline void __not_in_flash_func(wifi_handle_cmd_write)(uint8_t cmd)
     if (cmd == 20u)
     {
         wifi_reset_fifo();
-        while (uart_is_readable(wifi_uart))
-        {
-            (void)uart_getc(wifi_uart);
-        }
+        wifi_pio_tx_reset();
+        wifi_pio_rx_reset();
     }
 }
 
@@ -199,7 +277,9 @@ static inline uint8_t __not_in_flash_func(wifi_status_read)(void)
     {
         status |= WIFI_STATUS_RX_FULL;
     }
-    if (!uart_is_writable(wifi_uart))
+    if (wifi_hw_tx_busy() ||
+        !uart_is_writable(WIFI_UART_INSTANCE) ||
+        (int32_t)(time_us_32() - wifi_tx_busy_deadline_us) < 0)
     {
         status |= WIFI_STATUS_TX_BUSY;
     }
@@ -252,7 +332,8 @@ static inline bool __not_in_flash_func(wifi_handle_mem_write)(uint16_t addr, uin
     if (addr == WIFI_MEM_DATA_ADDR)
     {
         wifi_uart_init_once();
-        uart_putc_raw(wifi_uart, data);
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)data);
+        wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
         return true;
     }
 
@@ -1551,13 +1632,18 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
         if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
         {
             uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            // Always drive the bus when our primary slot is selected (the
+            // PIO only queues reads while SLTSL is active for our slot).
+            // Real MSX tolerates a floating bus (pull-ups -> 0xFF), but
+            // several FPGA cores require an explicit ack on every read,
+            // including reads to addresses inside an empty/unmapped
+            // sub-slot. Default to 0xFF and override below.
             uint8_t data = 0xFFu;
-            bool in_window = false;
+            bool in_window = true;
 
             // Sub-slot register read at 0xFFFF: return ~subslot_reg
             if (addr == 0xFFFFu)
             {
-                in_window = true;
                 data = ~subslot_reg;
             }
             else
@@ -1570,8 +1656,6 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                     // Sub-slot 0: Nextor ROM (0x4000-0x7FFF only)
                     if (addr >= 0x4000u && addr <= 0x7FFFu)
                     {
-                        in_window = true;
-
                         // Check if IDE intercepts this read
                         uint8_t ide_data;
                         if (sunrise_ide_handle_read(&ide, addr, &ide_data))
@@ -1591,12 +1675,11 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                 else if (active_subslot == 1)
                 {
                     // Sub-slot 1: Memory mapper RAM — all 4 pages
-                    in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                     uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
                     data = mapper_read_byte(mapper_offset);
                 }
-                // Sub-slots 2 and 3: unused, return 0xFF (not in window)
+                // Sub-slots 2 and 3: unused — keep default 0xFF (in window)
             }
 
             pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
@@ -3274,6 +3357,8 @@ static void __not_in_flash_func(loadrom_sunrise_wifi_common)(
 
     while (true)
     {
+        wifi_service_rx();
+
         uint16_t waddr;
         uint8_t wdata;
         while (pio_try_get_write(&waddr, &wdata))
@@ -3287,16 +3372,19 @@ static void __not_in_flash_func(loadrom_sunrise_wifi_common)(
             uint8_t page = (waddr >> 14) & 0x03u;
             uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
 
+            // Sub-slot 0: WiFi BIOS (initializes first via BIOS slot scan)
+            // Sub-slot 1: Sunrise Nextor IDE (initializes after WiFi BIOS)
+            // Sub-slot 2: 1 MB mapper RAM (probed at 0x8000 during boot)
             if (active_subslot == 0)
+            {
+                (void)wifi_handle_mem_write(waddr, wdata);
+            }
+            else if (active_subslot == 1)
             {
                 if (waddr >= 0x4000u && waddr <= 0x7FFFu)
                 {
                     sunrise_ide_handle_write(&ide, waddr, wdata);
                 }
-            }
-            else if (active_subslot == 1)
-            {
-                (void)wifi_handle_mem_write(waddr, wdata);
             }
             else if (mapper_enable && active_subslot == 2)
             {
@@ -3336,12 +3424,14 @@ static void __not_in_flash_func(loadrom_sunrise_wifi_common)(
         if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
         {
             uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            // Always drive the bus when our slot is selected (FPGA MSX
+            // cores require an explicit ack on every read, including
+            // reads inside empty sub-slots).
             uint8_t data = 0xFFu;
-            bool in_window = false;
+            bool in_window = true;
 
             if (addr == 0xFFFFu)
             {
-                in_window = true;
                 data = (uint8_t)~subslot_reg;
             }
             else
@@ -3349,12 +3439,20 @@ static void __not_in_flash_func(loadrom_sunrise_wifi_common)(
                 uint8_t page = (addr >> 14) & 0x03u;
                 uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
 
+                // Sub-slot 0: WiFi BIOS (initializes first)
+                // Sub-slot 1: Sunrise Nextor IDE (initializes after)
+                // Sub-slot 2: 1 MB mapper RAM
                 if (active_subslot == 0)
                 {
                     if (addr >= 0x4000u && addr <= 0x7FFFu)
                     {
-                        in_window = true;
-
+                        data = wifi_handle_mem_read(wifi_rom_base, addr);
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
                         uint8_t ide_data;
                         if (sunrise_ide_handle_read(&ide, addr, &ide_data))
                         {
@@ -3371,21 +3469,13 @@ static void __not_in_flash_func(loadrom_sunrise_wifi_common)(
                         }
                     }
                 }
-                else if (active_subslot == 1)
-                {
-                    if (addr >= 0x4000u && addr <= 0x7FFFu)
-                    {
-                        in_window = true;
-                        data = wifi_handle_mem_read(wifi_rom_base, addr);
-                    }
-                }
                 else if (mapper_enable && active_subslot == 2)
                 {
-                    in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                     uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
                     data = mapper_read_byte(mapper_offset);
                 }
+                // Other sub-slots: keep default 0xFF (in window)
             }
 
             pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));

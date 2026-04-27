@@ -19,6 +19,9 @@ void mp3_core1_loop(void);
 void mp3_stop_core1(void);
 void mp3_set_bg_callback(mp3_bg_callback_t cb);
 
+// True once Core 1 has finished mp3_init() and entered its command loop.
+bool mp3_core1_is_ready(void);
+
 void mp3_deinit(void);
 
 void mp3_set_external_buffer(uint8_t *buffer, size_t size);

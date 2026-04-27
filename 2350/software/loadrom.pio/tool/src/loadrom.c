@@ -404,8 +404,8 @@ static void print_usage(const char *prog_name) {
     printf("  -m1, --mapper-sd   Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (microSD card)\n");
     printf("  -s2, --sunrise-usb Build UF2 with Sunrise IDE Nextor ROM (USB pendrive)\n");
     printf("  -m2, --mapper-usb  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper (USB pendrive)\n");
-    printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation for SROM /D15 (microSD card)\n");
-    printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation for SROM /D15 (USB pendrive)\n");
+    printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (microSD card)\n");
+    printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (USB pendrive)\n");
     printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2 only)\n");
     printf("  -scc, --scc        Enable SCC sound emulation (Konami SCC mapper only)\n");
     printf("  -sccplus, --sccplus  Enable SCC+ (enhanced) sound emulation (Konami SCC mapper only)\n");
@@ -696,8 +696,8 @@ int main(int argc, char *argv[])
         if (use_wifi) {
             rom_type |= ROM_TYPE_WIFI_FLAG;
             printf("WiFi Support: Enabled (ESP8266P system ROM + UART support)\n");
-            wifi_rom = ___wifi_ESP8266P_rom;
-            wifi_rom_size = (uint32_t)___wifi_ESP8266P_rom_len;
+            wifi_rom = ______wifi_bios_ESP8266P_rom;
+            wifi_rom_size = (uint32_t)______wifi_bios_ESP8266P_rom_len;
         }
 
         uint32_t base_offset = CONFIG_RECORD_SIZE;

@@ -35,7 +35,7 @@ PICOBIN   := ../pico/loadrom/dist/loadrom.bin
 PICOBIN_H := $(SRCDIR)/loadrom.h
 NEXTOR_SUNRISE := ../nextor/kernel/Nextor-2.1.4.SunriseIDE.MasterOnly.ROM
 NEXTOR_SUNRISE_H := $(SRCDIR)/nextor_sunrise.h
-ESP8266P_ROM := ../wifi/ESP8266P.rom
+ESP8266P_ROM := ../../wifi/bios/ESP8266P.rom
 ESP8266P_ROM_H := $(SRCDIR)/esp8266p_rom.h
 
 # Helpers

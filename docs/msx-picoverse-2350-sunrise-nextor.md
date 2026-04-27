@@ -1,6 +1,6 @@
 # MSX PicoVerse 2350 — Sunrise IDE Emulation for Nextor
 
-This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, or combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`. The four non-Carnivore2 Sunrise modes can also optionally expose ESP-01 WiFi support when built with `loadrom.exe -w`.
+This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, or combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`. The four non-Carnivore2 Sunrise modes can also optionally expose ESP-01 WiFi support when built with `-w` in either `loadrom.exe` or `multirom.exe`.
 
 ## 1. Overview
 
@@ -258,8 +258,10 @@ Subslot layout with WiFi enabled:
 
 | Mode Family | Sub-slot 0 | Sub-slot 1 | Sub-slot 2 |
 |---|---|---|---|
-| `-s1 -w`, `-s2 -w` | Nextor + IDE | ESP8266P ROM + memio UART | unused |
-| `-m1 -w`, `-m2 -w` | Nextor + IDE | ESP8266P ROM + memio UART | 1MB PSRAM mapper |
+| `-s1 -w`, `-s2 -w` | ESP8266P ROM + memio UART | Nextor + IDE | unused |
+| `-m1 -w`, `-m2 -w` | ESP8266P ROM + memio UART | Nextor + IDE | 1MB PSRAM mapper |
+
+The ESP8266P BIOS is placed in sub-slot 0 so its `INIT` runs before Nextor's during the MSX BIOS expanded-slot scan. This ordering is required for FPGA-based MSX cores and is functionally equivalent on real MSX hardware.
 
 The WiFi implementation is intentionally not enabled for `-c1` and `-c2` in the current firmware.
 
@@ -317,9 +319,9 @@ The SD functions (`loadrom_sunrise_sd`, `loadrom_sunrise_mapper_sd`) are structu
 
 When WiFi is enabled, the dispatch keeps the same base mapper type and swaps in the WiFi-aware Sunrise handlers instead.
 
-## 11. LoadROM Tool Usage
+## 11. LoadROM and MultiROM Tool Usage
 
-### Command-Line Options
+### LoadROM command-line options
 
 ```
 loadrom.exe [-h] [-s1] [-m1] [-s2] [-m2] [-c1] [-c2] [-w] [-scc] [-sccplus] [-o <filename>] [romfile]
@@ -331,9 +333,15 @@ loadrom.exe [-h] [-s1] [-m1] [-s2] [-m2] [-c1] [-c2] [-w] [-scc] [-sccplus] [-o 
 | `-m1` | `--mapper-sd` | Sunrise IDE + 1MB PSRAM mapper with microSD card |
 | `-s2` | `--sunrise-usb` | Sunrise IDE with USB pendrive |
 | `-m2` | `--mapper-usb` | Sunrise IDE + 1MB PSRAM mapper with USB pendrive |
+| `-c1` | `--carnivore2-sd` | Sunrise IDE + 1MB PSRAM mapper + Carnivore2 RAM-mode emulation with microSD card |
+| `-c2` | `--carnivore2-usb` | Sunrise IDE + 1MB PSRAM mapper + Carnivore2 RAM-mode emulation with USB pendrive |
 | `-w` | `--wifi` | Add the ESP8266P system ROM + memio UART WiFi surface to `-s1`/`-m1`/`-s2`/`-m2` |
 
-The Sunrise and Carnivore2 base options are mutually exclusive. The `-w` flag is valid only with `-s1`, `-m1`, `-s2`, or `-m2`.
+In LoadROM the Sunrise and Carnivore2 base options are mutually exclusive. The `-w` flag is valid only with `-s1`, `-m1`, `-s2`, or `-m2`.
+
+### MultiROM command-line options
+
+The same `-s1` / `-m1` / `-s2` / `-m2` / `-c1` / `-c2` flags are accepted by `multirom.exe`. In MultiROM they are **not** mutually exclusive — each enabled flag adds an independent SYSTEM entry to the on-cart menu, so a single UF2 can offer several Sunrise / Carnivore2 modes side-by-side. The `-w` WiFi flag is also accepted by `multirom.exe`; it requires at least one of `-s1`/`-m1`/`-s2`/`-m2` and is applied to every selected Sunrise IDE entry. WiFi is intentionally not added to `-c1`/`-c2` Carnivore2 entries. The `-scc` / `-sccplus` flags are accepted by both tools and apply to Konami SCC / Manbow2 ROMs as well as to ROMs uploaded via SROM in the Carnivore2 modes.
 
 ### Examples
 

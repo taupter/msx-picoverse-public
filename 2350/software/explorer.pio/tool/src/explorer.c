@@ -24,6 +24,7 @@
 #include "explorer.h"
 #include "menu.h"
 #include "nextor.h"
+#include "mapper_detect.h"
 
 #ifndef APP_VERSION
 #define APP_VERSION "v1.00"
@@ -44,8 +45,9 @@
 #define MAX_UF2_FILENAME_LENGTH 512
 
 static const char *MAPPER_DESCRIPTIONS[] = {
-    "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM"
+    "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM",
+    "SYSTEM", "ASC16X", "PLN-64", "MANBW2"
 };
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
@@ -63,7 +65,11 @@ static bool equals_ignore_case(const char *a, const char *b) {
 
 static uint8_t mapper_number_from_description(const char *description) {
     for (size_t i = 0; i < MAPPER_DESCRIPTION_COUNT; ++i) {
-        if (equals_ignore_case(description, MAPPER_DESCRIPTIONS[i])) {
+        const char *tag = MAPPER_DESCRIPTIONS[i];
+        if (!tag || tag[0] == '\0') continue;
+        // Skip the SYSTEM placeholders so users can't force reserved slots.
+        if (equals_ignore_case(tag, "SYSTEM")) continue;
+        if (equals_ignore_case(description, tag)) {
             return (uint8_t)(i + 1);
         }
     }
@@ -111,172 +117,39 @@ const char* mapper_description(int number) {
     return MAPPER_DESCRIPTIONS[number - 1];
 }
 
-// Attempt to guess the mapper type from the ROM contents.
+// Attempt to guess the mapper type from the ROM contents using the shared
+// SHA1 + heuristic detector (mapper_detect.h). Loads the full file into RAM
+// so the openMSX softwaredb hash matches the canonical algorithm.
 // Returns the mapper byte expected by the firmware (0 signals unsupported/unknown).
-// Code adapted from openMSX mapper detection routines.
 uint8_t detect_rom_type(const char *filename, uint32_t size) {
-    
-    // Define the NEO8 signature
-    const char neo8_signature[] = "ROM_NEO8";
-    const char neo16_signature[] = "ROM_NE16";
-
-    // Initialize weighted scores for different mapper types
-    int konami_score = 0;
-    int konami_scc_score = 0;
-    int ascii8_score = 0;
-    int ascii16_score = 0;
-
-    // Define weights for specific addresses
-    const int KONAMI_WEIGHT = 2;
-    const int KONAMI_SCC_WEIGHT = 2;
-    const int ASCII8_WEIGHT_HIGH = 3;
-    const int ASCII8_WEIGHT_LOW = 1;
-    const int ASCII16_WEIGHT = 2;
-
-    //size_t size = file_size(filename);
     if (size > MAX_ROM_SIZE || size < MIN_ROM_SIZE) {
         printf("Invalid ROM size\n");
-        return 0; // unknown mapper
+        return 0;
     }
 
     FILE *file = fopen(filename, "rb");
     if (!file) {
         printf("Failed to open ROM file\n");
-        return 0; // unknown mapper
+        return 0;
     }
 
-    // Determine the size to read (max 128KB or the actual size if smaller)
-    size_t read_size = (size > MAX_ANALYSIS_SIZE) ? MAX_ANALYSIS_SIZE : size;
-    //size_t read_size = size; 
-    // Dynamically allocate memory for the ROM
-    uint8_t *rom = (uint8_t *)malloc(read_size);
+    uint8_t *rom = (uint8_t *)malloc(size);
     if (!rom) {
         printf("Failed to allocate memory for ROM\n");
         fclose(file);
-        return 0; // unknown mapper
+        return 0;
     }
 
-    fread(rom, 1, read_size, file);
+    size_t read_bytes = fread(rom, 1, size, file);
     fclose(file);
-    
-    // Check if the ROM has the signature "AB" at 0x0000 and 0x0001
-    // Those are the cases for 16KB and 32KB ROMs
-    if (rom[0] == 'A' && rom[1] == 'B' && size == 16384) {
+    if (read_bytes != size) {
         free(rom);
-        return 1;     // Plain 16KB 
+        return 0;
     }
 
-    if (rom[0] == 'A' && rom[1] == 'B' && size <= 32768) {
-
-        //check if it is a normal 32KB ROM or linear0 32KB ROM
-        if (rom[0x4000] == 'A' && rom[0x4001] == 'B') {
-            free(rom);
-            return 4; // Linear0 32KB
-        }
-        
-        free(rom);
-        return 2;     // Plain 32KB 
-    }
-
-    // Check for the "AB" header at the start
-    if (rom[0] == 'A' && rom[1] == 'B') {
-        // Check for the NEO8 signature at offset 16
-        if (memcmp(&rom[16], neo8_signature, sizeof(neo8_signature) - 1) == 0) {
-            free(rom);
-            return 8; // NEO8 mapper detected
-        } else if (memcmp(&rom[16], neo16_signature, sizeof(neo16_signature) - 1) == 0) {
-            free(rom);
-            return 9; // NEO16 mapper detected
-        }
-    }
-
-    // Check if the ROM has the signature "AB" at 0x4000 and 0x4001
-    // That is the case for 48KB ROMs with Linear page 0 config
-    if (rom[0x4000] == 'A' && rom[0x4001] == 'B' && size <= 49152) {
-        free(rom);
-        return 4; // Linear0 48KB
-    }
-
-    // Heuristic analysis for larger ROMs
-    if (size > 32768) {
-        // Scan through the ROM data to detect patterns
-        for (size_t i = 0; i < read_size - 3; i++) {
-            if (rom[i] == 0x32) { // Check for 'ld (nnnn),a' instruction
-                uint16_t addr = rom[i + 1] | (rom[i + 2] << 8);
-                switch (addr) {
-                    case 0x4000:
-                    case 0x8000:
-                    case 0xA000:
-                        konami_score += KONAMI_WEIGHT;
-                        break;
-                    case 0x5000:
-                    case 0x9000:
-                    case 0xB000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        break;
-                    case 0x6800:
-                    case 0x7800:
-                        ascii8_score += ASCII8_WEIGHT_HIGH;
-                        break;
-                    case 0x77FF:
-                        ascii16_score += ASCII16_WEIGHT;
-                        break;
-                    case 0x6000:
-                        konami_score += KONAMI_WEIGHT;
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
-                        break;
-                    case 0x7000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
-                        break;
-                    // Add more cases as needed
-                }
-            }
-        }
-         
-        
-        /*
-        printf ("DEBUG: ascii8_score = %d\n", ascii8_score);
-        printf ("DEBUG: ascii16_score = %d\n", ascii16_score);
-        printf ("DEBUG: konami_score = %d\n", konami_score);
-        printf ("DEBUG: konami_scc_score = %d\n\n", konami_scc_score);
-        */
-        
-        if (ascii8_score==1) ascii8_score--;
-
-        // Determine the ROM type based on the highest weighted score
-        if (konami_scc_score > konami_score && konami_scc_score > ascii8_score && konami_scc_score > ascii16_score) {
-            free(rom);
-            return 3; // Konami SCC
-        }
-        if (konami_score > konami_scc_score && konami_score > ascii8_score && konami_score > ascii16_score) {
-            free(rom);
-            return 7; // Konami
-        }
-        if (ascii8_score > konami_score && ascii8_score > konami_scc_score && ascii8_score > ascii16_score) {
-            free(rom);
-            return 5; // ASCII8
-        }
-        if (ascii16_score > konami_score && ascii16_score > konami_scc_score && ascii16_score > ascii8_score) {
-            free(rom);
-            return 6; // ASCII16
-        }
-
-        if (ascii16_score == konami_scc_score)
-        {
-            free(rom);
-            return 6; // Konami SCC
-        }
-
-        free(rom);
-        return 0; // unknown mapper
-    }
-    
+    uint8_t mapper = mapper_detect_buffer(rom, size);
     free(rom);
-    return 0;
+    return mapper;
 }
 
 // Print usage information
@@ -292,8 +165,11 @@ static void print_usage(const char *prog_name) {
     printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
     printf("  e.g., \"Knight Mare.PL-32.ROM\" forces PL-32; \"SYSTEM\" tags are ignored\n\n");
     printf("  here are the mapper descriptions you can use to force a specific mapper type:\n");
-    for (size_t i = 0; i < MAPPER_DESCRIPTION_COUNT-1; ++i) {
-        printf("  %s", MAPPER_DESCRIPTIONS[i]);
+    for (size_t i = 0; i < MAPPER_DESCRIPTION_COUNT; ++i) {
+        const char *tag = MAPPER_DESCRIPTIONS[i];
+        if (!tag || tag[0] == '\0') continue;
+        if (equals_ignore_case(tag, "SYSTEM")) continue;
+        printf("  %s", tag);
     }
     printf("\n");
     printf("UF2 output file: %s\n", UF2FILENAME);

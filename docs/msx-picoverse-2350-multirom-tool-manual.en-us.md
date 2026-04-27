@@ -43,12 +43,13 @@ multirom.exe [options]
 | `-m1`, `--mapper-sd` | Include Sunrise IDE Nextor ROM + 1MB PSRAM mapper (microSD card). |
 | `-s2`, `--sunrise-usb` | Include Sunrise IDE Nextor ROM (USB pendrive). |
 | `-m2`, `--mapper-usb` | Include Sunrise IDE Nextor ROM + 1MB PSRAM mapper (USB pendrive). |
-| `-scc`, `--scc` | Enable SCC sound emulation for Konami SCC and Manbow2 ROMs. |
-| `-sccplus`, `--sccplus` | Enable SCC+ (enhanced) sound emulation for Konami SCC and Manbow2 ROMs. |
+| `-c1`, `--carnivore2-sd` | Include Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM-mode emulation (microSD card). |
+| `-c2`, `--carnivore2-usb` | Include Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM-mode emulation (USB pendrive). |
+| `-scc`, `--scc` | Enable SCC sound emulation for Konami SCC and Manbow2 ROMs, and for ROMs uploaded via SROM in `-c1`/`-c2` Carnivore2 modes. |
+| `-sccplus`, `--sccplus` | Enable SCC+ (enhanced) sound emulation for Konami SCC and Manbow2 ROMs, and for ROMs uploaded via SROM in `-c1`/`-c2` Carnivore2 modes. |
+| `-w`, `--wifi` | Add ESP-01 WiFi BIOS sub-slot to every `-s1`/`-m1`/`-s2`/`-m2` Nextor entry. Requires at least one of those flags; the WiFi sub-slot is not added to `-c1`/`-c2` Carnivore2 entries. |
 
-The Sunrise options can be freely combined. Each adds a separate SYSTEM entry to the menu, so you can pick the desired Nextor mode on the MSX.
-
-WiFi support is not currently exposed in MultiROM. If you need the ESP-01 WiFi feature, build a dedicated LoadROM UF2 with `loadrom.exe -w` instead.
+The Sunrise / Carnivore2 options can be freely combined. Each adds a separate SYSTEM entry to the menu, so you can pick the desired Nextor / Carnivore2 mode on the MSX. When `-scc` or `-sccplus` is used together with `-c1`/`-c2`, the processing list shows the Carnivore2 entry with a trailing `+SCC` or `+SCC+` marker (the SCC flag is encoded in the entry's mapper byte and applies only to the Carnivore2 entries; other Sunrise modes are unaffected). When `-w` is combined with `-s1`/`-m1`/`-s2`/`-m2`, those entries are listed with a trailing `+WiFi` marker and the embedded ESP8266P system ROM is appended right after each entry's Sunrise ROM payload in flash.
 
 ### Examples
 
@@ -68,6 +69,18 @@ Include Sunrise IDE + mapper over microSD, with SCC emulation enabled for compat
 
 ```
 multirom.exe -m1 -scc
+```
+
+Include Carnivore2 RAM-mode (USB) with SCC+ emulation for SROM-uploaded Konami SCC ROMs, alongside scanned ROMs:
+
+```
+multirom.exe -c2 -sccplus
+```
+
+Include Sunrise IDE + mapper over USB with ESP-01 WiFi support, alongside scanned ROMs:
+
+```
+multirom.exe -m2 -w
 ```
 
 ## Flashing the UF2
@@ -145,13 +158,16 @@ Knight Mare.PLA-32.ROM
 | 14 | Manbow2 | `MANBW2` | Konami SCC banking + AM29F040B flash emulation |
 | 15 | Sunrise IDE (SD) | SYSTEM | Nextor 2.1.4 Sunrise IDE via microSD (`-s1`) |
 | 16 | Sunrise IDE + Mapper (SD) | SYSTEM | Nextor + 1MB PSRAM mapper via microSD (`-m1`) |
+| 17 | Carnivore2 (SD) | SYSTEM | Nextor + 1MB mapper + Carnivore2 RAM-mode emulation via microSD (`-c1`) |
+| 18 | Carnivore2 (USB) | SYSTEM | Nextor + 1MB mapper + Carnivore2 RAM-mode emulation via USB (`-c2`) |
 
 ## SCC / SCC+ emulation
 
 - ROMs detected or forced as `KonSCC` (mapper 3) or `MANBW2` (mapper 14) can have SCC/SCC+ sound emulation.
+- For Carnivore2 modes (`-c1` / `-c2`), the SCC flag applies to ROMs uploaded into the cartridge through the Carnivore2 SROM utility (`c2ramldr`) — the emulator listens to the standard Konami SCC / SCC+ register windows whenever an SCC-class ROM has been written to PSRAM.
 - Use `-scc` for standard SCC emulation or `-sccplus` for enhanced SCC+ mode.
 - The `-scc` and `-sccplus` flags are mutually exclusive.
-- The flags apply to all compatible ROMs in the image; non-SCC mapper types are unaffected.
+- The flags apply globally to the build; non-SCC mapper types ignore them.
 - Audio is output through the I2S DAC connected to the RP2350.
 
 ## Sunrise IDE Nextor
@@ -176,6 +192,17 @@ The Sunrise IDE options embed the Nextor 2.1.4 Sunrise IDE kernel ROM (128 KB) i
 - Mapper page registers (I/O ports FC–FF) are intercepted via PIO1.
 - A bootstrap ROM phase ensures a clean cold-boot before the expanded-slot mapper is activated.
 
+### Carnivore2 modes (`-c1`, `-c2`)
+
+- Builds on the `-m1` / `-m2` infrastructure and adds an emulation of the Carnivore2 RAM-mode cartridge so SROM utilities (`c2ramldr`, `bdosldr`, etc.) can upload Konami / ASCII / Sunrise-mapper ROMs into the cartridge's PSRAM and launch them.
+- Sub-slot layout matches the real Carnivore2 (`Sltsl_C` / `Sltsl_D` / `Sltsl_M`):
+  - Sub-slot 0: Carnivore2 register window + bank windows (1 MB SROM upload target).
+  - Sub-slot 1: Nextor 2.1.4 Sunrise IDE BIOS (USB or microSD backend, same as `-s1`/`-s2`).
+  - Sub-slot 2: 1 MB MSX memory mapper RAM (same as `-m1`/`-m2`).
+- Implements the Carnivore2 register block (`CardMDR`, `R1..R4` configs with `Mask/Addr/Reg/Mult/MaskR/AdrD`, `AddrFR`), the port `0xF0+PFXN` `'C'/'S'` handshake used by SROM, the AMD autoselect chip-ID probe (`M29W640GB`) used by `c2ramldr`, and the `CMFCCFRC` firmware signature overlay at `0x4010-0x4017`.
+- When `-scc` or `-sccplus` is added, the cartridge also emulates the Konami SCC / SCC+ register window so SROM-uploaded SCC-class ROMs play music. Audio is mixed by the same I2S path used by the regular `-scc` modes (PIO1 SM2 + auto-claimed DMA channel; service is polled from the storage Core 1 task loop so it does not block USB / SD I/O).
+- The 1 MB Carnivore2 RAM region is allocated from the same PSRAM bump allocator that backs the mapper RAM, so the cartridge needs the on-board PSRAM to be present and initialised. If allocation fails the firmware halts at the dispatch entry instead of booting.
+
 ## Menu usage (on MSX)
 
 - Up/Down: move selection.
@@ -191,7 +218,7 @@ SYSTEM entries (Sunrise IDE) appear alongside regular ROM entries and are select
 - Unsupported or invalid ROMs are skipped with a message.
 - Manbow2 save data is volatile (SRAM-backed, lost on power-off).
 - ASCII16-X flash write emulation is SRAM-backed (volatile).
-- The Sunrise options (`-s1`, `-m1`, `-s2`, `-m2`) can be combined — each adds its own menu entry.
+- The Sunrise options (`-s1`, `-m1`, `-s2`, `-m2`, `-c1`, `-c2`) can be combined — each adds its own menu entry.
 
 Author: Cristiano Almeida Goncalves
-Last updated: 04/21/2026
+Last updated: 04/26/2026

@@ -64,7 +64,9 @@ This scans the current directory and generates `explorer.uf2`.
 For the flash entries, the PC tool analyzes each ROM to determine the mapper. If you need to override it, add a mapper tag to the filename before `.ROM`. Tags are case-insensitive.
 
 Supported tags:
-`PL-16`, `PL-32`, `KonSCC`, `Linear`, `ASC-08`, `ASC-16`, `Konami`, `NEO-8`, `NEO-16`.
+`PL-16`, `PL-32`, `KonSCC`, `Linear`, `PL-64`, `ASC-08`, `ASC-16`, `Konami`, `NEO-8`, `NEO-16`, `ASC-16X`, `MANBW2`.
+
+Mapper detection on the Pico (for unknown SD ROMs) and on the PC tool both use a shared SHA-1 ROM database derived from openMSX's `softwaredb.xml`, falling back to heuristic scanning when the SHA-1 is not in the database.
 
 Example:
 
@@ -91,7 +93,7 @@ Explorer can load ROMs from a microSD card in addition to flash. ROMs on SD are 
 ### microSD limitations
 
 - The combined list is capped at 1024 entries per folder view (folders + ROMs + MP3s; the root view can also include flash entries).
-- microSD ROM files are limited to 256 KB each (this is temporary and only valid for the prototype versions, this limit will be lifted in future revisions).
+- microSD ROM files are limited to 2 MB each. ROMs are streamed into the cartridge's 8 MB external PSRAM (QMI CS1, 52.5 MHz QPI) and executed from there; the first 256 KB are mirrored into internal SRAM for fast mapper access. ROMs larger than 2 MB are skipped during enumeration.
 - Unsupported or invalid ROMs are skipped (same mapper and size rules as flash).
 
 ### Performance note: MSX Response Time
@@ -185,7 +187,7 @@ If a ROM mapper is unknown, the screen will briefly show "Detecting..." while th
 - **SCC**: Enables Konami SCC (standard) sound emulation. Use this for games that use the standard SCC chip with shared channel 4/5 waveforms (e.g., *Space Manbow*, *Salamander*, *Nemesis 2*, *Gradius 2*).
 - **SCC+**: Enables Konami SCC+ (enhanced/SCC-I) sound emulation. Use this for games or homebrew that require SCC+ features with independent channel 4/5 waveforms.
 
-The SCC and SCC+ audio profiles only work with ROMs using the Konami SCC mapper (KonSCC). For non-SCC mapper ROMs, the audio selection has no effect.
+The SCC and SCC+ audio profiles work with ROMs using the Konami SCC mapper (`KonSCC`) or the Manbow2 mapper (`MANBW2`). When a ROM is detected as `KonSCC` or `MANBW2`, the ROM screen pre-selects **SCC** in the Audio field; you can change it to None or SCC+ before pressing Run. For non-SCC / non-Manbow2 mappers the audio selection has no effect.
 
 ## SCC/SCC+ sound emulation
 

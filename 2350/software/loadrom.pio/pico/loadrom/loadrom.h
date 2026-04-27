@@ -85,6 +85,9 @@ typedef struct {
 #define WIFI_ROM_SIZE   16384u  // ESP8266P system ROM size appended after the Sunrise ROM payload
 
 // ESP-01 pins on the RP2350 WiFi hardware variant
+// Per the Waveshare CORE2350B PCB schematic:
+//   Pico GPIO38 -> net ESP01_UART_RX -> ESP-01 pin 7 (ESP RX)  => Pico UART TX
+//   Pico GPIO39 <- net ESP01_UART_TX <- ESP-01 pin 2 (ESP TX)  => Pico UART RX
 #define PIN_ESP_UART_TX 38
 #define PIN_ESP_UART_RX 39
 

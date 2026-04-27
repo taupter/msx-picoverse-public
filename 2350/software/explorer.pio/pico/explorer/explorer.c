@@ -19,9 +19,12 @@
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/structs/qmi.h"
+#include "hardware/regs/qmi.h"
+#include "hardware/structs/xip_ctrl.h"
 #include "hw_config.h"
 #include "explorer.h"
 #include "nextor.h"
+#include "mapper_detect.h"
 #include "mp3.h"
 #include "emu2212.h"
 #include "msx_bus.pio.h"
@@ -34,12 +37,20 @@
 #define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2)) // Name + mapper + size + offset
 #define MENU_ROM_SIZE   (32u * 1024u) // Full menu ROM size stored before config records
 #define MONITOR_ADDR    (0xBB01)    // Monitor ROM address within image
-#define CACHE_SIZE      (128u * 1024u)     // 128KB cache size for ROM data (SD ROM limit)
+#define CACHE_SIZE      (256u * 1024u)     // 256KB cache size for ROM data (also SD ROM upper limit)
 
 #define SOURCE_SD_FLAG  0x80 // Flag in the mapper byte indicating the ROM is on SD
 #define FOLDER_FLAG     0x40 // Flag in the mapper byte indicating the record is a folder
 #define MP3_FLAG        0x20 // Flag in the mapper byte indicating the record is an MP3 file
 #define OVERRIDE_FLAG   0x10 // Flag in the mapper byte indicating manual override
+
+// Temporarily disable the in-menu MP3 player. The MP3 stack is being
+// reworked into a dedicated MSX ROM (mp3player.rom) so the menu no
+// longer needs to coexist with Core 1 / I2S / SD streaming. While
+// that is not in place, MP3 files are skipped during SD enumeration
+// and Core 1 is never launched, leaving Explorer free to focus on
+// flash and SD ROM execution.
+#define EXPLORER_MP3_DISABLED 1
 
 #define FILES_PER_PAGE  19 // Maximum files per page on the menu
 #define CTRL_BASE_ADDR  0xBFF0 // Control registers base address
@@ -129,12 +140,22 @@ extern const uint8_t __flash_binary_end[];
 static uint8_t rom_sram[CACHE_SIZE];
 static uint32_t active_rom_size = 0;
 static uint32_t rom_cached_size = 0; // Added for PIO implementation
+// Effective cache capacity used by prepare_rom_source(). Some mappers (e.g.
+// Manbow2) reduce this so the tail of rom_sram can be repurposed (writable
+// flash sector emulation), matching multirom's behaviour.
+static uint32_t rom_cache_capacity = CACHE_SIZE;
 static uint8_t page_buffer[DATA_BUFFER_SIZE];
 
 // pointer to the custom data
 static const uint8_t *flash_rom = (const uint8_t *)&__flash_binary_end;
 static const uint8_t *rom_data = (const uint8_t *)&__flash_binary_end;
 static bool rom_data_in_ram = false;
+
+// External PSRAM region used to buffer SD-loaded ROMs. Defined later
+// alongside the PSRAM bring-up code; declared here for use by earlier
+// functions such as load_rom_from_sd().
+static psram_region_t sd_rom_region;
+static bool psram_bring_up_once(void);
 
 uint8_t ctr_val = 0xFF;    
 BYTE const pdrv = 0;  // Physical drive number
@@ -159,12 +180,13 @@ ROMRecord records[MAX_ROM_RECORDS]; // Array to store the ROM records
 #define SD_PATH_BUFFER_SIZE 19000
 #define MIN_ROM_SIZE       8192
 #define MAX_ROM_SIZE       (15u * 1024u * 1024u)
-#define MAX_ANALYSIS_SIZE  65536
+#define SD_ROM_MAX_SIZE    (2u * 1024u * 1024u) // PSRAM region capacity for SD-loaded ROMs
 #define MAPPER_SYSTEM      10
 
 static const char *MAPPER_DESCRIPTIONS[] = {
-    "PL-16", "PL-32", "KonSCC", "Linear", "ASC-08",
-    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM"
+    "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
+    "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM",
+    "SYSTEM", "ASC16X", "PLN-64", "MANBW2"
 };
 
 #define MAPPER_DESCRIPTION_COUNT (sizeof(MAPPER_DESCRIPTIONS) / sizeof(MAPPER_DESCRIPTIONS[0]))
@@ -626,112 +648,37 @@ static bool has_mp3_extension(const char *filename) {
     return equals_ignore_case(dot + 1, "MP3");
 }
 
-static uint8_t detect_rom_type_from_buffer(const uint8_t *rom, size_t size, size_t read_size) {
-    const char neo8_signature[] = "ROM_NEO8";
-    const char neo16_signature[] = "ROM_NE16";
+// FatFS-backed reader callback for the shared streaming detector.
+typedef struct {
+    FIL *fil;
+    uint32_t cur_offset; // current file pointer (best-effort cache to avoid redundant f_lseek)
+    bool failed;
+} fatfs_reader_ctx_t;
 
-    int konami_score = 0;
-    int konami_scc_score = 0;
-    int ascii8_score = 0;
-    int ascii16_score = 0;
-
-    const int KONAMI_WEIGHT = 2;
-    const int KONAMI_SCC_WEIGHT = 2;
-    const int ASCII8_WEIGHT_HIGH = 3;
-    const int ASCII8_WEIGHT_LOW = 1;
-    const int ASCII16_WEIGHT = 2;
-
-    if (size > MAX_ROM_SIZE || size < MIN_ROM_SIZE || read_size < 2) {
+static uint32_t fatfs_reader_cb(void *user, uint32_t offset, void *buf, uint32_t len) {
+    fatfs_reader_ctx_t *ctx = (fatfs_reader_ctx_t *)user;
+    if (ctx->failed || !ctx->fil) {
         return 0;
     }
-
-    if (rom[0] == 'A' && rom[1] == 'B' && size == 16384) {
-        return 1; // Plain 16KB
+    if (offset != ctx->cur_offset) {
+        if (f_lseek(ctx->fil, offset) != FR_OK) {
+            ctx->failed = true;
+            return 0;
+        }
+        ctx->cur_offset = offset;
     }
-
-    if (rom[0] == 'A' && rom[1] == 'B' && size <= 32768) {
-        if (read_size > 0x4001 && rom[0x4000] == 'A' && rom[0x4001] == 'B') {
-            return 4; // Linear0 32KB
-        }
-        return 2; // Plain 32KB
+    UINT br = 0;
+    if (f_read(ctx->fil, buf, (UINT)len, &br) != FR_OK) {
+        ctx->failed = true;
+        return 0;
     }
-
-    if (rom[0] == 'A' && rom[1] == 'B' && read_size > 16) {
-        if ((read_size >= 16 + sizeof(neo8_signature) - 1) &&
-            memcmp(&rom[16], neo8_signature, sizeof(neo8_signature) - 1) == 0) {
-            return 8; // NEO8
-        }
-        if ((read_size >= 16 + sizeof(neo16_signature) - 1) &&
-            memcmp(&rom[16], neo16_signature, sizeof(neo16_signature) - 1) == 0) {
-            return 9; // NEO16
-        }
-    }
-
-    if (read_size > 0x4001 && rom[0x4000] == 'A' && rom[0x4001] == 'B' && size <= 49152) {
-        return 4; // Linear0 48KB
-    }
-
-    if (size > 32768 && read_size > 3) {
-        for (size_t i = 0; i < read_size - 3; i++) {
-            if (rom[i] == 0x32) {
-                uint16_t addr = rom[i + 1] | (rom[i + 2] << 8);
-                switch (addr) {
-                    case 0x4000:
-                    case 0x8000:
-                    case 0xA000:
-                        konami_score += KONAMI_WEIGHT;
-                        break;
-                    case 0x5000:
-                    case 0x9000:
-                    case 0xB000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        break;
-                    case 0x6800:
-                    case 0x7800:
-                        ascii8_score += ASCII8_WEIGHT_HIGH;
-                        break;
-                    case 0x77FF:
-                        ascii16_score += ASCII16_WEIGHT;
-                        break;
-                    case 0x6000:
-                        konami_score += KONAMI_WEIGHT;
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
-                        break;
-                    case 0x7000:
-                        konami_scc_score += KONAMI_SCC_WEIGHT;
-                        ascii8_score += ASCII8_WEIGHT_LOW;
-                        ascii16_score += ASCII16_WEIGHT;
-                        break;
-                }
-            }
-        }
-
-        if (ascii8_score == 1) {
-            ascii8_score--;
-        }
-
-        if (konami_scc_score > konami_score && konami_scc_score > ascii8_score && konami_scc_score > ascii16_score) {
-            return 3; // Konami SCC
-        }
-        if (konami_score > konami_scc_score && konami_score > ascii8_score && konami_score > ascii16_score) {
-            return 7; // Konami
-        }
-        if (ascii8_score > konami_score && ascii8_score > konami_scc_score && ascii8_score > ascii16_score) {
-            return 5; // ASCII8
-        }
-        if (ascii16_score > konami_score && ascii16_score > konami_scc_score && ascii16_score > ascii8_score) {
-            return 6; // ASCII16
-        }
-        if (ascii16_score == konami_scc_score) {
-            return 6; // ASCII16
-        }
-    }
-
-    return 0;
+    ctx->cur_offset += br;
+    return (uint32_t)br;
 }
 
+// Stream a ROM file from the SD card through the shared mapper detector.
+// Uses the same SHA1 + heuristic algorithm as the PC tool so that the firmware
+// produces identical mapper guesses for ROMs executed straight from microSD.
 static uint8_t detect_rom_type_from_file(const char *path, uint32_t size) {
     if (size > MAX_ROM_SIZE || size < MIN_ROM_SIZE) {
         return 0;
@@ -743,22 +690,12 @@ static uint8_t detect_rom_type_from_file(const char *path, uint32_t size) {
         return 0;
     }
 
-    UINT br = 0;
-    size_t read_size = (size > MAX_ANALYSIS_SIZE) ? MAX_ANALYSIS_SIZE : size;
-    uint8_t *rom_analysis_buffer = (uint8_t *)malloc(read_size);
-    if (!rom_analysis_buffer) {
-        f_close(&fil);
-        return 0;
-    }
-    fr = f_read(&fil, rom_analysis_buffer, (UINT)read_size, &br);
+    fatfs_reader_ctx_t ctx = { .fil = &fil, .cur_offset = 0, .failed = false };
+    uint8_t mapper = mapper_detect_stream(size, fatfs_reader_cb, &ctx);
     f_close(&fil);
-    if (fr != FR_OK || br < read_size) {
-        free(rom_analysis_buffer);
+    if (ctx.failed) {
         return 0;
     }
-
-    uint8_t mapper = detect_rom_type_from_buffer(rom_analysis_buffer, size, read_size);
-    free(rom_analysis_buffer);
     return mapper;
 }
 
@@ -898,6 +835,10 @@ static void refresh_records_for_current_path(void) {
                 }
                 bool is_mp3 = has_mp3_extension(fno.fname);
                 bool is_rom = has_rom_extension(fno.fname);
+#if EXPLORER_MP3_DISABLED
+                // MP3 player temporarily disabled — skip MP3 entries.
+                if (is_mp3) continue;
+#endif
 
                 if (!is_mp3 && !is_rom) {
                     continue;
@@ -922,7 +863,7 @@ static void refresh_records_for_current_path(void) {
                 if (fno.fsize < MIN_ROM_SIZE || fno.fsize > MAX_ROM_SIZE) {
                     continue;
                 }
-                if (fno.fsize > CACHE_SIZE) {
+                if (fno.fsize > SD_ROM_MAX_SIZE) {
                     continue;
                 }
 
@@ -1053,6 +994,10 @@ static bool refresh_records_chunked(void) {
             if (fno.fattrib & AM_DIR) continue;
             bool is_mp3 = has_mp3_extension(fno.fname);
             bool is_rom = has_rom_extension(fno.fname);
+#if EXPLORER_MP3_DISABLED
+            // MP3 player temporarily disabled — skip MP3 entries.
+            if (is_mp3) continue;
+#endif
             if (!is_mp3 && !is_rom) continue;
 
             char path[SD_PATH_MAX];
@@ -1070,7 +1015,7 @@ static bool refresh_records_chunked(void) {
             }
 
             if (fno.fsize < MIN_ROM_SIZE || fno.fsize > MAX_ROM_SIZE) continue;
-            if (fno.fsize > CACHE_SIZE) continue;
+            if (fno.fsize > SD_ROM_MAX_SIZE) continue;
 
             uint8_t mapper = mapper_number_from_filename(fno.fname);
             refresh_record_index = add_sd_rom_record(refresh_record_index, path, fno.fname, (uint32_t)fno.fsize, mapper);
@@ -1227,12 +1172,35 @@ static uint16_t find_next_mp3_filtered_index(uint16_t current, uint8_t mode) {
     return 0xFFFF;
 }
 
-// Background work callback: runs on Core 1 between MP3 frames.
-// MP3 commands are always processed promptly. Directory refresh is chunked
-// so each invocation reads at most REFRESH_CHUNK_SIZE entries from SD,
-// then yields back to mp3_core1_loop() to decode audio frames.
+// Lazy non-blocking launch of Core 1 + MP3 stack. Called from
+// core1_bg_work() the first time the MSX dispatches an MP3 command.
+// We deliberately do NOT spin Core 0 waiting for Core 1 to finish
+// mp3_init() — Core 0 is servicing the MSX PIO bus and any block
+// here freezes the cartridge. The cross-core command queue is a
+// small ring buffer so SELECT and PLAY (issued ~10 ms apart) both
+// fit while Core 1 is still initialising.
+static bool mp3_core1_started = false;
+static void ensure_mp3_core1_started(void) {
+#if EXPLORER_MP3_DISABLED
+    // MP3 player disabled: never launch Core 1 from the menu, so the
+    // SD card stays single-owner on Core 0 with no risk of cross-core
+    // FatFS / I2S / DMA contention.
+    return;
+#else
+    if (mp3_core1_started) return;
+    mp3_core1_started = true;
+    multicore_launch_core1(mp3_core1_loop);
+#endif
+}
+
+// Background work pump. Runs on Core 0 from the menu loop idle branch
+// (no PIO traffic from the MSX). Single-core ownership of the SD card
+// avoids FatFS reentrancy issues and removes the freeze observed when
+// folder navigation raced with MP3 work on Core 1.
 static void core1_bg_work(void) {
-    // Always process MP3 commands promptly (even during directory refresh)
+    // Bridge MP3 commands queued by handle_menu_write_explorer() to the
+    // mp3.c command queue. Lazy-launch Core 1 the first time an MP3
+    // command actually arrives.
     if (mp3_pending_select) {
         uint16_t pending_index = mp3_pending_index;
         mp3_pending_select = false;
@@ -1243,6 +1211,7 @@ static void core1_bg_work(void) {
                 if ((rec->Mapper & MP3_FLAG) && (sd_path_offsets[record_index] != 0xFFFF)) {
                     const char *path = sd_path_buffer + sd_path_offsets[record_index];
                     printf("MP3: select path=%s size=%lu\n", path, (unsigned long)rec->Size);
+                    ensure_mp3_core1_started();
                     mp3_select_file(path, (uint32_t)rec->Size);
                     mp3_playing_filtered_index = pending_index;
                     update_mp3_now_playing(record_index);
@@ -1259,6 +1228,7 @@ static void core1_bg_work(void) {
     if (mp3_pending_cmd != 0) {
         uint8_t cmd = mp3_pending_cmd;
         mp3_pending_cmd = 0;
+        ensure_mp3_core1_started();
         mp3_send_cmd(cmd);
     }
 
@@ -1320,10 +1290,19 @@ static bool load_rom_from_sd(uint16_t record_index, uint32_t size) {
     if (!sd_mount_card()) {
         return false;
     }
-    if (record_index >= MAX_ROM_RECORDS || size > CACHE_SIZE) {
+    if (record_index >= MAX_ROM_RECORDS) {
         return false;
     }
     if (sd_path_offsets[record_index] == 0xFFFF) {
+        return false;
+    }
+
+    // SD ROMs are streamed into the 2MB PSRAM region so rom_sram remains
+    // available for flash-resident mapper caching. Bring PSRAM up lazily.
+    if (!psram_bring_up_once()) {
+        return false;
+    }
+    if (size > sd_rom_region.size) {
         return false;
     }
 
@@ -1339,13 +1318,14 @@ static bool load_rom_from_sd(uint16_t record_index, uint32_t size) {
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
     gpio_put(PIN_WAIT, 0);
 
-    memset(rom_sram, 0, size);
+    uint8_t *dst = sd_rom_region.ptr;
+    memset(dst, 0, size);
 
     UINT total = 0;
     while (total < size) {
         UINT to_read = (UINT)((size - total) > 4096 ? 4096 : (size - total));
         UINT br = 0;
-        fr = f_read(&fil, rom_sram + total, to_read, &br);
+        fr = f_read(&fil, dst + total, to_read, &br);
         if (fr != FR_OK || br == 0) {
             break;
         }
@@ -1407,6 +1387,146 @@ int __no_inline_not_in_flash_func(isEndOfData)(const unsigned char *memory) {
     return 1;
 }
 
+// -----------------------------------------------------------------------
+// External PSRAM (QMI CS1) - hardware init + bump allocator.
+// Mirrors the implementation in multirom so the same code paths work
+// across the two firmwares. Used for SD-cached ROM storage so that
+// rom_sram remains fully available for flash-resident mapper caching.
+// -----------------------------------------------------------------------
+static inline void __not_in_flash_func(psram_delay_cycles)(uint32_t cycles)
+{
+    for (volatile uint32_t cycle = 0; cycle < cycles; ++cycle)
+    {
+        __asm volatile ("nop");
+    }
+}
+
+static inline void __not_in_flash_func(psram_wait_direct_done)(void)
+{
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_TXEMPTY_BITS) == 0) { }
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) != 0) { }
+}
+
+static inline void __not_in_flash_func(psram_send_direct_cmd)(uint8_t cmd, bool quad_width)
+{
+    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    if (quad_width)
+    {
+        qmi_hw->direct_tx = QMI_DIRECT_TX_OE_BITS |
+                            (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB) |
+                            cmd;
+    }
+    else
+    {
+        qmi_hw->direct_tx = cmd;
+    }
+    psram_wait_direct_done();
+    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    (void)qmi_hw->direct_rx;
+}
+
+static bool __no_inline_not_in_flash_func(psram_init)(void)
+{
+    gpio_set_function(PIN_PSRAM, GPIO_FUNC_XIP_CS1);
+
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    qmi_hw->direct_csr = (30u << QMI_DIRECT_CSR_CLKDIV_LSB) | QMI_DIRECT_CSR_EN_BITS;
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) != 0) { }
+
+    // Warm restart path: if PSRAM remained powered it may still be in QPI mode.
+    psram_send_direct_cmd(0xF5u, true);
+    psram_delay_cycles(128u);
+
+    psram_send_direct_cmd(0x66u, false);
+    psram_delay_cycles(128u);
+    psram_send_direct_cmd(0x99u, false);
+    psram_delay_cycles(50000u);
+    psram_send_direct_cmd(0x35u, false);
+    psram_delay_cycles(128u);
+    psram_send_direct_cmd(0xC0u, false);
+    psram_delay_cycles(128u);
+
+    qmi_hw->direct_csr &= ~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS);
+
+    // PSRAM QMI timing - tuned for 210 MHz system clock (CLKDIV=2 -> ~52.5 MHz).
+    qmi_hw->m[1].timing =
+        (QMI_M0_TIMING_PAGEBREAK_VALUE_1024 << QMI_M0_TIMING_PAGEBREAK_LSB) |
+        (1u << QMI_M0_TIMING_SELECT_HOLD_LSB) |
+        (1u << QMI_M0_TIMING_COOLDOWN_LSB) |
+        (2u << QMI_M0_TIMING_RXDELAY_LSB) |
+        (26u << QMI_M0_TIMING_MAX_SELECT_LSB) |
+        (5u << QMI_M0_TIMING_MIN_DESELECT_LSB) |
+        (2u << QMI_M0_TIMING_CLKDIV_LSB);
+    qmi_hw->m[1].rfmt =
+        (QMI_M0_RFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_PREFIX_WIDTH_LSB) |
+        (QMI_M0_RFMT_ADDR_WIDTH_VALUE_Q << QMI_M0_RFMT_ADDR_WIDTH_LSB) |
+        (QMI_M0_RFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_SUFFIX_WIDTH_LSB) |
+        (QMI_M0_RFMT_DUMMY_WIDTH_VALUE_Q << QMI_M0_RFMT_DUMMY_WIDTH_LSB) |
+        (QMI_M0_RFMT_DUMMY_LEN_VALUE_24 << QMI_M0_RFMT_DUMMY_LEN_LSB) |
+        (QMI_M0_RFMT_DATA_WIDTH_VALUE_Q << QMI_M0_RFMT_DATA_WIDTH_LSB) |
+        (QMI_M0_RFMT_PREFIX_LEN_VALUE_8 << QMI_M0_RFMT_PREFIX_LEN_LSB) |
+        (QMI_M0_RFMT_SUFFIX_LEN_VALUE_NONE << QMI_M0_RFMT_SUFFIX_LEN_LSB);
+    qmi_hw->m[1].rcmd = (0xEBu << QMI_M0_RCMD_PREFIX_LSB);
+    qmi_hw->m[1].wfmt =
+        (QMI_M0_WFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_WFMT_PREFIX_WIDTH_LSB) |
+        (QMI_M0_WFMT_ADDR_WIDTH_VALUE_Q << QMI_M0_WFMT_ADDR_WIDTH_LSB) |
+        (QMI_M0_WFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M0_WFMT_SUFFIX_WIDTH_LSB) |
+        (QMI_M0_WFMT_DUMMY_WIDTH_VALUE_Q << QMI_M0_WFMT_DUMMY_WIDTH_LSB) |
+        (QMI_M0_WFMT_DUMMY_LEN_VALUE_NONE << QMI_M0_WFMT_DUMMY_LEN_LSB) |
+        (QMI_M0_WFMT_DATA_WIDTH_VALUE_Q << QMI_M0_WFMT_DATA_WIDTH_LSB) |
+        (QMI_M0_WFMT_PREFIX_LEN_VALUE_8 << QMI_M0_WFMT_PREFIX_LEN_LSB) |
+        (QMI_M0_WFMT_SUFFIX_LEN_VALUE_NONE << QMI_M0_WFMT_SUFFIX_LEN_LSB);
+    qmi_hw->m[1].wcmd = (0x38u << QMI_M0_WCMD_PREFIX_LSB);
+
+    xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+
+    restore_interrupts(irq_state);
+
+    // Verify PSRAM via uncached window (bypass XIP cache).
+    volatile uint32_t *psram_test = (volatile uint32_t *)0x15000000u;
+    psram_test[0] = 0x12345678u;
+    return psram_test[0] == 0x12345678u;
+}
+
+// -----------------------------------------------------------------------
+// PSRAM Memory Manager - bump allocator for 8MB external PSRAM.
+// -----------------------------------------------------------------------
+static struct {
+    uint32_t next_free;
+    bool initialised;
+} psram_mgr;
+
+static void psram_mem_init(void)
+{
+    psram_mgr.next_free = 0;
+    memset(&sd_rom_region, 0, sizeof(sd_rom_region));
+}
+
+static bool psram_alloc(uint32_t size, psram_region_t *region)
+{
+    if (psram_mgr.next_free + size > PSRAM_TOTAL_SIZE)
+        return false;
+    region->offset = psram_mgr.next_free;
+    region->size   = size;
+    region->ptr    = (uint8_t *)(PSRAM_BASE_ADDR + psram_mgr.next_free);
+    psram_mgr.next_free += size;
+    return true;
+}
+
+// One-time PSRAM bring-up + region carve-out. Idempotent. Returns false if
+// the hardware probe fails or any allocation cannot be satisfied.
+static bool psram_bring_up_once(void)
+{
+    if (psram_mgr.initialised) return true;
+    if (!psram_init()) return false;
+    psram_mem_init();
+    // 2MB region for SD-loaded ROMs (covers 99% of MSX ROMs).
+    if (!psram_alloc(2u * 1024u * 1024u, &sd_rom_region)) return false;
+    psram_mgr.initialised = true;
+    return true;
+}
+
 static inline void __not_in_flash_func(prepare_rom_source)(
     uint32_t offset,
     bool cache_enable,
@@ -1417,45 +1537,37 @@ static inline void __not_in_flash_func(prepare_rom_source)(
     const uint8_t *rom_base = rom_data + offset;
     uint32_t available_length = active_rom_size;
 
-    // Special case for SD loaded ROMs where offset is 0 and base is already SRAM
-    if (rom_data_in_ram) {
-           rom_base = rom_sram;
-           // If we are already in RAM, we don't need to re-cache if cache_enable is true
-           // But we still set rom_cached_size for read_rom_byte check
-           if (cache_enable) {
-                rom_cached_size = available_length;
-           } else {
-                rom_cached_size = 0;
-           }
-    } else {
-        if (preferred_size != 0u && (available_length == 0u || available_length > preferred_size))
-        {
-            available_length = preferred_size;
-        }
+    // For SD-loaded ROMs rom_data points at PSRAM (sd_rom_region.ptr) with
+    // offset 0; for flash-resident ROMs it points at QSPI flash. In both
+    // cases we copy the leading rom_cache_capacity bytes into rom_sram for
+    // fast access, leaving the tail to be served from the source via XIP.
+    if (preferred_size != 0u && (available_length == 0u || available_length > preferred_size))
+    {
+        available_length = preferred_size;
+    }
 
-        if (cache_enable && available_length > 0u)
-        {
-            uint32_t bytes_to_cache = (available_length > sizeof(rom_sram))
-                                    ? sizeof(rom_sram)
-                                    : available_length;
+    if (cache_enable && available_length > 0u)
+    {
+        uint32_t cap = rom_cache_capacity;
+        if (cap > sizeof(rom_sram)) cap = sizeof(rom_sram);
+        uint32_t bytes_to_cache = (available_length > cap) ? cap : available_length;
 
-            gpio_init(PIN_WAIT);
-            gpio_set_dir(PIN_WAIT, GPIO_OUT);
-            gpio_put(PIN_WAIT, 0);
-            memcpy(rom_sram, rom_base, bytes_to_cache);
-            gpio_put(PIN_WAIT, 1);
+        gpio_init(PIN_WAIT);
+        gpio_set_dir(PIN_WAIT, GPIO_OUT);
+        gpio_put(PIN_WAIT, 0);
+        memcpy(rom_sram, rom_base, bytes_to_cache);
+        gpio_put(PIN_WAIT, 1);
 
-            rom_cached_size = bytes_to_cache;
-            // If we cached everything, we can just point to SRAM
-            if (active_rom_size <= sizeof(rom_sram))
-            {
-                rom_base = rom_sram;
-            }
-        }
-        else
+        rom_cached_size = bytes_to_cache;
+        // If we cached everything, we can just point to SRAM
+        if (active_rom_size <= cap)
         {
-            rom_cached_size = 0;
+            rom_base = rom_sram;
         }
+    }
+    else
+    {
+        rom_cached_size = 0;
     }
 
     *rom_base_out = rom_base;
@@ -1849,11 +1961,14 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
     set_root_path();
     refresh_records_for_current_path();
 
-    if (!refresh_worker_started) {
-        refresh_worker_started = true;
-        mp3_set_bg_callback(core1_bg_work);
-        multicore_launch_core1(mp3_core1_loop);
-    }
+    // Core 1 is intentionally NOT launched here. Folder navigation,
+    // mapper detection, and SD enumeration all run on Core 0 from the
+    // menu loop's idle branch, so the SD card has a single owner and
+    // Core 1 cannot contend on shared buses. Core 1 is lazy-started
+    // by ensure_mp3_core1_started() the first time an MP3 command is
+    // dispatched. The cross-core command queue is a small FIFO so
+    // SELECT+PLAY (issued ~10 ms apart by the menu) both fit while
+    // mp3_init() is still running on Core 1.
 
     uint8_t rom_index = 0;
     gpio_set_dir_in_masked(0xFF << 16); // Set data bus to input mode
@@ -1877,6 +1992,10 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
             {
                 return menu_ctx.rom_index;
             }
+            // Background work runs on Core 0 during MSX bus idle: chunked
+            // SD directory refresh, mapper detection, and bridging MP3
+            // commands to Core 1 (lazy-launched on first MP3 command).
+            core1_bg_work();
             tight_loop_contents();
             continue;
         }
@@ -2685,12 +2804,664 @@ void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset)
     }
 }
 
+// -----------------------------------------------------------------------
+// Bank cache infrastructure for mapper-aware LRU caching
+// Used by ASCII16-X to handle ROMs larger than the 128KB rom_sram cache.
+// -----------------------------------------------------------------------
+#define BANK_CACHE_MAX_SLOTS 16
+#define BANK_CACHE_MAX_PINS   6
+#define BANK_EMPTY           0xFFFFu
+
+typedef struct {
+    uint16_t      slot_bank[BANK_CACHE_MAX_SLOTS];
+    uint8_t       slot_lru[BANK_CACHE_MAX_SLOTS];
+    int8_t        page_slot[BANK_CACHE_MAX_PINS];
+    const uint8_t *flash_base;
+    uint32_t      rom_length;
+    uint8_t       num_slots;
+    uint8_t       num_pins;
+    uint16_t      slot_size;
+    uint8_t       slot_shift;
+} bank_cache_t;
+
+static inline void __not_in_flash_func(bcache_init)(
+    bank_cache_t *c, uint16_t slot_size, uint8_t num_pins,
+    const uint8_t *flash_base, uint32_t rom_length)
+{
+    uint8_t num_slots = (uint8_t)(CACHE_SIZE / slot_size);
+    if (num_slots > BANK_CACHE_MAX_SLOTS) num_slots = BANK_CACHE_MAX_SLOTS;
+    c->num_slots  = num_slots;
+    c->num_pins   = num_pins;
+    c->slot_size  = slot_size;
+    c->slot_shift = (slot_size == 8192u) ? 13 : 14;
+    c->flash_base = flash_base;
+    c->rom_length = rom_length;
+    for (int i = 0; i < BANK_CACHE_MAX_SLOTS; i++)
+    {
+        c->slot_bank[i] = BANK_EMPTY;
+        c->slot_lru[i]  = (uint8_t)i;
+    }
+    for (int i = 0; i < BANK_CACHE_MAX_PINS; i++)
+        c->page_slot[i] = -1;
+}
+
+static inline void __not_in_flash_func(bcache_touch)(bank_cache_t *c, int8_t slot)
+{
+    uint8_t prev = c->slot_lru[slot];
+    if (prev == 0) return;
+    uint8_t n = c->num_slots;
+    for (uint8_t i = 0; i < n; i++)
+        if (c->slot_lru[i] < prev) c->slot_lru[i]++;
+    c->slot_lru[slot] = 0;
+}
+
+static inline int8_t __not_in_flash_func(bcache_find)(bank_cache_t *c, uint16_t bank)
+{
+    uint8_t n = c->num_slots;
+    for (uint8_t i = 0; i < n; i++)
+        if (c->slot_bank[i] == bank) return (int8_t)i;
+    return -1;
+}
+
+static inline int8_t __not_in_flash_func(bcache_evict)(bank_cache_t *c)
+{
+    int8_t best = -1;
+    uint8_t best_lru = 0;
+    uint8_t n = c->num_slots;
+    uint8_t np = c->num_pins;
+    for (uint8_t i = 0; i < n; i++)
+    {
+        bool pinned = false;
+        for (uint8_t p = 0; p < np; p++)
+            if ((int8_t)i == c->page_slot[p]) { pinned = true; break; }
+        if (pinned) continue;
+        if (best < 0 || c->slot_lru[i] >= best_lru)
+        {
+            best = (int8_t)i;
+            best_lru = c->slot_lru[i];
+        }
+    }
+    return best;
+}
+
+static inline int8_t __not_in_flash_func(bcache_ensure)(bank_cache_t *c, uint16_t bank)
+{
+    if (c->rom_length > 0u)
+    {
+        uint16_t total_banks = (uint16_t)(c->rom_length >> c->slot_shift);
+        if (total_banks > 0u)
+            bank = bank % total_banks;
+    }
+
+    int8_t slot = bcache_find(c, bank);
+    if (slot >= 0) { bcache_touch(c, slot); return slot; }
+
+    slot = bcache_evict(c);
+    uint32_t src_off = (uint32_t)(bank & 0x0FFFu) << c->slot_shift;
+    uint8_t *dst = &rom_sram[(uint32_t)slot * c->slot_size];
+    uint16_t ss = c->slot_size;
+
+    if (c->rom_length == 0u || src_off < c->rom_length)
+    {
+        uint32_t n = ss;
+        if (c->rom_length > 0u && src_off + n > c->rom_length)
+            n = c->rom_length - src_off;
+        memcpy(dst, c->flash_base + src_off, n);
+        if (n < ss) memset(dst + n, 0xFFu, ss - n);
+    }
+    else
+    {
+        memset(dst, 0xFFu, ss);
+    }
+
+    c->slot_bank[slot] = bank;
+    bcache_touch(c, slot);
+    return slot;
+}
+
+static inline void __not_in_flash_func(bcache_prefill)(bank_cache_t *c)
+{
+    uint16_t max_banks = c->num_slots;
+    if (c->rom_length > 0u)
+    {
+        uint16_t rom_banks = (uint16_t)((c->rom_length + c->slot_size - 1u) / c->slot_size);
+        if (rom_banks < max_banks) max_banks = rom_banks;
+    }
+    for (uint16_t b = 0; b < max_banks; b++)
+        bcache_ensure(c, b);
+}
+
+// -----------------------------------------------------------------------
+// ASCII16-X mapper (Padial) - 16KB banks at 0x4000-0x7FFF / 0x8000-0xBFFF
+// with extended addressing (12-bit bank number) and AMD-compatible flash
+// command emulation (program/erase) on the cached SRAM banks.
+// Bank-switch writes use Konami-like layout but the high nibble of the
+// register address is OR'd into the bank number to allow >256 banks.
+// -----------------------------------------------------------------------
+typedef enum {
+    FLASH_IDLE = 0,
+    FLASH_UNLOCK1,
+    FLASH_UNLOCK2,
+    FLASH_BYTE_PGM,
+    FLASH_ERASE_SETUP,
+    FLASH_ERASE_UNLOCK1,
+    FLASH_ERASE_UNLOCK2,
+} flash_cmd_state_t;
+
+typedef struct {
+    uint16_t          bank_regs[2];
+    bank_cache_t      cache;
+    flash_cmd_state_t flash_state;
+} ascii16x_state_t;
+
+static inline void __not_in_flash_func(flash_process_write)(
+    ascii16x_state_t *st, uint16_t addr, uint8_t data)
+{
+    uint16_t cmd_addr = addr & 0x0FFFu;
+
+    switch (st->flash_state)
+    {
+        case FLASH_IDLE:
+            if (cmd_addr == 0x0AAAu && data == 0xAAu)
+                st->flash_state = FLASH_UNLOCK1;
+            else if (data == 0xF0u)
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_UNLOCK1:
+            if (cmd_addr == 0x0555u && data == 0x55u)
+                st->flash_state = FLASH_UNLOCK2;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_UNLOCK2:
+            if (cmd_addr == 0x0AAAu)
+            {
+                switch (data)
+                {
+                    case 0xA0u: st->flash_state = FLASH_BYTE_PGM;    break;
+                    case 0x80u: st->flash_state = FLASH_ERASE_SETUP;  break;
+                    default:    st->flash_state = FLASH_IDLE;         break;
+                }
+            }
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_BYTE_PGM:
+        {
+            uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+            int8_t slot = st->cache.page_slot[page_idx];
+            if (slot >= 0)
+            {
+                uint32_t off = (uint32_t)slot * st->cache.slot_size + (addr & 0x3FFFu);
+                rom_sram[off] &= data;
+            }
+            st->flash_state = FLASH_IDLE;
+            break;
+        }
+        case FLASH_ERASE_SETUP:
+            if (cmd_addr == 0x0AAAu && data == 0xAAu)
+                st->flash_state = FLASH_ERASE_UNLOCK1;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_ERASE_UNLOCK1:
+            if (cmd_addr == 0x0555u && data == 0x55u)
+                st->flash_state = FLASH_ERASE_UNLOCK2;
+            else
+                st->flash_state = FLASH_IDLE;
+            break;
+        case FLASH_ERASE_UNLOCK2:
+            if (data == 0x30u)
+            {
+                uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+                int8_t slot = st->cache.page_slot[page_idx];
+                if (slot >= 0)
+                    memset(&rom_sram[(uint32_t)slot * st->cache.slot_size], 0xFFu, st->cache.slot_size);
+            }
+            st->flash_state = FLASH_IDLE;
+            break;
+    }
+}
+
+static inline void __not_in_flash_func(handle_ascii16x_write_cached)(uint16_t addr, uint8_t data, void *ctx)
+{
+    ascii16x_state_t *st = (ascii16x_state_t *)ctx;
+    flash_process_write(st, addr, data);
+
+    uint8_t high_nibble = (uint8_t)((addr >> 8) & 0x0Fu);
+    uint16_t bank = ((uint16_t)high_nibble << 8) | data;
+    uint8_t page;
+
+    switch (addr & 0xF000u)
+    {
+        case 0x2000u: case 0x6000u: case 0xA000u: case 0xE000u: page = 0; break;
+        case 0x3000u: case 0x7000u: case 0xB000u: case 0xF000u: page = 1; break;
+        default: return;
+    }
+
+    st->bank_regs[page] = bank;
+    st->cache.page_slot[page] = bcache_ensure(&st->cache, bank);
+}
+
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable)
+{
+    (void)cache_enable;
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    // Don't preload via prepare_rom_source — bcache manages SRAM directly.
+    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+
+    ascii16x_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    bcache_init(&state.cache, 16384u, 2, rom_data + offset, active_rom_size);
+    bcache_prefill(&state.cache);
+
+    // Initial bank 0 visible at both windows.
+    state.cache.page_slot[0] = bcache_find(&state.cache, 0);
+    state.cache.page_slot[1] = state.cache.page_slot[0];
+
+    // bcache reads from rom_sram via slot index, bypassing read_rom_byte.
+    rom_cached_size = 0;
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        pio_drain_writes(handle_ascii16x_write_cached, &state);
+
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        pio_drain_writes(handle_ascii16x_write_cached, &state);
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t page_idx = ((addr >> 14) & 0x01u) ? 0u : 1u;
+            int8_t slot = state.cache.page_slot[page_idx];
+            if (slot >= 0)
+                data = rom_sram[(uint32_t)slot * state.cache.slot_size + (addr & 0x3FFFu)];
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// loadrom_planar64 - 64KB Planar ROM (no mapper)
+// Linear 64KB ROM mapped at 0x0000-0xFFFF (typical MSX2 boot games like
+// Game Master 2). AB header is at 0x4000.
+// -----------------------------------------------------------------------
+void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 65536u, &rom_base, &available_length);
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        bool in_window = true; // 64KB linear: drive all reads
+        uint8_t data = 0xFFu;
+        if (available_length == 0u || addr < available_length)
+            data = read_rom_byte(rom_base, addr);
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// -----------------------------------------------------------------------
+// Manbow2 mapper - Konami SCC banking + AMD AM29F040B flash emulation
+// 8KB banks at 0x4000-0x5FFF / 0x6000-0x7FFF / 0x8000-0x9FFF / 0xA000-0xBFFF.
+// Bank-switch writes land at 0x?000-0x?7FF for each page (Konami SCC layout).
+// The last 64KB of the ROM (flash offset 0x70000-0x7FFFF) is treated as a
+// writable sector emulating the AMD AM29F040B flash chip used by Manbow2 to
+// persist save data via the standard JEDEC unlock+program/erase sequence.
+// -----------------------------------------------------------------------
+enum manbow2_flash_state {
+    MBW2_READ = 0,
+    MBW2_CMD1,
+    MBW2_CMD2,
+    MBW2_AUTOSELECT,
+    MBW2_PROGRAM,
+    MBW2_ERASE_CMD1,
+    MBW2_ERASE_CMD2,
+    MBW2_ERASE_CMD3
+};
+
+typedef struct {
+    uint8_t bank_regs[4];
+    enum manbow2_flash_state state;
+    uint8_t *writable_sram;
+    uint32_t writable_offset;
+    uint32_t writable_size;
+} manbow2_ctx_t;
+
+static inline void __not_in_flash_func(handle_manbow2_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    manbow2_ctx_t *mb = (manbow2_ctx_t *)ctx;
+
+    if (addr < 0x4000u || addr > 0xBFFFu)
+        return;
+
+    uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+    uint32_t flash_addr = (uint32_t)mb->bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+    // Konami SCC-style bank latches at 0x?000-0x?7FF of each 8KB page.
+    if ((addr & 0x1800u) == 0x1000u)
+        mb->bank_regs[page] = data & 0x3Fu;
+
+    // AMD reset
+    if (data == 0xF0u)
+    {
+        mb->state = MBW2_READ;
+        return;
+    }
+
+    switch (mb->state)
+    {
+        case MBW2_READ:
+            if ((flash_addr & 0x7FFu) == 0x555u && data == 0xAAu)
+                mb->state = MBW2_CMD1;
+            break;
+        case MBW2_CMD1:
+            if ((flash_addr & 0x7FFu) == 0x2AAu && data == 0x55u)
+                mb->state = MBW2_CMD2;
+            else
+                mb->state = MBW2_READ;
+            break;
+        case MBW2_CMD2:
+            if      (data == 0xA0u) mb->state = MBW2_PROGRAM;
+            else if (data == 0x90u) mb->state = MBW2_AUTOSELECT;
+            else if (data == 0x80u) mb->state = MBW2_ERASE_CMD1;
+            else                     mb->state = MBW2_READ;
+            break;
+        case MBW2_PROGRAM:
+            if (flash_addr >= mb->writable_offset &&
+                flash_addr <  mb->writable_offset + mb->writable_size)
+            {
+                uint32_t sram_off = flash_addr - mb->writable_offset;
+                mb->writable_sram[sram_off] &= data;
+            }
+            mb->state = MBW2_READ;
+            break;
+        case MBW2_ERASE_CMD1:
+            if ((flash_addr & 0x7FFu) == 0x555u && data == 0xAAu)
+                mb->state = MBW2_ERASE_CMD2;
+            else
+                mb->state = MBW2_READ;
+            break;
+        case MBW2_ERASE_CMD2:
+            if ((flash_addr & 0x7FFu) == 0x2AAu && data == 0x55u)
+                mb->state = MBW2_ERASE_CMD3;
+            else
+                mb->state = MBW2_READ;
+            break;
+        case MBW2_ERASE_CMD3:
+            if (data == 0x30u)
+            {
+                if (flash_addr >= mb->writable_offset &&
+                    flash_addr <  mb->writable_offset + mb->writable_size)
+                    memset(mb->writable_sram, 0xFF, mb->writable_size);
+            }
+            mb->state = MBW2_READ;
+            break;
+        case MBW2_AUTOSELECT:
+            break;
+    }
+}
+
+// Common Manbow2 setup: caches the first (CACHE_SIZE - writable_size) bytes of
+// the ROM into rom_sram (mirrors multirom's strategy) and reserves the tail of
+// rom_sram for the emulated 64KB writable AMD flash sector. Returns rom_base /
+// writable_sram / available_length to the caller.
+static inline void __not_in_flash_func(loadrom_manbow2_setup)(
+    uint32_t offset,
+    const uint8_t **rom_base_out,
+    uint32_t *available_length_out,
+    uint8_t **writable_sram_out,
+    uint32_t writable_offset,
+    uint32_t writable_size)
+{
+    uint32_t reduced_cache = CACHE_SIZE - writable_size;
+
+    // Limit prepare_rom_source's caching to `reduced_cache` so the tail of
+    // rom_sram is left untouched for the writable flash sector.
+    rom_cache_capacity = reduced_cache;
+    prepare_rom_source(offset, true, 0u, rom_base_out, available_length_out);
+    rom_cache_capacity = CACHE_SIZE; // restore default for next ROM type
+
+    uint8_t *writable_sram = &rom_sram[reduced_cache];
+
+    // Seed the writable AMD flash sector mirror from the ROM payload.
+    // rom_data points to flash for flash-resident ROMs and to PSRAM for
+    // SD-resident ROMs, so a single source path works for both.
+    {
+        const uint8_t *src = rom_data + offset;
+
+        if (*available_length_out >= writable_offset + writable_size)
+        {
+            memcpy(writable_sram, src + writable_offset, writable_size);
+        }
+        else if (*available_length_out > writable_offset)
+        {
+            uint32_t partial = *available_length_out - writable_offset;
+            memcpy(writable_sram, src + writable_offset, partial);
+            memset(writable_sram + partial, 0xFF, writable_size - partial);
+        }
+        else
+        {
+            memset(writable_sram, 0xFF, writable_size);
+        }
+    }
+
+    *writable_sram_out = writable_sram;
+}
+
+// loadrom_manbow2 - Manbow2 (Konami SCC-banked + AMD flash) without SCC audio
+void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable)
+{
+    (void)cache_enable;
+
+    static const uint32_t WRITABLE_SECTOR_SIZE   = 0x10000u;  // 64KB
+    static const uint32_t WRITABLE_SECTOR_OFFSET = 0x70000u;  // 448KB
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    uint8_t *writable_sram;
+    loadrom_manbow2_setup(offset, &rom_base, &available_length, &writable_sram,
+                           WRITABLE_SECTOR_OFFSET, WRITABLE_SECTOR_SIZE);
+
+    manbow2_ctx_t mb = {
+        .bank_regs       = {0, 1, 2, 3},
+        .state           = MBW2_READ,
+        .writable_sram   = writable_sram,
+        .writable_offset = WRITABLE_SECTOR_OFFSET,
+        .writable_size   = WRITABLE_SECTOR_SIZE,
+    };
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        // Busy-poll write FIFO + read FIFO together. Manbow2's AMD flash
+        // command sequences burst multiple writes (0x555=0xAA, 0x2AA=0x55,
+        // 0xA0/0x80, then data) without intervening reads — using a blocking
+        // read here would let the write FIFO overflow and stall the bus.
+        uint16_t addr;
+        while (true)
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+                handle_manbow2_write(waddr, wdata, &mb);
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        { uint16_t waddr; uint8_t wdata;
+          while (pio_try_get_write(&waddr, &wdata))
+              handle_manbow2_write(waddr, wdata, &mb); }
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+            uint32_t rel = (uint32_t)mb.bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+            if (mb.state == MBW2_AUTOSELECT)
+            {
+                // AM29F040B device IDs (manufacturer 0x01 AMD, device 0xA4)
+                uint32_t id_addr = rel & 0x03u;
+                if      (id_addr == 0x00u) data = 0x01u;
+                else if (id_addr == 0x01u) data = 0xA4u;
+                else if (id_addr == 0x02u)
+                    data = (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size) ? 0x00u : 0x01u;
+                else                       data = 0x00u;
+            }
+            else
+            {
+                if (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size)
+                    data = writable_sram[rel - mb.writable_offset];
+                else if (available_length == 0u || rel < available_length)
+                    data = read_rom_byte(rom_base, rel); // SRAM cache up to rom_cached_size, then flash
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+// loadrom_manbow2_scc - Manbow2 mapper with SCC/SCC+ audio emulation
+void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type)
+{
+    (void)cache_enable;
+
+    static const uint32_t WRITABLE_SECTOR_SIZE   = 0x10000u;
+    static const uint32_t WRITABLE_SECTOR_OFFSET = 0x70000u;
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    uint8_t *writable_sram;
+    loadrom_manbow2_setup(offset, &rom_base, &available_length, &writable_sram,
+                           WRITABLE_SECTOR_OFFSET, WRITABLE_SECTOR_SIZE);
+
+    manbow2_ctx_t mb = {
+        .bank_regs       = {0, 1, 2, 3},
+        .state           = MBW2_READ,
+        .writable_sram   = writable_sram,
+        .writable_offset = WRITABLE_SECTOR_OFFSET,
+        .writable_size   = WRITABLE_SECTOR_SIZE,
+    };
+
+    // Hold WAIT to freeze Z80 during audio subsystem init.
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    memset(&scc_instance, 0, sizeof(SCC));
+    scc_instance.clk  = SCC_CLOCK;
+    scc_instance.rate = SCC_SAMPLE_RATE;
+    SCC_set_quality(&scc_instance, 1);
+    scc_instance.type = scc_type;
+    SCC_reset(&scc_instance);
+
+    i2s_audio_init_scc();
+    multicore_launch_core1(core1_scc_audio);
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        // Busy-poll write FIFO + read FIFO together (see loadrom_manbow2 for
+        // rationale — AMD flash command sequences burst writes without reads).
+        uint16_t addr;
+        while (true)
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                handle_manbow2_write(waddr, wdata, &mb);
+                SCC_write(&scc_instance, waddr, wdata);
+            }
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        { uint16_t waddr; uint8_t wdata;
+          while (pio_try_get_write(&waddr, &wdata))
+          {
+              handle_manbow2_write(waddr, wdata, &mb);
+              SCC_write(&scc_instance, waddr, wdata);
+          } }
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            // SCC register read window
+            bool is_scc_read = false;
+            if (scc_instance.active)
+            {
+                uint32_t scc_reg_start = scc_instance.base_adr + 0x800u;
+                if (addr >= scc_reg_start && addr <= (scc_reg_start + 0xFFu))
+                    is_scc_read = true;
+            }
+            if (scc_type == SCC_ENHANCED && (addr & 0xFFFEu) == 0xBFFEu)
+                is_scc_read = true;
+
+            if (is_scc_read)
+            {
+                data = (uint8_t)SCC_read(&scc_instance, addr);
+            }
+            else
+            {
+                uint8_t page = (uint8_t)((addr - 0x4000u) >> 13);
+                uint32_t rel = (uint32_t)mb.bank_regs[page] * 0x2000u + (addr & 0x1FFFu);
+
+                if (mb.state == MBW2_AUTOSELECT)
+                {
+                    uint32_t id_addr = rel & 0x03u;
+                    if      (id_addr == 0x00u) data = 0x01u;
+                    else if (id_addr == 0x01u) data = 0xA4u;
+                    else if (id_addr == 0x02u)
+                        data = (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size) ? 0x00u : 0x01u;
+                    else                       data = 0x00u;
+                }
+                else
+                {
+                    if (rel >= mb.writable_offset && rel < mb.writable_offset + mb.writable_size)
+                        data = writable_sram[rel - mb.writable_offset];
+                    else if (available_length == 0u || rel < available_length)
+                        data = read_rom_byte(rom_base, rel);
+                }
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
 
 // Main function running on core 0
 int __no_inline_not_in_flash_func(main)()
 {
     qmi_hw->m[0].timing = 0x40000202; // Set the QMI timing for the MSX bus
-    set_sys_clock_khz(250000, true);     // Set system clock to 250Mhz
+    set_sys_clock_khz(210000, true);     // Set system clock to 210Mhz
 
     stdio_init_all();     // Initialize stdio
     setup_gpio();     // Initialize GPIO
@@ -2714,12 +3485,15 @@ int __no_inline_not_in_flash_func(main)()
             printf("Debug: Failed to load ROM from SD card\n");
             while (true) { tight_loop_contents(); }
         }
-        rom_data = rom_sram;
+        rom_data = sd_rom_region.ptr;
         rom_data_in_ram = true;
         rom_offset = 0;
     }
 
-    bool cache_enable = !rom_data_in_ram;
+    // Cache the leading window into rom_sram for both flash- and PSRAM-resident
+    // ROMs (SD ROMs are staged to PSRAM, so caching them into SRAM mirrors the
+    // flash path and keeps the mapper hot loop fast).
+    bool cache_enable = true;
     uint8_t mapper = (uint8_t)(selected->Mapper & ~(SOURCE_SD_FLAG | OVERRIDE_FLAG | FOLDER_FLAG | MP3_FLAG));
     uint8_t audio_sel = ctrl_audio_selection;
 
@@ -2756,6 +3530,18 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case 10:
             loadrom_nextor_sd_io(rom_offset);
+            break;
+        case 12:
+            loadrom_ascii16x(rom_offset, cache_enable);
+            break;
+        case 13:
+            loadrom_planar64(rom_offset, cache_enable);
+            break;
+        case 14:
+            if (audio_sel == 1 || audio_sel == 2)
+                loadrom_manbow2_scc(rom_offset, cache_enable, audio_sel == 2 ? SCC_ENHANCED : SCC_STANDARD);
+            else
+                loadrom_manbow2(rom_offset, cache_enable);
             break;
         default:
                 printf("Debug: Unsupported ROM mapper: %d\n", mapper);

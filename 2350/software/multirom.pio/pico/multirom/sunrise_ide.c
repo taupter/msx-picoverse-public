@@ -688,6 +688,10 @@ void __not_in_flash_func(sunrise_usb_task)(void)
     {
         tuh_task();
 
+        // Drive SCC audio when Core 1 owns the storage task (Sunrise/C2 modes).
+        // No-op when SCC is not active.
+        service_scc_audio();
+
         if (usb_ide_ctx == NULL)
             continue;
 

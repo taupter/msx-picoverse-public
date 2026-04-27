@@ -1,5 +1,7 @@
 ######################################################################
-# MSX PICOVERSE 2350 multiROM - Aggregate Makefile                    #
+# MSX PICOVERSE 2350 multiROM - Aggregate Makefile                   #
+# (c) 2026 Cristiano Goncalves										 #
+# The Retro Hacker													 #
 #                                                                    #
 # Invokes the individual build systems for each multiROM component.  #
 # Build order matters because later stages embed artifacts produced  #
@@ -7,7 +9,7 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.52
+VERSION ?= v2.56
 
 # Sub-project locations
 MSX_DIR       := msx

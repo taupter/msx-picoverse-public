@@ -72,15 +72,22 @@ static bool muted = false;
 static bool eof = false;
 static bool error_flag = false;
 
-// Cross-core command queue (Core 0 writes, Core 1 reads)
+// Cross-core command queue (Core 0 writes, Core 1 reads).
+// A small FIFO is required because the MSX menu issues SELECT followed
+// by PLAY only ~10 ms apart, which on lazy Core 1 startup is shorter
+// than the time mp3_init() takes to complete. With a single-slot queue
+// the second command would overwrite the first.
 #define MP3_CORE_CMD_NONE        0
 #define MP3_CORE_CMD_SELECT      1
 #define MP3_CORE_CMD_PLAY        2
 #define MP3_CORE_CMD_STOP        3
 #define MP3_CORE_CMD_TOGGLE_MUTE 4
 
-static volatile uint8_t core_cmd = MP3_CORE_CMD_NONE;
-static volatile char core_cmd_path[MP3_PATH_MAX];
+#define MP3_CORE_CMD_QUEUE_SIZE 8u
+static volatile uint8_t  core_cmd_queue[MP3_CORE_CMD_QUEUE_SIZE];
+static volatile uint8_t  core_cmd_head = 0; // Core 0 writes here
+static volatile uint8_t  core_cmd_tail = 0; // Core 1 reads here
+static volatile char     core_cmd_path[MP3_PATH_MAX];
 static volatile uint32_t core_cmd_file_size = 0;
 static volatile bool core1_running = false;
 static mp3_bg_callback_t bg_callback = NULL;
@@ -364,20 +371,40 @@ static void mp3_do_select(const char *path, uint32_t file_size) {
     update_status_flags();
 }
 
-// Called from Core 0 — queues a select command for Core 1
+// Internal: enqueue a command from Core 0. Drops the command if the
+// queue is full (cannot happen in practice because Core 1 drains the
+// queue every loop iteration once mp3_init() completes).
+static void core_cmd_push(uint8_t cmd) {
+    uint8_t next = (uint8_t)((core_cmd_head + 1u) % MP3_CORE_CMD_QUEUE_SIZE);
+    if (next == core_cmd_tail) {
+        printf("MP3: cmd queue full, dropping cmd=%u\n", (unsigned)cmd);
+        return;
+    }
+    core_cmd_queue[core_cmd_head] = cmd;
+    __mem_fence_release();
+    core_cmd_head = next;
+}
+
+// Called from Core 0 — queues a select command for Core 1.
 void mp3_select_file(const char *path, uint32_t file_size) {
     if (!path || !path[0]) return;
-    // Copy path into shared buffer
+    // Path is shared between Core 0 and Core 1. The MSX menu issues
+    // SELECT and waits before issuing the next SELECT, so this single
+    // path slot is sufficient (each SELECT is consumed before another
+    // arrives).
     strncpy((char *)core_cmd_path, path, MP3_PATH_MAX - 1);
     ((char *)core_cmd_path)[MP3_PATH_MAX - 1] = '\0';
     core_cmd_file_size = file_size;
-    __mem_fence_release();
-    core_cmd = MP3_CORE_CMD_SELECT;
+    core_cmd_push(MP3_CORE_CMD_SELECT);
 }
 
-// Called from Core 0 — queues a command for Core 1
+// Called from Core 0 — queues a command for Core 1.
 void mp3_send_cmd(uint8_t cmd) {
-    core_cmd = cmd;
+    core_cmd_push(cmd);
+}
+
+bool mp3_core1_is_ready(void) {
+    return core1_running;
 }
 
 // Called from Core 1 only
@@ -447,10 +474,10 @@ static void mp3_do_toggle_mute(void) {
 }
 
 static void mp3_process_commands(void) {
-    uint8_t cmd = core_cmd;
-    if (cmd == MP3_CORE_CMD_NONE) return;
-    core_cmd = MP3_CORE_CMD_NONE;
+    if (core_cmd_head == core_cmd_tail) return;
+    uint8_t cmd = core_cmd_queue[core_cmd_tail];
     __mem_fence_acquire();
+    core_cmd_tail = (uint8_t)((core_cmd_tail + 1u) % MP3_CORE_CMD_QUEUE_SIZE);
 
     switch (cmd) {
         case MP3_CORE_CMD_SELECT: {
@@ -584,9 +611,17 @@ void mp3_core1_loop(void) {
 
     while (core1_running) {
         mp3_process_commands();
-        fill_buffer_if_needed();
-        mp3_update();
-        // Run background work (SD refresh, mapper detect) when available
+        if (playing) {
+            // Active playback: tight loop to keep the I2S buffer fed.
+            fill_buffer_if_needed();
+            mp3_update();
+        } else {
+            // Idle: yield to avoid contending with Core 0 on shared
+            // buses (XIP, SIO, peripherals). 200 us is well below any
+            // user-perceptible MP3 command latency yet stops Core 1
+            // from starving Core 0's SD enumeration / PIO service.
+            sleep_us(200);
+        }
         if (bg_callback) {
             bg_callback();
         }

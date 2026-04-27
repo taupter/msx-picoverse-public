@@ -23,8 +23,8 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico2 CACHE STRING "Board type")
-set(PICO_COPY_TO_RAM 1)
+set(PICO_BOARD pimoroni_pga2350 CACHE STRING "Board type")
+#set(PICO_COPY_TO_RAM 1)
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -45,6 +45,7 @@ add_executable(multirom
         emu2212.c
         sunrise_ide.c
         sunrise_sd.c
+        c2_emu.c
         multirom.c 
 )
 

@@ -161,6 +161,9 @@ void __not_in_flash_func(sunrise_sd_task)(void)
 
     while (true)
     {
+        // Drive SCC audio when Core 1 owns the storage task (Sunrise/C2 modes).
+        service_scc_audio();
+
         if (sd_ide_ctx == NULL)
             continue;
 

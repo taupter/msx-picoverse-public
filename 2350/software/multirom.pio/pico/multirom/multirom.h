@@ -18,9 +18,18 @@
 #define ROM_NAME_MAX    50   // Maximum size of the ROM name
 #define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2)) // Name + mapper + size + offset
 #define CACHE_SIZE      262144     // 256KB cache size for ROM data
-#define MAPPER_SIZE     262144     // 256 KB memory mapper RAM
-#define MAPPER_PAGES    16         // 256 KB / 16 KB = 16 pages
+#define MAPPER_SIZE     1048576    // 1 MB memory mapper RAM in external PSRAM
+#define MAPPER_PAGES    64         // 1 MB / 16 KB = 64 pages
 #define MAPPER_PAGE_SIZE 16384     // 16 KB per mapper page
+#define PSRAM_BASE_ADDR 0x11000000u // Cached CS1 QMI window for external PSRAM (write-through)
+#define PSRAM_TOTAL_SIZE 0x800000u  // 8 MB total external PSRAM
+
+// PSRAM region descriptor returned by the memory manager.
+typedef struct {
+    uint32_t offset;    // Offset from PSRAM base
+    uint32_t size;      // Size of this region in bytes
+    uint8_t *ptr;       // Memory-mapped pointer (PSRAM_BASE_ADDR + offset)
+} psram_region_t;
 
 #define PIN_A0     0 
 #define PIN_A1     1
@@ -72,6 +81,12 @@
 #define SCC_FLAG        0x80u   // Bit flag in mapper byte for SCC emulation
 #define SCC_PLUS_FLAG   0x40u   // Bit flag in mapper byte for SCC+ (enhanced) emulation
 
+// Sunrise WiFi (ESP-01 over hardware UART1) constants
+#define WIFI_FLAG       0x20u   // Bit flag in mapper byte for Sunrise WiFi system ROM + memio UART
+#define WIFI_ROM_SIZE   16384u  // ESP8266P system ROM size appended after the Sunrise ROM payload
+#define PIN_ESP_UART_TX 38
+#define PIN_ESP_UART_RX 39
+
 static inline void setup_gpio();
 unsigned long __no_inline_not_in_flash_func(read_ulong)(const unsigned char *ptr);
 int isEndOfData(const unsigned char *memory);
@@ -94,5 +109,9 @@ void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_
 void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type);
 void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_wifi)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_sd)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_wifi)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_wifi_sd)(uint32_t offset, bool cache_enable);
 
 #endif

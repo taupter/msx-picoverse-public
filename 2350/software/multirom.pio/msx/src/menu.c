@@ -393,9 +393,10 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
 // This function will return the description of the mapper type based on the mapper number.
 char* mapper_description(int number) {
     // Array of strings for the descriptions
-    int base = (number & 0x3F);
-    const char *descriptions[] = {"PL-16", "PL-32", "KonSCC", "Linear", "ASC-08", "ASC-16", "Konami","NEO-8","NEO-16","SYSTEM","SYSTEM","ASC16X","PL-64","MBow2","SYSTEM","SYSTEM"};	
-    if (base >= 1 && base <= 16)
+    // Strip flag bits: 0x80 = SCC, 0x40 = SCC+, 0x20 = WiFi
+    int base = (number & 0x1F);
+    const char *descriptions[] = {"PL-16", "PL-32", "KonSCC", "Linear", "ASC-08", "ASC-16", "Konami","NEO-8","NEO-16","SYSTEM","SYSTEM","ASC16X","PL-64","MBow2","SYSTEM","SYSTEM","SYSTEM","SYSTEM"};	
+    if (base >= 1 && base <= 18)
         return descriptions[base - 1];
     return "?????";
 }

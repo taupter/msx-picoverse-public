@@ -9,13 +9,16 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.55
+VERSION ?= v2.56
 
 # Paths
 PICO_DIR := pico/loadrom
 PICO_BUILD := $(PICO_DIR)/build
 PICO_CONFIG := $(PICO_BUILD)/CMakeCache.txt
 TOOL_DIR := tool
+WIFI_DIR := ../wifi
+WIFI_BIOS_DIR := $(WIFI_DIR)/bios
+WIFI_UPDATER_DIR := $(WIFI_DIR)/updt8266
 
 # CMake options
 CMAKE ?= c:/Users/Cristiano/.pico-sdk/cmake/v3.29.9/bin/cmake
@@ -35,9 +38,17 @@ MAKE ?= make
 
 
 
-.PHONY: all firmware tool clean
+.PHONY: all bios updater firmware tool clean
 
-all: firmware tool
+all: bios updater firmware tool
+
+bios:
+	@echo "Building WiFi BIOS ROM"
+	@"$(MAKE)" -C "$(WIFI_BIOS_DIR)"
+
+updater:
+	@echo "Building WiFi updater"
+	@"$(MAKE)" -C "$(WIFI_UPDATER_DIR)"
 
 firmware: $(PICO_CONFIG)
 	@echo "Building Pico firmware"
@@ -46,12 +57,14 @@ firmware: $(PICO_CONFIG)
 $(PICO_CONFIG):
 	@$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S "$(PICO_DIR)" -B "$(PICO_BUILD)" -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 
-tool:
+tool: bios
 	@echo "Building PC tool"
-	@$(MAKE) -C "$(TOOL_DIR)" VERSION=$(VERSION)
+	@"$(MAKE)" -C "$(TOOL_DIR)" VERSION=$(VERSION)
 
 clean:
 	@echo "Cleaning firmware and tool"
-	@$(MAKE) -C "$(TOOL_DIR)" clean VERSION=$(VERSION)
+	@"$(MAKE)" -C "$(WIFI_UPDATER_DIR)" clean || true
+	@"$(MAKE)" -C "$(WIFI_BIOS_DIR)" clean || true
+	@"$(MAKE)" -C "$(TOOL_DIR)" clean VERSION=$(VERSION)
 	@$(CMAKE) --build "$(PICO_BUILD)" --target clean || true
 	@$(CMAKE) -E rm -rf "$(PICO_BUILD)"

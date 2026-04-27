@@ -21,11 +21,18 @@
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/structs/qmi.h"
+#include "hardware/regs/qmi.h"
+#include "hardware/structs/xip_ctrl.h"
+#include "hardware/sync.h"
+#include "hardware/uart.h"
+#include "hardware/regs/uart.h"
+#include "hardware/irq.h"
 #include "hw_config.h"
 #include "multirom.h"
 #include "sunrise_ide.h"
 #include "sunrise_sd.h"
 #include "emu2212.h"
+#include "c2_emu.h"
 #include "msx_bus.pio.h"
 
 // config area and buffer for the ROM data
@@ -37,17 +44,9 @@
 extern unsigned char __flash_binary_end;
 
 // Optionally copy the ROM into this SRAM buffer for faster access.
-// Normal modes use the full 256KB as ROM cache.
-// Sunrise+Mapper mode uses the full 256KB as mapper RAM (no ROM cache).
-static union {
-    uint8_t rom_sram[CACHE_SIZE];           // normal: full 256KB ROM cache
-    struct {
-        uint8_t mapper_ram[MAPPER_SIZE];    // mapper: 256KB mapper RAM
-    } mapper;
-} sram_pool;
-
-#define rom_sram    sram_pool.rom_sram
-#define mapper_ram  sram_pool.mapper.mapper_ram
+// All modes use the full 256KB as ROM cache; the 1MB mapper RAM lives
+// in external PSRAM and is allocated through the PSRAM memory manager.
+static uint8_t rom_sram[CACHE_SIZE];
 
 static uint32_t active_rom_size = 0;
 static uint32_t rom_cached_size = 0;
@@ -61,6 +60,238 @@ static uint32_t rom_cache_capacity = CACHE_SIZE;
 
 static SCC scc_instance;
 static struct audio_buffer_pool *audio_pool;
+static bool scc_audio_ready = false;
+static int scc_dma_channel = -1;
+
+// -----------------------------------------------------------------------
+// Sunrise WiFi memio backend (mirrors loadrom.pio implementation)
+// -----------------------------------------------------------------------
+#define WIFI_MEM_F2_ADDR      0x7F05u
+#define WIFI_MEM_CMD_ADDR     0x7F06u
+#define WIFI_MEM_DATA_ADDR    0x7F07u
+#define WIFI_RX_FIFO_SIZE     2080u
+#define WIFI_QUICK_WAIT_US    25000u
+#define WIFI_UART_DEFAULT_BAUD 859372u
+#define WIFI_STATUS_RX_READY  0x01u
+#define WIFI_STATUS_TX_BUSY   0x02u
+#define WIFI_STATUS_RX_FULL   0x04u
+#define WIFI_STATUS_QUICK_RX  0x08u
+#define WIFI_STATUS_UNDERRUN  0x10u
+#define WIFI_STATUS_FREE_BITS 0x80u
+
+// Hardware UART1 backs the ESP-01 link on Core2350B GPIO38/39.
+// On RP2350B these are UART1 TX/RX on FUNCSEL=11 (GPIO_FUNC_UART_AUX).
+// FUNCSEL=2 on these pins maps to UART1 CTS/RTS, NOT data.
+#define WIFI_UART_INSTANCE uart1
+static uint8_t wifi_rx_fifo[WIFI_RX_FIFO_SIZE];
+static volatile uint16_t wifi_rx_head = 0u;
+static volatile uint16_t wifi_rx_tail = 0u;
+static volatile uint16_t wifi_rx_count = 0u;
+static uint8_t wifi_f2_state = 0xFFu;
+static bool wifi_uart_ready = false;
+static uint32_t wifi_uart_baud = WIFI_UART_DEFAULT_BAUD;
+static uint32_t wifi_tx_busy_deadline_us = 0u;
+static bool wifi_rx_underrun = false;
+
+static inline void __not_in_flash_func(wifi_reset_fifo)(void)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    wifi_rx_head = 0u;
+    wifi_rx_tail = 0u;
+    wifi_rx_count = 0u;
+    wifi_rx_underrun = false;
+    restore_interrupts(irq_state);
+}
+
+static inline void __not_in_flash_func(wifi_push_rx_byte)(uint8_t data)
+{
+    // Producer side: called from UART RX IRQ on core0. The pop side
+    // disables IRQs while it mutates head/tail/count, so we don't race.
+    if (wifi_rx_count >= WIFI_RX_FIFO_SIZE) return;
+    wifi_rx_fifo[wifi_rx_head] = data;
+    wifi_rx_head = (uint16_t)((wifi_rx_head + 1u) % WIFI_RX_FIFO_SIZE);
+    ++wifi_rx_count;
+}
+
+static inline bool __not_in_flash_func(wifi_pop_rx_byte)(uint8_t *data_out)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    if (wifi_rx_count == 0u)
+    {
+        restore_interrupts(irq_state);
+        return false;
+    }
+    *data_out = wifi_rx_fifo[wifi_rx_tail];
+    wifi_rx_tail = (uint16_t)((wifi_rx_tail + 1u) % WIFI_RX_FIFO_SIZE);
+    --wifi_rx_count;
+    restore_interrupts(irq_state);
+    return true;
+}
+
+static inline bool __not_in_flash_func(wifi_hw_tx_busy)(void)
+{
+    return (uart_get_hw(WIFI_UART_INSTANCE)->fr & UART_UARTFR_BUSY_BITS) != 0u;
+}
+
+static inline void __not_in_flash_func(wifi_hw_rx_drain)(void)
+{
+    while (uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        (void)uart_getc(WIFI_UART_INSTANCE);
+    }
+}
+
+static inline void __not_in_flash_func(wifi_pio_rx_reset)(void)
+{
+    wifi_hw_rx_drain();
+}
+
+static inline void __not_in_flash_func(wifi_pio_tx_reset)(void)
+{
+    while (wifi_hw_tx_busy()) { }
+    wifi_tx_busy_deadline_us = 0u;
+}
+
+static inline void __not_in_flash_func(wifi_service_rx)(void)
+{
+    if (!wifi_uart_ready) return;
+    while (wifi_rx_count < WIFI_RX_FIFO_SIZE && uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        wifi_push_rx_byte((uint8_t)uart_getc(WIFI_UART_INSTANCE));
+    }
+}
+
+// IRQ handler: drains UART1 RX hardware FIFO into the SW FIFO. Runs on
+// core0 (the core that calls wifi_uart_init_once). Must be in RAM so it
+// is not blocked by XIP cache misses while the bus loop is busy.
+static void __not_in_flash_func(wifi_uart_rx_irq)(void)
+{
+    while (uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        uint8_t b = (uint8_t)uart_getc(WIFI_UART_INSTANCE);
+        if (wifi_rx_count < WIFI_RX_FIFO_SIZE)
+        {
+            wifi_rx_fifo[wifi_rx_head] = b;
+            wifi_rx_head = (uint16_t)((wifi_rx_head + 1u) % WIFI_RX_FIFO_SIZE);
+            ++wifi_rx_count;
+        }
+    }
+}
+
+static inline uint32_t __not_in_flash_func(wifi_uart_frame_time_us)(void)
+{
+    return (10000000u + (wifi_uart_baud - 1u)) / wifi_uart_baud;
+}
+
+static inline void __not_in_flash_func(wifi_uart_init_once)(void)
+{
+    if (wifi_uart_ready) return;
+
+    (void)uart_init(WIFI_UART_INSTANCE, wifi_uart_baud);
+    gpio_set_function(PIN_ESP_UART_TX, GPIO_FUNC_UART_AUX);
+    gpio_set_function(PIN_ESP_UART_RX, GPIO_FUNC_UART_AUX);
+    uart_set_format(WIFI_UART_INSTANCE, 8, 1, UART_PARITY_NONE);
+    uart_set_hw_flow(WIFI_UART_INSTANCE, false, false);
+    uart_set_fifo_enabled(WIFI_UART_INSTANCE, true);
+
+    wifi_hw_rx_drain();
+
+    wifi_f2_state = 0xFFu;
+    wifi_reset_fifo();
+    wifi_tx_busy_deadline_us = 0u;
+    wifi_uart_ready = true;
+
+    // IRQ-driven RX: at 859372 baud the 32-byte HW FIFO fills in ~370us.
+    // Polling from the bus service loop is not reliable when the loop
+    // stalls on pio_sm_put_blocking, so route the RX/RT interrupts to a
+    // dedicated handler that drains the FIFO immediately. RT (receive
+    // timeout) ensures partial bursts don't sit in the FIFO.
+    int uart_irq = (WIFI_UART_INSTANCE == uart0) ? UART0_IRQ : UART1_IRQ;
+    irq_set_exclusive_handler(uart_irq, wifi_uart_rx_irq);
+    irq_set_enabled(uart_irq, true);
+    uart_set_irq_enables(WIFI_UART_INSTANCE, true, false);
+}
+
+static inline void __not_in_flash_func(wifi_handle_cmd_write)(uint8_t cmd)
+{
+    wifi_uart_init_once();
+    if (cmd == 20u)
+    {
+        wifi_reset_fifo();
+        wifi_pio_tx_reset();
+        wifi_pio_rx_reset();
+    }
+}
+
+static inline uint8_t __not_in_flash_func(wifi_status_read)(void)
+{
+    wifi_uart_init_once();
+    wifi_service_rx();
+
+    uint8_t status = WIFI_STATUS_QUICK_RX | WIFI_STATUS_FREE_BITS;
+    if (wifi_rx_count != 0u) status |= WIFI_STATUS_RX_READY;
+    if (wifi_rx_count >= WIFI_RX_FIFO_SIZE) status |= WIFI_STATUS_RX_FULL;
+    if (wifi_hw_tx_busy() ||
+        !uart_is_writable(WIFI_UART_INSTANCE) ||
+        (int32_t)(time_us_32() - wifi_tx_busy_deadline_us) < 0)
+    {
+        status |= WIFI_STATUS_TX_BUSY;
+    }
+    if (wifi_rx_underrun)
+    {
+        status |= WIFI_STATUS_UNDERRUN;
+        wifi_rx_underrun = false;
+    }
+    return status;
+}
+
+static inline uint8_t __not_in_flash_func(wifi_data_read)(void)
+{
+    wifi_uart_init_once();
+
+    uint8_t data;
+    wifi_service_rx();
+    if (wifi_pop_rx_byte(&data)) return data;
+
+    uint32_t deadline = time_us_32() + WIFI_QUICK_WAIT_US;
+    while ((int32_t)(time_us_32() - deadline) < 0)
+    {
+        wifi_service_rx();
+        if (wifi_pop_rx_byte(&data)) return data;
+    }
+
+    wifi_rx_underrun = true;
+    return 0xFFu;
+}
+
+static inline bool __not_in_flash_func(wifi_handle_mem_write)(uint16_t addr, uint8_t data)
+{
+    if (addr == WIFI_MEM_F2_ADDR) { wifi_f2_state = data; return true; }
+    if (addr == WIFI_MEM_CMD_ADDR) { wifi_handle_cmd_write(data); return true; }
+    if (addr == WIFI_MEM_DATA_ADDR)
+    {
+        wifi_uart_init_once();
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)data);
+        wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+        return true;
+    }
+    return false;
+}
+
+static inline uint8_t __not_in_flash_func(wifi_read_rom_byte)(const uint8_t *wifi_rom_base, uint16_t addr)
+{
+    uint32_t rel = (uint32_t)(addr - 0x4000u);
+    if (rel < WIFI_ROM_SIZE) return wifi_rom_base[rel];
+    return 0xFFu;
+}
+
+static inline uint8_t __not_in_flash_func(wifi_handle_mem_read)(const uint8_t *wifi_rom_base, uint16_t addr)
+{
+    if (addr == WIFI_MEM_F2_ADDR) return wifi_f2_state;
+    if (addr == WIFI_MEM_CMD_ADDR) return wifi_data_read();
+    if (addr == WIFI_MEM_DATA_ADDR) return wifi_status_read();
+    return wifi_read_rom_byte(wifi_rom_base, addr);
+}
 
 const uint8_t *rom = (const uint8_t *)&__flash_binary_end;
 
@@ -206,6 +437,59 @@ static inline void __not_in_flash_func(prepare_rom_source)(
     *rom_base_out = rom_base;
     *available_length_out = available_length;
 }
+
+// -----------------------------------------------------------------------
+// Variant of prepare_rom_source for the Sunrise+Mapper paths.
+//
+// Caller has already frozen the MSX bus by driving PIN_WAIT low via GPIO,
+// so this helper must NOT toggle /WAIT while the cache DMA is running
+// (the Z80 would otherwise resume before the mapper is allocated and the
+// PIO read responder is reinstated).
+// -----------------------------------------------------------------------
+static inline void __not_in_flash_func(prepare_sunrise_mapper_rom_source)(
+    uint32_t offset,
+    bool cache_enable,
+    const uint8_t **rom_base_out,
+    uint32_t *available_length_out)
+{
+    const uint8_t *rom_base = rom + offset;
+    uint32_t available_length = active_rom_size;
+
+    if (cache_enable && available_length > 0u)
+    {
+        uint32_t bytes_to_cache = (available_length > CACHE_SIZE)
+                                  ? CACHE_SIZE
+                                  : available_length;
+
+        int dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dma_cfg = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_8);
+        channel_config_set_read_increment(&dma_cfg, true);
+        channel_config_set_write_increment(&dma_cfg, true);
+        dma_channel_configure(dma_chan, &dma_cfg,
+            rom_sram,
+            rom_base,
+            bytes_to_cache,
+            true);
+        dma_channel_wait_for_finish_blocking(dma_chan);
+        dma_channel_unclaim(dma_chan);
+
+        rom_cached_size = bytes_to_cache;
+
+        if (available_length <= CACHE_SIZE)
+        {
+            rom_base = rom_sram;
+        }
+    }
+    else
+    {
+        rom_cached_size = 0;
+    }
+
+    *rom_base_out = rom_base;
+    *available_length_out = available_length;
+}
+
 
 static void msx_pio_bus_init(void)
 {
@@ -355,6 +639,171 @@ static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out,
 static inline uint8_t __not_in_flash_func(mapper_page_from_reg)(uint8_t reg)
 {
     return (uint8_t)(reg % MAPPER_PAGES);
+}
+
+// -----------------------------------------------------------------------
+// External PSRAM mapper backing (QMI CS1)
+// -----------------------------------------------------------------------
+static inline void __not_in_flash_func(psram_delay_cycles)(uint32_t cycles)
+{
+    for (volatile uint32_t cycle = 0; cycle < cycles; ++cycle)
+    {
+        __asm volatile ("nop");
+    }
+}
+
+static inline void __not_in_flash_func(psram_wait_direct_done)(void)
+{
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_TXEMPTY_BITS) == 0)
+    {
+    }
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) != 0)
+    {
+    }
+}
+
+static inline void __not_in_flash_func(psram_send_direct_cmd)(uint8_t cmd, bool quad_width)
+{
+    qmi_hw->direct_csr |= QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    if (quad_width)
+    {
+        qmi_hw->direct_tx = QMI_DIRECT_TX_OE_BITS |
+                            (QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB) |
+                            cmd;
+    }
+    else
+    {
+        qmi_hw->direct_tx = cmd;
+    }
+    psram_wait_direct_done();
+    qmi_hw->direct_csr &= ~QMI_DIRECT_CSR_ASSERT_CS1N_BITS;
+    (void)qmi_hw->direct_rx;
+}
+
+static bool __no_inline_not_in_flash_func(psram_init)(void)
+{
+    gpio_set_function(PIN_PSRAM, GPIO_FUNC_XIP_CS1);
+
+    uint32_t irq_state = save_and_disable_interrupts();
+
+    qmi_hw->direct_csr = (30u << QMI_DIRECT_CSR_CLKDIV_LSB) | QMI_DIRECT_CSR_EN_BITS;
+    while ((qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS) != 0)
+    {
+    }
+
+    // Warm restart path: if PSRAM remained powered it may still be in QPI mode.
+    psram_send_direct_cmd(0xF5u, true);
+    psram_delay_cycles(128u);
+
+    psram_send_direct_cmd(0x66u, false);
+    psram_delay_cycles(128u);
+    psram_send_direct_cmd(0x99u, false);
+    psram_delay_cycles(50000u);
+    psram_send_direct_cmd(0x35u, false);
+    psram_delay_cycles(128u);
+    psram_send_direct_cmd(0xC0u, false);
+    psram_delay_cycles(128u);
+
+    qmi_hw->direct_csr &= ~(QMI_DIRECT_CSR_ASSERT_CS1N_BITS | QMI_DIRECT_CSR_EN_BITS);
+
+    // PSRAM QMI timing — tuned for 210 MHz system clock.
+    // CLKDIV=2 → SCK = 52.5 MHz (safe for all APS6404L/IPS6404L grades).
+    qmi_hw->m[1].timing =
+        (QMI_M0_TIMING_PAGEBREAK_VALUE_1024 << QMI_M0_TIMING_PAGEBREAK_LSB) |
+        (1u << QMI_M0_TIMING_SELECT_HOLD_LSB) |
+        (1u << QMI_M0_TIMING_COOLDOWN_LSB) |
+        (2u << QMI_M0_TIMING_RXDELAY_LSB) |
+        (26u << QMI_M0_TIMING_MAX_SELECT_LSB) |
+        (5u << QMI_M0_TIMING_MIN_DESELECT_LSB) |
+        (2u << QMI_M0_TIMING_CLKDIV_LSB);
+    qmi_hw->m[1].rfmt =
+        (QMI_M0_RFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_PREFIX_WIDTH_LSB) |
+        (QMI_M0_RFMT_ADDR_WIDTH_VALUE_Q << QMI_M0_RFMT_ADDR_WIDTH_LSB) |
+        (QMI_M0_RFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M0_RFMT_SUFFIX_WIDTH_LSB) |
+        (QMI_M0_RFMT_DUMMY_WIDTH_VALUE_Q << QMI_M0_RFMT_DUMMY_WIDTH_LSB) |
+        (QMI_M0_RFMT_DUMMY_LEN_VALUE_24 << QMI_M0_RFMT_DUMMY_LEN_LSB) |
+        (QMI_M0_RFMT_DATA_WIDTH_VALUE_Q << QMI_M0_RFMT_DATA_WIDTH_LSB) |
+        (QMI_M0_RFMT_PREFIX_LEN_VALUE_8 << QMI_M0_RFMT_PREFIX_LEN_LSB) |
+        (QMI_M0_RFMT_SUFFIX_LEN_VALUE_NONE << QMI_M0_RFMT_SUFFIX_LEN_LSB);
+    qmi_hw->m[1].rcmd = (0xEBu << QMI_M0_RCMD_PREFIX_LSB);
+    qmi_hw->m[1].wfmt =
+        (QMI_M0_WFMT_PREFIX_WIDTH_VALUE_Q << QMI_M0_WFMT_PREFIX_WIDTH_LSB) |
+        (QMI_M0_WFMT_ADDR_WIDTH_VALUE_Q << QMI_M0_WFMT_ADDR_WIDTH_LSB) |
+        (QMI_M0_WFMT_SUFFIX_WIDTH_VALUE_Q << QMI_M0_WFMT_SUFFIX_WIDTH_LSB) |
+        (QMI_M0_WFMT_DUMMY_WIDTH_VALUE_Q << QMI_M0_WFMT_DUMMY_WIDTH_LSB) |
+        (QMI_M0_WFMT_DUMMY_LEN_VALUE_NONE << QMI_M0_WFMT_DUMMY_LEN_LSB) |
+        (QMI_M0_WFMT_DATA_WIDTH_VALUE_Q << QMI_M0_WFMT_DATA_WIDTH_LSB) |
+        (QMI_M0_WFMT_PREFIX_LEN_VALUE_8 << QMI_M0_WFMT_PREFIX_LEN_LSB) |
+        (QMI_M0_WFMT_SUFFIX_LEN_VALUE_NONE << QMI_M0_WFMT_SUFFIX_LEN_LSB);
+    qmi_hw->m[1].wcmd = (0x38u << QMI_M0_WCMD_PREFIX_LSB);
+
+    xip_ctrl_hw->ctrl |= XIP_CTRL_WRITABLE_M1_BITS;
+
+    restore_interrupts(irq_state);
+
+    // Verify PSRAM is functional via uncached window (bypass XIP cache
+    // to guarantee the write reaches the device and the read comes back
+    // from the device, not from a stale cache line).
+    volatile uint32_t *psram_test = (volatile uint32_t *)0x15000000u;
+    psram_test[0] = 0x12345678u;
+    return psram_test[0] == 0x12345678u;
+}
+
+// -----------------------------------------------------------------------
+// PSRAM Memory Manager — bump allocator for 8MB external PSRAM
+// -----------------------------------------------------------------------
+static psram_region_t mapper_region;
+static psram_region_t c2_rom_region;
+
+static struct {
+    uint32_t next_free;
+} psram_mgr;
+
+static void psram_mem_init(void)
+{
+    psram_mgr.next_free = 0;
+    memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&c2_rom_region, 0, sizeof(c2_rom_region));
+}
+
+static bool psram_alloc(uint32_t size, psram_region_t *region)
+{
+    if (psram_mgr.next_free + size > PSRAM_TOTAL_SIZE)
+        return false;
+    region->offset = psram_mgr.next_free;
+    region->size = size;
+    region->ptr = (uint8_t *)(PSRAM_BASE_ADDR + psram_mgr.next_free);
+    psram_mgr.next_free += size;
+    return true;
+}
+
+static void psram_free_all(void)
+{
+    psram_mgr.next_free = 0;
+    memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&c2_rom_region, 0, sizeof(c2_rom_region));
+}
+
+// -----------------------------------------------------------------------
+// PSRAM region helpers — mapper RAM
+// -----------------------------------------------------------------------
+static void __not_in_flash_func(mapper_fill_ff)(void)
+{
+    uint32_t *words = (uint32_t *)mapper_region.ptr;
+    for (uint32_t index = 0; index < (mapper_region.size / sizeof(uint32_t)); ++index)
+    {
+        words[index] = 0xFFFFFFFFu;
+    }
+}
+
+static inline void __not_in_flash_func(mapper_write_byte)(uint32_t offset, uint8_t data)
+{
+    mapper_region.ptr[offset] = data;
+}
+
+static inline uint8_t __not_in_flash_func(mapper_read_byte)(uint32_t offset)
+{
+    return mapper_region.ptr[offset];
 }
 
 static inline bool __not_in_flash_func(pio_try_get_io_read)(uint16_t *addr_out)
@@ -697,6 +1146,9 @@ static void __no_inline_not_in_flash_func(core1_scc_audio)(void)
 
 static void i2s_audio_init(void)
 {
+    if (scc_audio_ready)
+        return;
+
     gpio_init(I2S_MUTE_PIN);
     gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
     gpio_put(I2S_MUTE_PIN, 0);
@@ -714,16 +1166,67 @@ static void i2s_audio_init(void)
 
     audio_pool = audio_new_producer_pool(&producer_format, 3, SCC_AUDIO_BUFFER_SAMPLES);
 
+    if (scc_dma_channel < 0)
+    {
+        for (int ch = 0; ch < NUM_DMA_CHANNELS; ++ch)
+        {
+            if (!dma_channel_is_claimed((uint)ch))
+            {
+                scc_dma_channel = ch;
+                break;
+            }
+        }
+    }
+    if (scc_dma_channel < 0)
+    {
+        audio_pool = NULL;
+        return;
+    }
+
+    // Audio I2S lives on PIO1 SM2 so it never collides with the mapper
+    // I/O responder (PIO1 SM0/SM1 used by msx_pio_io_bus_init).
     static struct audio_i2s_config i2s_config = {
         .data_pin = I2S_DATA_PIN,
         .clock_pin_base = I2S_BCLK_PIN,
         .dma_channel = 0,
-        .pio_sm = 0,
+        .pio_sm = 2,
     };
+
+    i2s_config.dma_channel = (uint)scc_dma_channel;
 
     audio_i2s_setup(&audio_format, &i2s_config);
     audio_i2s_connect(audio_pool);
     audio_i2s_set_enabled(true);
+    scc_audio_ready = true;
+}
+
+// -----------------------------------------------------------------------
+// Polled SCC audio service — fills one I2S buffer if one is available.
+// Used by Sunrise-mapper / Carnivore2 paths where Core 1 is occupied by
+// the storage backend and cannot run a dedicated audio worker.
+// -----------------------------------------------------------------------
+void __not_in_flash_func(service_scc_audio)(void)
+{
+    if (!scc_audio_ready || !audio_pool)
+        return;
+
+    struct audio_buffer *buffer = take_audio_buffer(audio_pool, false);
+    if (!buffer)
+        return;
+
+    int16_t *samples = (int16_t *)buffer->buffer->bytes;
+    for (int i = 0; i < SCC_AUDIO_BUFFER_SAMPLES; i++)
+    {
+        int16_t raw = SCC_calc(&scc_instance);
+        int32_t boosted = (int32_t)raw << SCC_VOLUME_SHIFT;
+        if (boosted > 32767) boosted = 32767;
+        else if (boosted < -32768) boosted = -32768;
+        int16_t s = (int16_t)boosted;
+        samples[i * 2]     = s;
+        samples[i * 2 + 1] = s;
+    }
+    buffer->sample_count = SCC_AUDIO_BUFFER_SAMPLES;
+    give_audio_buffer(audio_pool, buffer);
 }
 
 void __no_inline_not_in_flash_func(loadrom_konamiscc_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type)
@@ -1056,11 +1559,9 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
     gpio_put(PIN_WAIT, 0);
 
-    rom_cache_capacity = 0u;
-
     const uint8_t *rom_base;
     uint32_t available_length;
-    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
 
     static sunrise_ide_t ide;
     sunrise_ide_init(&ide);
@@ -1068,10 +1569,17 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
     sunrise_usb_set_ide_ctx(&ide);
     multicore_launch_core1(sunrise_usb_task);
 
+    // Allocate 1MB mapper RAM from the PSRAM memory manager
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
     uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
     uint8_t subslot_reg = 0x10;
 
-    memset(mapper_ram, 0xFF, MAPPER_SIZE);
+    mapper_fill_ff();
 
     msx_pio_io_bus_init();
     msx_pio_bus_init();
@@ -1100,7 +1608,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                     {
                         uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                         uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
-                        mapper_ram[mapper_offset] = wdata;
+                        mapper_write_byte(mapper_offset, wdata);
                     }
                 }
             }
@@ -1113,7 +1621,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
             {
                 uint8_t port = io_addr & 0xFFu;
                 if (port >= 0xFCu && port <= 0xFFu)
-                    mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
             }
         }
 
@@ -1128,7 +1636,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                 if (port >= 0xFCu && port <= 0xFFu)
                 {
                     in_window = true;
-                    data = (uint8_t)(0xF0u | (mapper_reg[port - 0xFCu] & 0x0Fu));
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
                 }
                 pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
             }
@@ -1172,7 +1680,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool
                     in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                     uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
-                    data = mapper_ram[mapper_offset];
+                    data = mapper_read_byte(mapper_offset);
                 }
             }
 
@@ -1295,11 +1803,9 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
     gpio_set_dir(PIN_WAIT, GPIO_OUT);
     gpio_put(PIN_WAIT, 0);
 
-    rom_cache_capacity = 0u;
-
     const uint8_t *rom_base;
     uint32_t available_length;
-    prepare_rom_source(offset, false, 0u, &rom_base, &available_length);
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
 
     static sunrise_ide_t ide;
     sunrise_ide_init(&ide);
@@ -1307,10 +1813,17 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
     sunrise_sd_set_ide_ctx(&ide);
     multicore_launch_core1(sunrise_sd_task);
 
+    // Allocate 1MB mapper RAM from the PSRAM memory manager
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
     uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
     uint8_t subslot_reg = 0x10;
 
-    memset(mapper_ram, 0xFF, MAPPER_SIZE);
+    mapper_fill_ff();
 
     msx_pio_io_bus_init();
     msx_pio_bus_init();
@@ -1339,7 +1852,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                     {
                         uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                         uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
-                        mapper_ram[mapper_offset] = wdata;
+                        mapper_write_byte(mapper_offset, wdata);
                     }
                 }
             }
@@ -1352,7 +1865,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
             {
                 uint8_t port = io_addr & 0xFFu;
                 if (port >= 0xFCu && port <= 0xFFu)
-                    mapper_reg[port - 0xFCu] = io_data & 0x0Fu;
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
             }
         }
 
@@ -1367,7 +1880,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                 if (port >= 0xFCu && port <= 0xFFu)
                 {
                     in_window = true;
-                    data = (uint8_t)(0xF0u | (mapper_reg[port - 0xFCu] & 0x0Fu));
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
                 }
                 pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
             }
@@ -1411,7 +1924,7 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
                     in_window = true;
                     uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
                     uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
-                    data = mapper_ram[mapper_offset];
+                    data = mapper_read_byte(mapper_offset);
                 }
             }
 
@@ -2031,6 +2544,624 @@ void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool ca
     }
 }
 
+// -----------------------------------------------------------------------
+// loadrom_c2_common - Carnivore2 RAM-mode emulation with SCC support
+// Sub-slot layout (Carnivore2-compatible):
+//   sub-slot 0 = C2 register window + bank windows (SROM upload target)
+//   sub-slot 1 = Nextor (Sunrise IDE BIOS, SD or USB backend)
+//   sub-slot 2 = MSX 1MB memory mapper RAM
+// -----------------------------------------------------------------------
+
+typedef void (*c2_core1_task_t)(void);
+
+static void __no_inline_not_in_flash_func(loadrom_c2_common)(uint32_t offset,
+                                                             bool cache_enable,
+                                                             bool scc_emulation,
+                                                             bool scc_plus,
+                                                             c2_core1_task_t core1_task,
+                                                             void (*attach_ctx)(sunrise_ide_t *))
+{
+    bool c2_scc_enabled = scc_emulation || scc_plus;
+
+    // Phase 1 — Bootstrap: tiny ROM that cold-restarts the MSX so the
+    // BIOS sees the final expanded-slot layout on its next probe.
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,            // 'AB' ROM header
+        0x0A, 0x40,            // INIT = 0x400A
+        0x00, 0x00,            // STATEMENT = none
+        0x00, 0x00,            // DEVICE = none
+        0x00, 0x00,            // TEXT = none
+        0xF3,                  // DI
+        0xDB, 0xF4,            // IN A, (0xF4)
+        0xF6, 0x80,            // OR 0x80
+        0xD3, 0xF4,            // OUT (0xF4), A
+        0xC7                   // RST 0x00
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        { uint16_t waddr; uint8_t wdata; while (pio_try_get_write(&waddr, &wdata)) { } }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+                restart_detected = true;
+        }
+    }
+
+    // Phase 2 — freeze MSX before it probes slots again, then wire
+    // expanded slot + Nextor + mapper RAM + Carnivore2 emulation.
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    attach_ctx(&ide);
+    multicore_launch_core1(core1_task);
+
+    // PSRAM regions: 1 MB mapper RAM + 1 MB Carnivore2 RAM.
+    psram_mem_init();
+    if (!psram_alloc(MAPPER_SIZE, &mapper_region) ||
+        !psram_alloc(MAPPER_SIZE, &c2_rom_region))
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    mapper_fill_ff();
+
+    // Initialise Carnivore2 state.
+    static c2_state_t c2;
+    c2_init(&c2, c2_rom_region.ptr, c2_rom_region.size, 0x01u);
+
+    static const uint8_t c2_descr[8] = {
+        'C', 'M', 'F', 'C', 'C', 'F', 'R', 'C'
+    };
+    bool c2_signature_overlay_armed = false;
+    uint8_t c2_signature_overlay_index = 0u;
+
+    if (c2_scc_enabled)
+    {
+        memset(&scc_instance, 0, sizeof(SCC));
+        scc_instance.clk = SCC_CLOCK;
+        scc_instance.rate = SCC_SAMPLE_RATE;
+        SCC_set_quality(&scc_instance, 1);
+        scc_instance.type = scc_plus ? SCC_ENHANCED : SCC_STANDARD;
+        SCC_reset(&scc_instance);
+        i2s_audio_init();
+    }
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        // --- Drain memory writes ---
+        {
+            uint16_t waddr; uint8_t wdata;
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                if (waddr == 0xFFFFu)
+                {
+                    subslot_reg = wdata;
+                    continue;
+                }
+
+                uint8_t page = (waddr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                if (active_subslot == 1)
+                {
+                    if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                        sunrise_ide_handle_write(&ide, waddr, wdata);
+                }
+                else if (active_subslot == 0)
+                {
+                    if (c2_addr_is_regwin(&c2, waddr))
+                    {
+                        c2_reg_write(&c2, waddr, wdata);
+                    }
+                    else
+                    {
+                        if (c2_scc_enabled)
+                            SCC_write(&scc_instance, waddr, wdata);
+
+                        c2_bank_switch_write(&c2, waddr, wdata);
+
+                        uint8_t bank_idx;
+                        uint32_t linear;
+                        if (c2_decode_addr(&c2, waddr, &bank_idx, &linear))
+                        {
+                            bool is_ram = c2_bank_is_ram(&c2, bank_idx);
+                            bool is_we  = c2_bank_is_we (&c2, bank_idx);
+                            if (is_ram && is_we)
+                            {
+                                if (linear < c2.ram_size)
+                                {
+                                    c2.ram_ptr[linear] = wdata;
+                                    if (linear + 1u > c2.max_written) c2.max_written = linear + 1u;
+                                }
+                            }
+                            else if (is_we && !is_ram)
+                            {
+                                c2_flash_cmd_write(&c2, waddr, wdata);
+                            }
+                        }
+                    }
+                }
+                else if (active_subslot == 2)
+                {
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                    mapper_write_byte(mapper_offset, wdata);
+                }
+            }
+        }
+
+        // --- Drain I/O writes (mapper page registers FC-FF + Carnivore2 port F0+PFXN) ---
+        {
+            uint16_t io_addr; uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+                }
+                else if ((port & 0xFCu) == 0xF0u &&
+                         (port & 0x03u) == (c2.pfxn & 0x03u))
+                {
+                    if (io_data == 'C' || io_data == 'S')
+                    {
+                        c2_signature_overlay_armed = true;
+                        c2_signature_overlay_index = 0u;
+                    }
+                    c2_port_write(&c2, io_data);
+                }
+            }
+        }
+
+        // --- Handle I/O reads ---
+        {
+            uint16_t io_addr;
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+                }
+                else if ((port & 0xFCu) == 0xF0u &&
+                         (port & 0x03u) == (c2.pfxn & 0x03u) &&
+                         c2.pf0_state != C2_PF0_IDLE)
+                {
+                    in_window = true;
+                    data = c2_port_read(&c2);
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        // --- Handle memory reads ---
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                if (c2_signature_overlay_armed &&
+                    c2_signature_overlay_index < sizeof(c2_descr) &&
+                    addr == (uint16_t)(0x4010u + c2_signature_overlay_index) &&
+                    (c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u)
+                {
+                    in_window = true;
+                    data = c2_descr[c2_signature_overlay_index++];
+                    if (c2_signature_overlay_index >= sizeof(c2_descr))
+                    {
+                        c2_signature_overlay_armed = false;
+                    }
+                    pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read,
+                                        pio_build_token(in_window, data));
+                    continue;
+                }
+                else if (c2_signature_overlay_armed &&
+                         addr >= 0x4010u && addr <= 0x4017u &&
+                         (c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u)
+                {
+                    c2_signature_overlay_armed = false;
+                    c2_signature_overlay_index = 0u;
+                }
+
+                if (active_subslot == 1)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 0)
+                {
+                    bool regwin_read_active =
+                        ((c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u) &&
+                        ((c2.cardmdr & C2_CARDMDR_REG_RD_OFF) == 0u) &&
+                        c2_addr_is_regwin(&c2, addr);
+
+                    if (regwin_read_active)
+                    {
+                        in_window = true;
+                        data = c2_reg_read(&c2, addr);
+                    }
+                    else
+                    {
+                        bool is_scc_read = false;
+                        if (c2_scc_enabled)
+                        {
+                            if (scc_instance.active)
+                            {
+                                uint32_t scc_reg_start = scc_instance.base_adr + 0x800u;
+                                if (addr >= scc_reg_start && addr <= (scc_reg_start + 0xFFu))
+                                    is_scc_read = true;
+                            }
+                            if (scc_plus && (addr & 0xFFFEu) == 0xBFFEu)
+                                is_scc_read = true;
+                        }
+
+                        if (is_scc_read)
+                        {
+                            in_window = true;
+                            data = (uint8_t)SCC_read(&scc_instance, addr);
+                        }
+                        else
+                        {
+                            uint8_t bank_idx;
+                            uint32_t linear;
+                            if (c2_decode_addr(&c2, addr, &bank_idx, &linear))
+                            {
+                                in_window = true;
+                                if (!c2_bank_is_ram(&c2, bank_idx))
+                                {
+                                    data = c2_flash_read(&c2, addr, linear);
+                                }
+                                else
+                                {
+                                    data = (linear < c2.ram_size) ? c2.ram_ptr[linear] : 0xFFu;
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (active_subslot == 2)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_c2_sd)(uint32_t offset, bool cache_enable,
+                                                  bool scc_emulation, bool scc_plus)
+{
+    loadrom_c2_common(offset, cache_enable, scc_emulation, scc_plus,
+                      sunrise_sd_task, sunrise_sd_set_ide_ctx);
+}
+
+void __no_inline_not_in_flash_func(loadrom_c2_usb)(uint32_t offset, bool cache_enable,
+                                                   bool scc_emulation, bool scc_plus)
+{
+    loadrom_c2_common(offset, cache_enable, scc_emulation, scc_plus,
+                      sunrise_usb_task, sunrise_usb_set_ide_ctx);
+}
+
+// -----------------------------------------------------------------------
+// loadrom_sunrise_wifi_common - Sunrise IDE Nextor + ESP-01 WiFi (memio UART),
+// optional 1MB MSX memory mapper. Mirrors loadrom.pio implementation.
+// Sub-slot layout:
+//   sub-slot 0 = WiFi BIOS + UART memio (0x4000-0x7FFF)
+//   sub-slot 1 = Sunrise IDE Nextor BIOS (0x4000-0x7FFF)
+//   sub-slot 2 = MSX 1MB mapper RAM (when mapper_enable)
+// -----------------------------------------------------------------------
+typedef void (*sunrise_backend_task_fn_t)(void);
+typedef void (*sunrise_backend_attach_fn_t)(sunrise_ide_t *ide);
+
+static void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_common)(
+    uint32_t offset,
+    bool cache_enable,
+    sunrise_backend_task_fn_t core1_task,
+    sunrise_backend_attach_fn_t attach_ctx,
+    bool mapper_enable)
+{
+    (void)cache_enable;
+
+    // Phase 1 — Bootstrap: tiny ROM that cold-restarts the MSX so the
+    // BIOS sees the final expanded-slot layout on its next probe.
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,
+        0x0A, 0x40,
+        0x00, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+        0xF3,
+        0xDB, 0xF4,
+        0xF6, 0x80,
+        0xD3, 0xF4,
+        0xC7
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        { uint16_t waddr; uint8_t wdata; while (pio_try_get_write(&waddr, &wdata)) { } }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else
+        {
+            if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+                restart_detected = true;
+        }
+    }
+
+    // Phase 2 — Initialise expanded-slot WiFi + Nextor (+ optional mapper)
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+    const uint8_t *wifi_rom_base = rom + offset + available_length;
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    attach_ctx(&ide);
+    multicore_launch_core1(core1_task);
+    wifi_uart_init_once();
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = mapper_enable ? 0x20u : 0x00u;
+
+    if (mapper_enable)
+    {
+        psram_mem_init();
+        if (!psram_alloc(MAPPER_SIZE, &mapper_region))
+        {
+            while (true) { tight_loop_contents(); }
+        }
+        mapper_fill_ff();
+        msx_pio_io_bus_init();
+    }
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        wifi_service_rx();
+
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr == 0xFFFFu)
+            {
+                subslot_reg = wdata;
+                continue;
+            }
+
+            uint8_t page = (waddr >> 14) & 0x03u;
+            uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+            if (active_subslot == 0)
+            {
+                (void)wifi_handle_mem_write(waddr, wdata);
+            }
+            else if (active_subslot == 1)
+            {
+                if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                {
+                    sunrise_ide_handle_write(&ide, waddr, wdata);
+                }
+            }
+            else if (mapper_enable && active_subslot == 2)
+            {
+                uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                mapper_write_byte(mapper_offset, wdata);
+            }
+        }
+
+        if (mapper_enable)
+        {
+            uint16_t io_addr;
+            uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+                }
+            }
+
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = true;
+
+            if (addr == 0xFFFFu)
+            {
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        data = wifi_handle_mem_read(wifi_rom_base, addr);
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                        {
+                            data = ide_data;
+                        }
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                            {
+                                data = read_rom_byte(rom_base, rel);
+                            }
+                        }
+                    }
+                }
+                else if (mapper_enable && active_subslot == 2)
+                {
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_wifi)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx, false);
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_sd)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_sd_task, sunrise_sd_set_ide_ctx, false);
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_wifi)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx, true);
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_wifi_sd)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_sd_task, sunrise_sd_set_ide_ctx, true);
+}
+
 int __no_inline_not_in_flash_func(main)()
 {
     qmi_hw->m[0].timing = 0x40000202;
@@ -2043,8 +3174,19 @@ int __no_inline_not_in_flash_func(main)()
     active_rom_size = (uint32_t)records[rom_index].Size;
 
     uint8_t mapper = records[rom_index].Mapper;
+    bool scc_emulation = (mapper & SCC_FLAG) != 0;
     bool scc_plus = (mapper & SCC_PLUS_FLAG) != 0;
-    uint8_t base_mapper = mapper & ~(SCC_FLAG | SCC_PLUS_FLAG);
+    bool wifi_enabled = (mapper & WIFI_FLAG) != 0;
+    uint8_t base_mapper = mapper & ~(SCC_FLAG | SCC_PLUS_FLAG | WIFI_FLAG);
+
+    if ((base_mapper == 11u || base_mapper == 16u ||
+         base_mapper == 17u || base_mapper == 18u) && !psram_init())
+    {
+        while (true)
+        {
+            tight_loop_contents();
+        }
+    }
 
     switch (base_mapper)
     {
@@ -2074,10 +3216,16 @@ int __no_inline_not_in_flash_func(main)()
             loadrom_neo16(records[rom_index].Offset);
             break;
         case 10:
-            loadrom_sunrise(records[rom_index].Offset, true);
+            if (wifi_enabled)
+                loadrom_sunrise_wifi(records[rom_index].Offset, true);
+            else
+                loadrom_sunrise(records[rom_index].Offset, true);
             break;
         case 11:
-            loadrom_sunrise_mapper(records[rom_index].Offset, true);
+            if (wifi_enabled)
+                loadrom_sunrise_mapper_wifi(records[rom_index].Offset, true);
+            else
+                loadrom_sunrise_mapper(records[rom_index].Offset, true);
             break;
         case 12:
             loadrom_ascii16x(records[rom_index].Offset, true);
@@ -2092,10 +3240,22 @@ int __no_inline_not_in_flash_func(main)()
                 loadrom_manbow2(records[rom_index].Offset, true);
             break;
         case 15:
-            loadrom_sunrise_sd(records[rom_index].Offset, true);
+            if (wifi_enabled)
+                loadrom_sunrise_wifi_sd(records[rom_index].Offset, true);
+            else
+                loadrom_sunrise_sd(records[rom_index].Offset, true);
             break;
         case 16:
-            loadrom_sunrise_mapper_sd(records[rom_index].Offset, true);
+            if (wifi_enabled)
+                loadrom_sunrise_mapper_wifi_sd(records[rom_index].Offset, true);
+            else
+                loadrom_sunrise_mapper_sd(records[rom_index].Offset, true);
+            break;
+        case 17:
+            loadrom_c2_sd(records[rom_index].Offset, true, scc_emulation, scc_plus);
+            break;
+        case 18:
+            loadrom_c2_usb(records[rom_index].Offset, true, scc_emulation, scc_plus);
             break;
         default:
             printf("Debug: Unsupported ROM mapper: %d\n", mapper);

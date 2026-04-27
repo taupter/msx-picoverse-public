@@ -23,7 +23,11 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
-set(PICO_BOARD pico2 CACHE STRING "Board type")
+# Core2350B uses an RP2350B (48 GPIOs). The 'pico2' board is RP2350A
+# (30 GPIOs only) and silently ignores any access to GPIO30..47, which
+# is why GPIO38/39 used by the ESP-01 UART would not toggle. Use an
+# RP2350B board definition so NUM_BANK0_GPIOS is 48.
+set(PICO_BOARD pimoroni_pga2350 CACHE STRING "Board type")
 # set(PICO_COPY_TO_RAM 1)
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -55,6 +59,8 @@ add_executable(loadrom
     )
 
 pico_generate_pio_header(loadrom ${CMAKE_CURRENT_LIST_DIR}/msx_bus.pio)
+# wifi_uart.pio dropped: the ESP-01 UART now uses the hardware UART1
+# peripheral on GPIO38/39 (FUNCSEL=11=GPIO_FUNC_UART_AUX).
 
 pico_set_program_name(loadrom "loadrom")
 pico_set_program_version(loadrom "0.1")

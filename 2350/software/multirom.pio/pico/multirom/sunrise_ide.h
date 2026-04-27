@@ -149,6 +149,10 @@ void __not_in_flash_func(sunrise_usb_task)(void);
 // Set the pointer to the shared IDE context for the USB task (call before launching core 1).
 void sunrise_usb_set_ide_ctx(sunrise_ide_t *ide);
 
+// Polled SCC audio service — implemented in multirom.c. Called from the
+// storage task loops so SCC playback continues while Core 1 is busy.
+void __not_in_flash_func(service_scc_audio)(void);
+
 // Populate IDENTIFY DEVICE fields for non-USB backends (e.g. SD card).
 // Sets the block count, block size, and SCSI-style vendor/product/revision
 // strings used by build_identify_data().  Call before setting usb_device_mounted.

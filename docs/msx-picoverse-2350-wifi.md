@@ -17,10 +17,9 @@ The flag is currently valid only with these four firmware modes:
 | `-s2 -w` | USB mass storage | none | yes |
 | `-m2 -w` | USB mass storage | 1MB PSRAM mapper | yes |
 
-WiFi support is not currently exposed in:
+WiFi support is available in both LoadROM (`loadrom.exe -w`) and MultiROM (`multirom.exe -w`). It is not currently exposed in:
 
 - `-c1` / `-c2` Carnivore2-compatible RAM loader modes
-- MultiROM firmware
 - Explorer firmware
 
 In practical terms, `-w` keeps the normal Nextor boot/storage behavior and adds a second ROM/interface surface for WiFi-aware MSX software.
@@ -87,8 +86,8 @@ For `-s1 -w` and `-s2 -w`, the firmware uses a two-subslot expanded layout after
 
 | Sub-slot | Function |
 |---|---|
-| 0 | Nextor Sunrise IDE ROM and IDE register surface |
-| 1 | ESP8266P system ROM and memio UART registers |
+| 0 | ESP8266P system ROM and memio UART registers |
+| 1 | Nextor Sunrise IDE ROM and IDE register surface |
 
 ### Mapper WiFi Modes
 
@@ -96,11 +95,13 @@ For `-m1 -w` and `-m2 -w`, the firmware uses a three-subslot layout:
 
 | Sub-slot | Function |
 |---|---|
-| 0 | Nextor Sunrise IDE ROM and IDE register surface |
-| 1 | ESP8266P system ROM and memio UART registers |
+| 0 | ESP8266P system ROM and memio UART registers |
+| 1 | Nextor Sunrise IDE ROM and IDE register surface |
 | 2 | 1MB PSRAM-backed MSX memory mapper |
 
 This matters because WiFi support is not just a serial sidecar. It is mapped into the MSX-visible cartridge space in the same expanded-slot model used by the Sunrise mapper implementation.
+
+The ESP8266P BIOS is placed in sub-slot 0 so its `INIT` routine runs before Nextor's during the MSX BIOS expanded-slot scan. This ordering is required for compatibility with FPGA-based MSX cores (e.g. ESEMSX3-derived cores), which are sensitive to the bus / sub-slot state immediately after a sub-slot transition. On real MSX hardware the ordering is functionally equivalent to the previous layout.
 
 ## 6. Embedded ESP System ROM
 
@@ -258,9 +259,9 @@ The important point is that WiFi support is not a standalone boot mode. It is a 
 
 ## 15. Current Scope And Limitations
 
-- WiFi support is currently **LoadROM-only**.
+- WiFi support is available in **LoadROM** and **MultiROM** (in MultiROM only on `-s1`/`-m1`/`-s2`/`-m2` Nextor entries).
 - WiFi support is currently **not available** in `-c1` / `-c2` Carnivore2 RAM-loader builds.
-- WiFi support is currently **not exposed** in MultiROM or Explorer.
+- WiFi support is currently **not exposed** in Explorer.
 - The PicoVerse firmware provides the ROM mapping and serial transport; the ESP-01 still needs compatible firmware on the module itself.
 - The implementation follows the ESP8266P memio conventions, so compatibility is best with software already targeting that environment.
 

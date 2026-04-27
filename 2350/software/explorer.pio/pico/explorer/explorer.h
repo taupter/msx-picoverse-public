@@ -7,6 +7,9 @@
 // This work is licensed  under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 // License". https://creativecommons.org/licenses/by-nc-sa/4.0/
 
+#include <stdint.h>
+#include <stdbool.h>
+
 #define PIN_A0     0 
 #define PIN_A1     1
 #define PIN_A2     2
@@ -45,6 +48,16 @@
 #define PIN_BUSSDIR 37  // Bus direction line 
 #define PIN_PSRAM   47  // PSRAM select line
 
+// External PSRAM (8MB on QMI CS1)
+#define PSRAM_BASE_ADDR  0x11000000u // Cached CS1 QMI window for external PSRAM (write-through)
+#define PSRAM_TOTAL_SIZE 0x800000u   // 8 MB total external PSRAM
+
+typedef struct {
+    uint32_t offset;    // Offset within PSRAM
+    uint32_t size;      // Size of the region in bytes
+    uint8_t *ptr;       // Memory-mapped pointer (PSRAM_BASE_ADDR + offset)
+} psram_region_t;
+
 // I2S DAC pins
 #define I2S_DATA_PIN  29   // I2S serial data
 #define I2S_BCLK_PIN  30   // I2S bit clock
@@ -69,3 +82,7 @@ void __no_inline_not_in_flash_func(loadrom_ascii8)(uint32_t offset, bool cache_e
 void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset);
+void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type);
