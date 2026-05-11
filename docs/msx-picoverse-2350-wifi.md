@@ -1,8 +1,8 @@
 # MSX PicoVerse 2350 WiFi Support
 
-This document describes the ESP-01 WiFi support currently implemented for the PicoVerse 2350 `loadrom.pio` firmware.
+This document describes the ESP-01 WiFi support currently implemented for the PicoVerse 2350 firmware family.
 
-The PicoVerse 2350 WiFi implementation adds an ESP8266P-compatible system ROM and memio UART bridge on top of the Sunrise IDE Nextor modes.
+The PicoVerse 2350 WiFi implementation has two user-facing surfaces: an ESP8266P-compatible system ROM and memio UART bridge on top of the Sunrise IDE Nextor modes, and the integrated Explorer File Hunter browser that uses the ESP-01 module directly from the Pico firmware.
 
 ## 1. Overview
 
@@ -17,10 +17,11 @@ The flag is currently valid only with these four firmware modes:
 | `-s2 -w` | USB mass storage | none | yes |
 | `-m2 -w` | USB mass storage | 1MB PSRAM mapper | yes |
 
-WiFi support is available in both LoadROM (`loadrom.exe -w`) and MultiROM (`multirom.exe -w`). It is not currently exposed in:
+WiFi support is available in both LoadROM (`loadrom.exe -w`) and MultiROM (`multirom.exe -w`) for Sunrise IDE modes. Explorer also uses the ESP-01 module for File Hunter browsing and exposes WiFi setup through `F4`; this Explorer path is built into the Explorer firmware and does not use a `-w` tool option.
+
+The Sunrise IDE `-w` option is not currently exposed in:
 
 - `-c1` / `-c2` Carnivore2-compatible RAM loader modes
-- Explorer firmware
 
 In practical terms, `-w` keeps the normal Nextor boot/storage behavior and adds a second ROM/interface surface for WiFi-aware MSX software.
 
@@ -257,17 +258,24 @@ Those modes already extend the mapper path with Carnivore2-compatible RAM-mode b
 
 The important point is that WiFi support is not a standalone boot mode. It is a Nextor-side system-ROM add-on carried by the WiFi-enabled Sunrise UF2.
 
+### Explorer File Hunter
+
+Explorer firmware uses the same ESP-01 hardware path for its integrated File Hunter browser. Press `F3` in Explorer to open File Hunter, and press `F4` from Explorer or File Hunter to enter WiFi setup. File Hunter requests are handled by the Pico firmware through the ESP8266 command protocol; the MSX menu is used as the browser UI rather than booting a separate UNAPI BIOS ROM.
+
+File Hunter downloads are received into PSRAM and saved as `.ROM` files in the root of the microSD card. A microSD card is required for this workflow.
+
 ## 15. Current Scope And Limitations
 
 - WiFi support is available in **LoadROM** and **MultiROM** (in MultiROM only on `-s1`/`-m1`/`-s2`/`-m2` Nextor entries).
 - WiFi support is currently **not available** in `-c1` / `-c2` Carnivore2 RAM-loader builds.
-- WiFi support is currently **not exposed** in Explorer.
+- Explorer exposes WiFi setup and direct ESP-01 access for File Hunter browsing, but it does not expose the Sunrise IDE `-w` system-ROM boot mode.
 - The PicoVerse firmware provides the ROM mapping and serial transport; the ESP-01 still needs compatible firmware on the module itself.
 - The implementation follows the ESP8266P memio conventions, so compatibility is best with software already targeting that environment.
 
 ## 16. Related Documents
 
 - `docs/msx-picoverse-2350-loadrom-tool-manual.en-us.md`
+- `docs/msx-picoverse-2350-explorer-tool-manual.en-us.md`
 - `docs/msx-picoverse-2350-sunrise-nextor.md`
 - `docs/msx-picoverse-2350-features.md`
 
@@ -282,4 +290,4 @@ The PicoVerse 2350 WiFi implementation was informed by these reference projects 
 These references were used to match the existing ESP memio conventions: address map, status bits, quick receive behavior, baud command table, and FIFO expectations.
 
 Author: Cristiano Goncalves
-Last updated: 04/21/2026
+Last updated: 05/04/2026

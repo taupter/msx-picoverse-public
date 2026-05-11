@@ -7,15 +7,15 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.10
+VERSION ?= v2.24
 
 # Sub-project locations
 MSX_DIR       := msx
-NEXTOR_SD_DIR := nextor_sd
 PICO_DIR      := pico/explorer
 PICO_BUILD    := $(PICO_DIR)/build
 PICO_CONFIG   := $(PICO_BUILD)/CMakeCache.txt
 TOOL_DIR      := tool
+WIFI_CONFIG_DIR := ../wifi/config
 
 # CMake options
 CMAKE ?= c:/Users/Cristiano/.pico-sdk/cmake/v3.29.9/bin/cmake
@@ -30,28 +30,28 @@ CMAKE_GENERATOR_FLAG := $(if $(CMAKE_GENERATOR),-G "$(CMAKE_GENERATOR)",)
 CMAKE_BUILD_TYPE ?= Release
 CMAKE_MAKE_PROGRAM_FLAG := $(if $(CMAKE_MAKE_PROGRAM),-DCMAKE_MAKE_PROGRAM="$(CMAKE_MAKE_PROGRAM)",)
 
-.PHONY: all msx nextor_sd pico tool clean
+.PHONY: all msx pico wifi-config tool clean
 
 all: tool
 
 msx:
-	$(MAKE) -C $(MSX_DIR) VERSION=$(VERSION)
+	"$(MAKE)" -C $(MSX_DIR) VERSION=$(VERSION)
 
-nextor_sd: msx
-	$(MAKE) -C $(NEXTOR_SD_DIR) VERSION=$(VERSION)
-
-pico: nextor_sd $(PICO_CONFIG)
+pico: msx $(PICO_CONFIG)
 	$(CMAKE) --build $(PICO_BUILD)
 
 $(PICO_CONFIG):
 	$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S $(PICO_DIR) -B $(PICO_BUILD) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 
-tool: pico
-	$(MAKE) -C $(TOOL_DIR) VERSION=$(VERSION)
+wifi-config:
+	"$(MAKE)" -C $(WIFI_CONFIG_DIR)
+
+tool: pico wifi-config
+	"$(MAKE)" -C $(TOOL_DIR) VERSION=$(VERSION)
 
 clean:
-	-$(MAKE) -C $(MSX_DIR) clean VERSION=$(VERSION)
-	-$(MAKE) -C $(NEXTOR_SD_DIR) clean VERSION=$(VERSION)
+	-"$(MAKE)" -C $(MSX_DIR) clean VERSION=$(VERSION)
 	-@$(CMAKE) --build $(PICO_BUILD) --target clean
-	-$(MAKE) -C $(TOOL_DIR) clean VERSION=$(VERSION)
+	-"$(MAKE)" -C $(WIFI_CONFIG_DIR) clean
+	-"$(MAKE)" -C $(TOOL_DIR) clean VERSION=$(VERSION)
 	-@$(CMAKE) -E rm -rf $(PICO_BUILD)

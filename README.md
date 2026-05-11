@@ -16,12 +16,12 @@ If you find any issues, have questions, or want to contribute, please open an is
 
 - Single-ROM LoadROM workflow for instant and easy booting of one title.
 - Multi-ROM loader with an on-screen menu and mapper auto-detection.
-- Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds MP3 playback, and supports on-device search.
+- Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds MP3 playback, supports on-device search, and includes an integrated File Hunter browser for downloading ROMs over ESP-01 WiFi.
 - Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or microSD card (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
 - Sunrise IDE + 192KB memory mapper on PicoVerse 2040 (`loadrom.exe -m`), or Sunrise IDE standalone (`loadrom.exe -s`).
 - Sunrise IDE + 1MB PSRAM memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`).
 - Carnivore2-compatible RAM-mode loader on PicoVerse 2350 (`loadrom.exe -c1` / `loadrom.exe -c2`) for `SROM.COM /D15` uploads into the 1MB PSRAM mapper.
-- ESP-01 WiFi support for PicoVerse 2350 Sunrise IDE LoadROM builds (`loadrom.exe -s1 -w`, `-m1 -w`, `-s2 -w`, `-m2 -w`). Compatible with both real MSX hardware and FPGA-based MSX cores.
+- ESP-01 WiFi support for PicoVerse 2350 Sunrise IDE LoadROM/MultiROM builds (`loadrom.exe -s1 -w`, `-m1 -w`, `-s2 -w`, `-m2 -w`) and for the Explorer File Hunter browser. Compatible with both real MSX hardware and FPGA-based MSX cores.
 - SCC/SCC+ emulation on the PicoVerse 2350, with auto-detection and manual forcing options. 
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
@@ -41,7 +41,7 @@ If you find any issues, have questions, or want to contribute, please open an is
 - [PicoVerse 2040 MultiROM Guide Manual (English)](/docs/msx-picoverse-2040-multirom-tool-manual.en-us.md)
 - [PicoVerse 2350 MultiROM Tool Manual (English)](/docs/msx-picoverse-2350-multirom-tool-manual.en-us.md)
 
-**Explorer Guides:** Use the Explorer tool to manage flash and microSD ROMs, play MP3s, and search for titles on the device.
+**Explorer Guides:** Use the Explorer tool to manage flash and microSD ROMs, play MP3s, browse File Hunter over ESP-01 WiFi, and search for titles on the device.
 - [MSX PicoVerse 2350 Explorer Tool Manual (English)](/docs/msx-picoverse-2350-explorer-tool-manual.en-us.md)
 
 **Reference Material** 
@@ -103,7 +103,7 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Targets RP2350 boards exposing all 48 GPIO pins (not compatible with standard Pico 2 boards).
 - Adds microSD storage, ESP8266 WiFi header, and I2S audio expansion alongside 16 MB flash space.
 - Extra RAM (PSRAM) now backs the 1MB mapper modes and the Carnivore2-compatible RAM loader, with room for additional advanced firmware features.
-- Explorer firmware can load ROMs from both flash and microSD, with source labels and search.
+- Explorer firmware can load ROMs from both flash and microSD, browse File Hunter over ESP-01 WiFi, save downloaded File Hunter ROMs to the microSD root, and search local title lists.
 - USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`-s2`).
 - microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`-s1`).
 - Sunrise IDE + 1MB PSRAM memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
@@ -147,7 +147,7 @@ Interactive BOM available at [PicoVerse 2350 BOM](https://htmlpreview.github.io/
 3. **Generate the UF2 image**:
    - For multiple titles, place your `.rom` files beside the MultiROM tool for your cartridge family (`2040/software/multirom.pio/tool/multirom.exe` or `2350/software/multirom.pio/tool/multirom.exe`) and run `multirom.exe` to create `multirom.uf2`.
    - For an instant boot into a single game, place the desired `.rom` next to the LoadROM tool for your cartridge family and run `loadrom.exe <file> [-o custom.uf2]` to create a dedicated UF2 that skips the menu.
-   - For a combined flash + microSD menu (on PicoVerse 2350 only), use the Explorer tool (`2350/software/explorer.pio/tool/explorer.exe`) to create `explorer.uf2`, then copy extra `.rom` and `.mp3` files to the microSD card.
+   - For a combined flash + microSD menu (on PicoVerse 2350 only), use the Explorer tool (`2350/software/explorer.pio/tool/explorer.exe`) to create `explorer.uf2`, then copy extra `.rom` and `.mp3` files to the microSD card. With an ESP-01 module and configured WiFi, Explorer can also browse File Hunter and save downloaded ROMs directly to the microSD root.
 4. **Flash the firmware**:
    - Hold BOOTSEL while connecting the cartridge to your PC via USB-C.
    - Copy the freshly generated UF2 (`multirom.uf2`, `loadrom.uf2`, or `explorer.uf2`) to the RPI-RP2 drive that appears.
@@ -208,11 +208,13 @@ Consult the LoadROM manuals linked above for screenshots, troubleshooting, and i
 |<center>**ROM Details Screen**||
 |![](/images/WIN_20260207_20_03_20_Pro.jpg)||
 
-Explorer is a PicoVerse 2350-only firmware that merges ROMs stored in flash with additional ROMs and MP3 files on the microSD card. ROMs are labeled with source tags (FL/SD), MP3 entries open a player screen, the list supports paging, and you can search by name directly in the menu. microSD ROMs up to 2 MB are streamed into external PSRAM and executed directly from there. Use the Explorer tool to build the UF2 and copy extra ROMs and MP3 files to the microSD card. See the Explorer manual for limits (flash vs SD capacity, 2 MB SD ROM limit, and supported formats).
+Explorer is a PicoVerse 2350-only firmware that merges ROMs stored in flash with additional ROMs and MP3 files on the microSD card. ROMs are labeled with source tags (FL/SD), MP3 entries open a player screen, the list supports paging, and you can search by name directly in the menu. With an ESP-01 / ESP8266 module installed and WiFi configured, pressing `F3` opens the integrated File Hunter browser. File Hunter results show the ROM name and size, can be searched from the MSX, and selected ROMs are downloaded through the Pico into PSRAM before being saved as `.ROM` files in the microSD root. microSD ROMs up to 2 MB are streamed into external PSRAM and executed directly from there. Use the Explorer tool to build the UF2 and copy extra ROMs and MP3 files to the microSD card. See the Explorer manual for limits (flash vs SD capacity, 2 MB SD ROM limit, File Hunter requirements, and supported formats).
 
 You can have up to 1024 entries per folder view (folders + ROMs + MP3s; the root view can also include flash entries). The menu auto-detects whether the MSX supports 80-column text mode and boots accordingly; you can also press `C` at any time to toggle between 40- and 80-column layouts.
 
 A search function is available by pressing `/` in the menu. Type part of a ROM name and press Enter to jump to the first matching entry. Press `H` to view the help screen.
+
+The File Hunter browser was implemented with reference to NataliaPC's public MSX File Hunter Browser project: https://github.com/nataliapc/msx_filehunterbrowser
 
 ## Compatibility & Requirements
 
@@ -261,6 +263,8 @@ The algorithm to emulate ATA devices is original and based on the implementation
 
 Those projects remain copyright by Oduvaldo Pavan Junior and their respective contributors under their original terms. PicoVerse reuses the public technical design references and keeps its own RP2350 cartridge-side implementation.
 
+**File Hunter browser integration on PicoVerse 2350 Explorer** was implemented with reference to NataliaPC's MSX File Hunter Browser project and the public File Hunter service behavior. PicoVerse keeps its own Explorer MSX menu and RP2350/ESP8266 transport implementation, while acknowledging the original MSX File Hunter Browser code and workflow by NataliaPC. Reference repository: https://github.com/nataliapc/msx_filehunterbrowser
+
 **Mapper detection heuristics and filename tag forcing schemes** in the LoadROM and MultiROM tools are original implementations by the OpenMSX developers for the Romfactory module and licensed under the GNU Public License (GPL). Available at https://github.com/openMSX/openMSX/blob/6f8aa9865eeccdb0b31043d8851b822538440204/src/memory/RomFactory.cc
 
 **The softwaredb database** used for ROM mapper detection is built upon contributions from across the MSX community, including the initial work by Nicolas Beyaert, later expanded by the BlueMSX Team (2004–2013) and continuously maintained by the openMSX Team (2005–present). It also incorporates MSX ID data generated by Generation MSX (www.generation-msx.nl). Special thanks go to the Generation MSX / Sylvester project for its extensive reference data, as well as to contributors such as p_gimeno and diedel for ROM additions and validation, and GDX for further ROM information, corrections, and verification efforts. Part of OpenMSX effort. Available at https://github.com/openMSX
@@ -270,4 +274,4 @@ Those projects remain copyright by Oduvaldo Pavan Junior and their respective co
 Questions, test reports, and build photos are welcome. Open an issue on the public repository or reach out through the MSX retro hardware forums where PicoVerse updates are posted.
 
 Author: Cristiano Goncalves
-Last updated: 04/21/2026
+Last updated: 05/04/2026

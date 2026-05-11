@@ -13,8 +13,8 @@
 #include "menu_state.h"
 #include "menu_ui.h"
 #include "menu_input.h"
-#include "screen_mp3.h"
 #include "screen_rom.h"
+#include "explorer_fh.h"
 
 #define SEARCH_MAX_LEN 24
 
@@ -32,11 +32,16 @@ static void send_query_to_pico(const char *query);
 static unsigned int read_match_index(void);
 static unsigned int bios_calatr(void);
 int record_is_folder(const ROMRecord *record);
-int record_is_mp3(const ROMRecord *record);
 void trim_name_to_buffer(const char *src, char *dst, int max_len);
 static void build_menu_row_text(const ROMRecord *record, const char *name_override, char *out, unsigned char width);
 static void enter_directory(const char *name);
-static void refresh_menu_state(void);
+static void refresh_menu_state(const char *loading_text);
+static const char *status_text(const char *text_40, const char *text_80);
+static void blink_status_tick(const char *text, int *blink_state, int *blink_tick);
+static void wait_key_with_blinking_status(const char *text);
+static void wait_command_with_blinking_status(const char *text, unsigned int wait_limit);
+static void redefine_function_keys(void);
+static void switch_browse_source(unsigned char source_mode, const char *loading_text);
 void msx_wait(uint16_t times_jiffy);
 void delay_ms(uint16_t milliseconds);
 
@@ -164,8 +169,23 @@ int record_is_folder(const ROMRecord *record) {
     return (record->Mapper & FOLDER_FLAG) != 0;
 }
 
-int record_is_mp3(const ROMRecord *record) {
-    return (record->Mapper & MP3_FLAG) != 0;
+unsigned char record_mapper_code(unsigned char mapper) {
+    unsigned char raw = mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG);
+
+    if (raw == OVERRIDE_FLAG) {
+        return 16;
+    }
+
+    if (raw & OVERRIDE_FLAG) {
+        return raw & (unsigned char)~OVERRIDE_FLAG;
+    }
+
+    return raw;
+}
+
+int record_mapper_is_override(unsigned char mapper) {
+    unsigned char raw = mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG);
+    return (raw & OVERRIDE_FLAG) != 0 && raw != OVERRIDE_FLAG;
 }
 
 static void build_menu_row_text(const ROMRecord *record, const char *name_override, char *out, unsigned char width) {
@@ -178,8 +198,6 @@ static void build_menu_row_text(const ROMRecord *record, const char *name_overri
     if (record_is_folder(record)) {
         type_label = "<DIR>";
         source = "SD";
-    } else if (record_is_mp3(record)) {
-        type_label = " MP3";
     }
 
     if (!record_is_folder(record)) {
@@ -192,9 +210,9 @@ static void build_menu_row_text(const ROMRecord *record, const char *name_overri
     }
 
     if (use_80_columns) {
-        sprintf(out, " %-61.61s %6s %-2s %-5s", name, size_text, source, type_label);
+        sprintf(out, MENU_ROW_FORMAT_80, name, size_text, source, type_label);
     } else {
-        sprintf(out, " %-21.21s %6s %-2s %-5s", name, size_text, source, type_label);
+        sprintf(out, MENU_ROW_FORMAT_40, name, size_text, source, type_label);
     }
 
     int len = (int)strlen(out);
@@ -221,7 +239,7 @@ int build_sliding_name_window(const char *str, int startPos, char *out, unsigned
         return 0;
     }
 
-    if (len <= width) {
+    if (len < width) {
         memcpy(out, str, len);
         for (size_t i = len; i < width; i++) {
             out[i] = ' ';
@@ -265,6 +283,7 @@ void trim_name_to_buffer(const char *src, char *dst, int max_len) {
 // enter_directory - Send command to Pico to enter a directory.
 static void enter_directory(const char *name) {
     char folder[CTRL_QUERY_SIZE];
+    const char *loading_text = status_text("Loading...", "Loading folder...");
     if (name) {
         trim_name_to_buffer(name, folder, CTRL_QUERY_SIZE - 1);
     } else {
@@ -273,7 +292,7 @@ static void enter_directory(const char *name) {
     if (folder[0] == '.' && folder[1] == '.' && folder[2] == '\0') {
         folder[0] = '\0';
     }
-    menu_ui_print_last_line_text("Loading...");
+    menu_ui_print_last_line_text(loading_text);
     int blink_state = 1;
     int blink_tick = 0;
     for (unsigned int wait = 0; wait < 100; wait++) {
@@ -281,16 +300,7 @@ static void enter_directory(const char *name) {
             break;
         }
         delay_ms(10);
-        if (++blink_tick >= 2) {
-            blink_tick = 0;
-            if (blink_state) {
-                menu_ui_clear_last_line();
-                blink_state = 0;
-            } else {
-                menu_ui_print_last_line_text("Loading...");
-                blink_state = 1;
-            }
-        }
+        blink_status_tick(loading_text, &blink_state, &blink_tick);
     }
     send_query_to_pico(folder);
     Poke(CTRL_CMD, CMD_ENTER_DIR);
@@ -299,26 +309,19 @@ static void enter_directory(const char *name) {
             break;
         }
         delay_ms(10);
-        if (++blink_tick >= 2) {
-            blink_tick = 0;
-            if (blink_state) {
-                menu_ui_clear_last_line();
-                blink_state = 0;
-            } else {
-                menu_ui_print_last_line_text("Loading...");
-                blink_state = 1;
-            }
-        }
+        blink_status_tick(loading_text, &blink_state, &blink_tick);
     }
 }
 
 // refresh_menu_state - Refresh the menu state by reading total files and pages from Pico.
-static void refresh_menu_state(void) {
+static void refresh_menu_state(const char *loading_text) {
+    const char *message = loading_text ? loading_text : status_text("Loading...", "Loading menu...");
     unsigned int count = 0xFFFFu;
     unsigned int last = 0xFFFFu;
     unsigned int stable = 0;
     int blink_state = 1;
     int blink_tick = 0;
+    menu_ui_print_last_line_text(message);
     for (unsigned int wait = 0; wait < 100; wait++) {
         count = read_total_count();
         if (count != 0xFFFFu && count == last) {
@@ -331,16 +334,7 @@ static void refresh_menu_state(void) {
         }
         last = count;
         delay_ms(10);
-        if (++blink_tick >= 2) {
-            blink_tick = 0;
-            if (blink_state) {
-                menu_ui_clear_last_line();
-                blink_state = 0;
-            } else {
-                menu_ui_print_last_line_text("Loading...");
-                blink_state = 1;
-            }
-        }
+        blink_status_tick(message, &blink_state, &blink_tick);
     }
     readROMData(records, &totalFiles, &totalSize);
     totalPages = (int)((totalFiles + FILES_PER_PAGE - 1) / FILES_PER_PAGE);
@@ -355,6 +349,49 @@ static void refresh_menu_state(void) {
     }
     menu_ui_clear_last_line();
     displayMenu();
+}
+
+static const char *status_text(const char *text_40, const char *text_80) {
+    return use_80_columns ? text_80 : text_40;
+}
+
+static void blink_status_tick(const char *text, int *blink_state, int *blink_tick) {
+    if (++(*blink_tick) >= 8) {
+        *blink_tick = 0;
+        if (*blink_state) {
+            menu_ui_clear_last_line();
+            *blink_state = 0;
+        } else {
+            menu_ui_print_last_line_text(text);
+            *blink_state = 1;
+        }
+    }
+}
+
+static void wait_key_with_blinking_status(const char *text) {
+    int blink_state = 1;
+    int blink_tick = 0;
+
+    menu_ui_print_last_line_text(text);
+    while (!bios_chsns()) {
+        delay_ms(20);
+        blink_status_tick(text, &blink_state, &blink_tick);
+    }
+    (void)bios_chget();
+}
+
+static void wait_command_with_blinking_status(const char *text, unsigned int wait_limit) {
+    int blink_state = 1;
+    int blink_tick = 0;
+
+    menu_ui_print_last_line_text(text);
+    for (unsigned int wait = 0; wait < wait_limit; wait++) {
+        if (Peek(CTRL_CMD) == 0) {
+            break;
+        }
+        delay_ms(10);
+        blink_status_tick(text, &blink_state, &blink_tick);
+    }
 }
 
 // load_page_records - Request a page from Pico and load it into the local records array.
@@ -540,24 +577,6 @@ void readROMData(ROMRecord *records, unsigned int *recordCount, unsigned long *s
 
 // --- BIOS wrappers and timing ---
 
-static int compare_names(const char *a, const char *b) {
-    return strncmp(a, b, MAX_FILE_NAME_LENGTH);
-}
-
-// sort_records - Sort the ROM records by name using a simple bubble sort.
-static void sort_records(ROMRecord *list, unsigned char count) {
-    for (unsigned char i = 0; i + 1 < count; i++) {
-        for (unsigned char j = i + 1; j < count; j++) {
-            if (compare_names(list[i].Name, list[j].Name) > 0) {
-                ROMRecord temp;
-                temp = list[i];
-                list[i] = list[j];
-                list[j] = temp;
-            }
-        }
-    }
-}
-
 // putchar - Print a character on the screen
 // This function will override the putchar function to use the MSX BIOS routine to print characters on the screen
 // This is to deal with the mess we have between the Fusion-C putchar and the SDCC Z80 library putchar
@@ -589,15 +608,6 @@ void execute_rst00() {
     __endasm;
 }
 
-// clear_screen_0 - Clear the screen in SCREEN 0 mode
-void clear_screen_0() {
-    __asm
-    ld      a, #0            ; Set SCREEN 0 mode
-    call    BIOS_CHGMOD    ; Call BIOS CHGMOD to change screen mode to SCREEN 0
-    call    BIOS_CLS       ; Call BIOS CLS function to clear the screen
-    __endasm;
-}
-
 // clear_fkeys - Clear the function key strings in the BIOS area
 void clear_fkeys()
 {
@@ -619,98 +629,42 @@ clear_loop:
     __endasm;
 }
 
-// print_str_inverted - Print a string using the inverted character table
-// This function will print a string using the inverted character table. It will apply an offset to the characters to display them correctly.
-// Used to display the game names in the inverted characters.
-// Parameters:
-//   str - The string to print
-void print_str_inverted(const char *str) 
-{
-    char buffer[MAX_FILE_NAME_LENGTH + 1];
-    unsigned char width = name_col_width;
-    size_t len = strlen(str);
-
-    if (len > width) {
-        len = width; // keep on-screen width stable
-    }
-
-    memcpy(buffer, str, len);
-
-    for (size_t i = len; i < width; i++) {
-        buffer[i] = ' ';
-    }
-
-    buffer[width] = '\0';
-
-    for (size_t i = 0; i < width; i++) {
-        int modifiedChar = buffer[i] + 96; // Apply the offset to the character
-        PrintChar((unsigned char)modifiedChar); // Print the modified character
-    }
-
+static void redefine_function_keys(void) {
+    char *fnkstr = (char *)BIOS_FNKSTR;
+    clear_fkeys();
+    fnkstr[0] = '1';
+    fnkstr[16] = '2';
+    fnkstr[32] = '3';
+    fnkstr[48] = MENU_KEY_F4_CONFIG;
 }
 
-// print_str_inverted_sliding - Print a sliding string using the inverted character table
-// This function will print a sliding string using the inverted character table. It will apply an offset
-int print_str_inverted_sliding(const char *str, int startPos) 
-{
-    size_t len = strlen(str);
-    unsigned char width = name_col_width;
+static void switch_browse_source(unsigned char source_mode, const char *loading_text) {
+    unsigned char payload[2];
 
-    if (len == 0) {
-        for (size_t i = 0; i < width; i++) {
-            PrintChar((unsigned char)(' ' + 96)); // Keep the highlighted row blank when no name is present
-        }
-        return 0;
-    }
-
-    if (len <= width) {
-        print_str_inverted(str);
-        return 1;
-    }
-
-    int base = startPos % (int)len;
-    if (base < 0) {
-        base += (int)len;
-    }
-
-    unsigned char window[MAX_FILE_NAME_LENGTH];
-    int hasVisible = 0;
-
-    for (size_t i = 0; i < width; i++) {
-        unsigned char ch = (unsigned char)str[(base + (int)i) % (int)len];
-        window[i] = ch;
-        if (ch != ' ') {
-            hasVisible = 1;
-        }
-    }
-
-    if (!hasVisible) {
-        return 0;
-    }
-
-    for (size_t i = 0; i < width; i++) {
-        PrintChar((unsigned char)((int)window[i] + 96)); // Apply the offset to the character
-    }
-    return 1;
+    menu_shortcut_selection = (source_mode == SOURCE_MODE_SD) ? MENU_SHORTCUT_MICROSD : MENU_SHORTCUT_FLASH;
+    menu_ui_update_footer_page();
+    payload[0] = source_mode;
+    payload[1] = 0;
+    send_query_to_pico((const char *)payload);
+    Poke(CTRL_CMD, CMD_SET_SOURCE);
+    refresh_menu_state(loading_text);
 }
 
-// joystick_direction_to_key - Convert joystick direction to key code
-// This function will convert the joystick direction to the corresponding key code.
-static int joystick_direction_to_key(unsigned char dir)
-{
-    switch (dir) {
-        case 1:
-            return 30;
-        case 3:
-            return 28;
-        case 5:
-            return 31;
-        case 7:
-            return 29;
-        default:
-            return 0;
+void launch_wifi_config(void) {
+    const char *message = status_text("Wi-Fi setup...", "Opening Wi-Fi setup...");
+    int blink_state = 1;
+    int blink_tick = 0;
+
+    menu_ui_print_last_line_text(message);
+    Poke(CTRL_CMD, CMD_FH_WIFI_CONFIG);
+    while (Peek(CTRL_CMD) != 0) {
+        delay_ms(20);
+        blink_status_tick(message, &blink_state, &blink_tick);
     }
+    execute_rst00();
+    execute_rst00();
 }
+
 
 // wait_for_key_with_scroll - Wait for a key press with scrolling effect
 // This function will wait for a key press and return the key code. While waiting, it
@@ -720,7 +674,7 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
     unsigned int lastTick = *jiffyPtr;
     int startPos = 0;
     size_t len = strlen(name);
-    int shouldScroll = (!use_80_columns && len > name_col_width);
+    int shouldScroll = use_80_columns ? (len >= name_col_width) : (len > name_col_width);
     const unsigned int scrollDelay = 30U; // 0.5 seconds at 60 Hz
     unsigned char row_width = menu_ui_row_width();
     unsigned char highlight_width = menu_ui_highlight_width();
@@ -735,38 +689,6 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
         if (peek) {
             return (int)bios_chget();
         }
-
-        /*
-        //joystick is too fast and not precise for menu navigation
-        //need to implement some kind of delay or repeat rate control
-        //also Fusion-C triggers are not working properly, need to investigate further
-
-        // check for joystick input
-        unsigned char joy1 = JoystickRead(0x01);
-        unsigned char joy2 = JoystickRead(0x02);
-        
-        // any joystick inputs are valid
-        int joyKey1 = joystick_direction_to_key(joy1); 
-        if (joyKey1) {
-            return joyKey1;
-        }
-        int joyKey2 = joystick_direction_to_key(joy2);
-        if (joyKey2) {
-            return joyKey2;
-        }
-
-        int joyButton1 = TriggerRead(0x01);
-        int joyButton2 = TriggerRead(0x02);
-        int joyButton = joyButton1 | joyButton2;
-        if (joyButton) {
-            return 13; // Enter key
-        }
-        */
-
-        //debug
-        //Locate(0, 23);
-        //printf("Joy1: %02X Joy2: %02X", joy1, joy2);
-        //printf("TR1: %02X TR2: %02X", joyButton1, joyButton2);
 
         // handle scrolling
         if (shouldScroll) {
@@ -806,9 +728,9 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
 char* mapper_description(int number) {
     // Array of strings for the descriptions
     const char *descriptions[] = {"PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08", "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC16X", "PLN-64", "MANBW2"};
-    number &= ~(SOURCE_SD_FLAG | FOLDER_FLAG | OVERRIDE_FLAG);
-    if (number & MP3_FLAG) {
-        return "MP3";
+    number = record_mapper_code((unsigned char)number);
+    if (number == 15 || number == 16) {
+        return "SYSTEM";
     }
     if (number <= 0 || number > 14) {
         return "Unknown";
@@ -873,36 +795,68 @@ void displayMenu() {
 // This function will display the help menu on the screen. It will print the help information and the keys to navigate the menu.
 void helpMenu()
 {
-    
-    Cls(); // Clear the screen
+    char key;
+
+    Cls();
     Locate(0,0);
     menu_ui_print_title_line();
     Locate(0, 1);
     menu_ui_print_delimiter_line();
     Locate(0, 2);
-    printf("Use [UP]  [DOWN] to navigate the menu");
+    printf("Navigation");
     Locate(0, 3);
-    printf("Use [LEFT] [RIGHT] to navigate  pages");
+    printf("UP/DOWN     Move selection");
     Locate(0, 4);
-    printf("Press [ENTER] or [SPACE] to load the ");
+    printf("LEFT/RIGHT  Change page or option");
     Locate(0, 5);
-    printf("  selected rom file");
+    printf("ENTER/SPACE Open folder/details/action");
     Locate(0, 6);
-    printf("Press [/] to search the ROM list");
+    printf("ESC         Back or leave folder");
     Locate(0, 7);
-    printf("Type, then [ENTER] to jump to match");
+    printf("Sources");
     Locate(0, 8);
-    printf("Press [H] to display the help screen");
+    if (use_80_columns) {
+        printf("F1/1 Flash  F2/2 microSD  F3/3 File Hunter");
+    } else {
+        printf("F1/1 Flash F2/2 SD F3/3 File Hunter");
+    }
     Locate(0, 9);
-    printf("Press [C] to toggle 40/80 columns");
+    printf("F4          Wi-Fi setup");
+    Locate(0, 10);
+    printf("List Commands");
+    Locate(0, 11);
+    printf("/           Search current list");
+    Locate(0, 12);
+    printf("H           Show this help");
+    Locate(0, 13);
+    printf("C           Toggle 40/80 columns");
+    Locate(0, 14);
+    printf("ROM Detail");
+    Locate(0, 15);
+    printf("UP/DOWN     Select Mapper, Audio, Action");
+    Locate(0, 16);
+    printf("LEFT/RIGHT  Change mapper/audio");
+    Locate(0, 17);
+    printf("ENTER       Run selected ROM");
+    Locate(0, 18);
+    printf("File Hunter");
+    Locate(0, 19);
+    printf("ENTER/SPACE Open detail or download ROM");
+    Locate(0, 20);
+    printf("ESC         Return to Explorer menu");
     Locate(0, 21);
     menu_ui_print_delimiter_line();
     Locate(0, 22);
-    printf("Press any key to return to the menu!");
-    InputChar();
+    if (use_80_columns) {
+        printf("Press any key to return. F4 opens Wi-Fi setup.");
+    } else {
+        printf("Any key returns. F4 opens Wi-Fi setup.");
+    }
+    key = (char)bios_chget();
+    if (key == MENU_KEY_F4_CONFIG) {
+        launch_wifi_config();
+    }
     frame_rendered = 0;
-    displayMenu();
-    navigateMenu();
 }
 
 
@@ -942,9 +896,16 @@ void navigateMenu()
         //printf("Size: %05lu/15872", totalSize/1024);
         if (totalFiles == 0) {
             key = (char)bios_chget();
+            if (key == MENU_KEY_F4_CONFIG) {
+                launch_wifi_config();
+            }
+            if (key == 'h' || key == 'H') {
+                helpMenu();
+                displayMenu();
+            }
             if (key == 27) {
                 enter_directory(NULL);
-                refresh_menu_state();
+                refresh_menu_state(0);
             }
             continue;
         }
@@ -966,6 +927,30 @@ void navigateMenu()
         }
         switch (key) 
         {
+            case '1':
+                switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+                break;
+            case '2':
+                switch_browse_source(SOURCE_MODE_SD, status_text("Load SD", "Loading from microSD..."));
+                break;
+            case '3':
+            {
+                unsigned char return_shortcut = menu_shortcut_selection;
+                unsigned char next_source = explorer_fh_run();
+                if (next_source == SOURCE_MODE_SD) {
+                    switch_browse_source(SOURCE_MODE_SD, status_text("Load SD", "Loading from microSD..."));
+                } else if (next_source == SOURCE_MODE_FLASH) {
+                    switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+                } else if (return_shortcut == MENU_SHORTCUT_MICROSD) {
+                    switch_browse_source(SOURCE_MODE_SD, status_text("Load SD", "Loading from microSD..."));
+                } else {
+                    switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+                }
+            }
+                break;
+            case MENU_KEY_F4_CONFIG:
+                launch_wifi_config();
+                break;
             case 30: // Up arrow
                 if (currentIndex > 0) // Check if we are not at the first file
                 {
@@ -1003,12 +988,13 @@ void navigateMenu()
                 break;
             case 27: // ESC
                 enter_directory(NULL);
-                refresh_menu_state();
+                refresh_menu_state(0);
                 break;
             case 72: // H - Help (uppercase H)
             case 104: // h - Help (lowercase h)
                 // Help
                 helpMenu(); // Display the help menu
+                displayMenu();
                 break;
             case 99: // C 
             case 67: // c 
@@ -1018,18 +1004,20 @@ void navigateMenu()
                 }
                 break;
             case 47: // / - Search
-                if (read_search_query(search_query, SEARCH_MAX_LEN)) {
+            {
+                int search_result = read_search_query(search_query, SEARCH_MAX_LEN);
+                if (search_result < 0) {
+                    launch_wifi_config();
+                    break;
+                }
+                if (search_result) {
+                    const char *message = status_text("Searching...", "Searching the ROM list...");
                     send_query_to_pico(search_query);
                     Poke(CTRL_CMD, CMD_FIND_FIRST);
-                    for (unsigned int wait = 0; wait < 1000; wait++) {
-                        if (Peek(CTRL_CMD) == 0) {
-                            break;
-                        }
-                    }
+                    wait_command_with_blinking_status(message, 1000);
                     unsigned int match = read_match_index();
                     if (match == 0xFFFFu || match >= totalFiles) {
-                        menu_ui_print_last_line_text("Not found. Press any key.");
-                        (void)bios_chget();
+                        wait_key_with_blinking_status(status_text("Not found", "No matching ROM found."));
                         menu_ui_clear_last_line();
                     } else {
                         currentIndex = (int)match;
@@ -1039,6 +1027,7 @@ void navigateMenu()
                 }
                 displayMenu();
                 break;
+            }
             case 13: // Enter
             case 32: // Space
                 if (record_is_folder(&records[currentIndex % FILES_PER_PAGE])) {
@@ -1049,9 +1038,7 @@ void navigateMenu()
                     } else {
                         enter_directory(records[currentIndex % FILES_PER_PAGE].Name);
                     }
-                    refresh_menu_state();
-                } else if (record_is_mp3(&records[currentIndex % FILES_PER_PAGE])) {
-                    show_mp3_screen((unsigned int)currentIndex);
+                    refresh_menu_state(0);
                 } else {
                     show_rom_screen((unsigned int)currentIndex);
                 }
@@ -1077,6 +1064,11 @@ void main() {
     // Initialize the variables
     currentPage = 1; // Start on page 1
     currentIndex = 0; // Start at the first file - index 0
+    paging_enabled = 0;
+    use_80_columns = 0;
+    name_col_width = NAME_COL_WIDTH;
+    frame_rendered = 0;
+    menu_shortcut_selection = MENU_SHORTCUT_FLASH;
     
     readROMData(records, &totalFiles, &totalSize);
     totalPages = (int)((totalFiles + FILES_PER_PAGE - 1) / FILES_PER_PAGE);
@@ -1086,12 +1078,11 @@ void main() {
     }
     menu_ui_init_text_mode();
     invert_chars(32, 126); // Invert the characters from 32 to 126
-    clear_fkeys(); // Clear the function keys
+    redefine_function_keys();
     //KillKeyBuffer(); // Clear the key buffer
 
-    // Display the menu
     menu_ui_render_menu_frame();
-    displayMenu();
+    switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
     // Activate navigation
     navigateMenu();
 }
@@ -1099,15 +1090,43 @@ void main() {
 
 static int read_search_query(char *buffer, int max_len) {
     int len = 0;
+    const char *prompt = "Search: ";
+    unsigned char prompt_col = (unsigned char)strlen(prompt);
+    unsigned char content_width = (unsigned char)(menu_ui_row_width() - 2);
+    unsigned char right_len = use_80_columns ? 47 : 0;
+    unsigned char left_limit = content_width > right_len ? (unsigned char)(content_width - right_len) : 0;
+    int input_limit = max_len;
+
+    if (left_limit <= prompt_col) {
+        return 0;
+    }
+
+    if (input_limit > (int)(left_limit - prompt_col)) {
+        input_limit = (int)(left_limit - prompt_col);
+    }
+
     buffer[0] = '\0';
-    menu_ui_print_last_line_text("Search: ");
-    for (int i = 0; i < 23; i++) {
+    if (use_80_columns) {
+        menu_ui_print_last_line_text(prompt);
+    } else {
+        Locate(0, 23);
+        printf("Search: ");
+        for (unsigned char col = prompt_col; col < content_width; col++) {
+            PrintChar(' ');
+        }
+    }
+    Locate(prompt_col, 23);
+    for (int i = 0; i < input_limit; i++) {
         PrintChar(' ');
     }
-    Locate(8, 23);
+    Locate(prompt_col, 23);
 
     while (1) {
         char ch = (char)bios_chget();
+        if (ch == MENU_KEY_F4_CONFIG) {
+            buffer[0] = '\0';
+            return -1;
+        }
         if (ch == 13) {
             buffer[len] = '\0';
             return 1;
@@ -1120,16 +1139,17 @@ static int read_search_query(char *buffer, int max_len) {
             if (len > 0) {
                 len--;
                 buffer[len] = '\0';
-                Locate(8 + len, 23);
+                Locate(prompt_col + len, 23);
                 printf(" ");
-                Locate(8 + len, 23);
+                Locate(prompt_col + len, 23);
             }
             continue;
         }
         if (ch >= 32 && ch <= 126) {
-            if (len < max_len) {
+            if (len < input_limit) {
                 buffer[len++] = ch;
                 buffer[len] = '\0';
+                Locate(prompt_col + len - 1, 23);
                 PrintChar((unsigned char)ch);
             }
         }

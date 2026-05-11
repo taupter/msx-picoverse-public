@@ -1,0 +1,2671 @@
+0001   0000             ; ESP8266 Wi-Fi Configuration ROM v.1.3
+0002   0000             ; PICOVERSE UART version
+0003   0000             ; Oduvaldo Pavan Junior
+0004   0000             ; ducasp@gmail.com
+0005   0000             ;    This ROM exposes only the ESP8266 setup menu when launched from
+0006   0000             ;    MSX PicoVerse Explorer F4. It does not install UNAPI hooks in memory.
+0007   0000             ;
+0008   0000             ; Pieces of this code were based on DENYOTCP.ASM (Denyonet ROM)
+0009   0000             ; made by Konamiman
+0010   0000             ;
+0011   0000             ; This code also has contributions from KdL, most specifically in the Wi-Fi
+0012   0000             ; setup menus and functionality, he has helped quite a lot to get it to the
+0013   0000             ; final format and functionality, thanks!
+0014   0000             ;
+0015   0000             ; The MSX PICO version of this code has contribution from Jeroen Taverne That
+0016   0000             ; helped making some MACROs on the fixed / non speed optimized loop I/O parts
+0017   0000             ; of the code so we can easily switch this from I/O based to Memory Based.
+0018   0000             ;
+0019   0000             ; Note: this implementation depends upon ESP8266 having compatible PicoVerse
+0020   0000             ; firmware flashed. This ROM only configures that firmware.
+0021   0000             ;
+0022   0000             ; Usage is free as long as you publish your code changes. If you make a profit
+0023   0000             ; selling something using this code, a suggestion is that you donate one or two
+0024   0000             ; pieces of the hardware to the MSX DEV contest to be awarded to MSX DEV winners
+0025   0000             ; as this shouldn't cost much and perhaps will bring interest on developers to
+0026   0000             ; make games that support internet :)
+0027   0000             ;
+0028   0000             ; If running the SETUP menu, we are going to "borrow" BASIC program area, that
+0029   0000             ; is saved at TXTTAB. We can't allocate memory at this point as any possible
+0030   0000             ; disk rom might be sitting on a slot that has not been initialized and results
+0031   0000             ; could be bad. The BASIC program area trick should be safe, unless some other
+0032   0000             ; cartridge runs a BASIC software for something (i.e.: wait disks be initialized
+0033   0000             ; ), in such case, that BASIC software or trick will most likely be corrupted
+0034   0000             ; after running our setup.
+0035   0000             ; ESC releases the ESP8266 hold, writes CONFIG_RETURN_MENU to the PicoVerse F2
+0036   0000             ; memory port, and restarts the MSX so Explorer can reload its menu.
+0037   0000             
+0038   0000             ;*************************
+0039   0000             ;***  BUILD DEFINITIONS **
+0040   0000             ;*************************
+0041   0000             
+0042   0000             ;--- Use memory mapped IO or not...
+0043   0000             USE_MEM_IO:             equ 1
+0044   0000             
+0045   0000             ;*******************
+0046   0000             ;***  CONSTANTS  ***
+0047   0000             ;*******************
+0048   0000             
+0049   0000             ;--- System variables and routines:
+0050   0000             CHGMOD:                 equ #005F
+0051   0000             CHSNS:                  equ #009C
+0052   0000             CHGET:                  equ #009F
+0053   0000             CHPUT:                  equ #00A2
+0054   0000             BEEP:                   equ #00C0
+0055   0000             KILBUF:                 equ #0156
+0056   0000             LINLEN:                 equ #F3B0
+0057   0000             CLIKSW:                 equ #F3DB
+0058   0000             TXTTAB:                 equ #F676
+0059   0000             CSRSW:                  equ #FCA9
+0060   0000             
+0061   0000             
+0062   0000             ;--- Memory ports:
+0063   0000             MEM_OUT_CMD_PORT:       equ #7F06
+0064   0000             MEM_OUT_TX_PORT:        equ #7F07
+0065   0000             MEM_IN_DATA_PORT:       equ #7F06
+0066   0000             MEM_IN_STS_PORT:        equ #7F07
+0067   0000             MEM_PORT_F2:            equ #7F05
+0068   0000             CONFIG_RETURN_MENU:     equ #E0
+0069   0000             
+0070   0000             ;--- I/O ports:
+0071   0000             OUT_CMD_PORT:           equ #06
+0072   0000             OUT_TX_PORT:            equ #07
+0073   0000             IN_DATA_PORT:           equ #06
+0074   0000             IN_STS_PORT:            equ #07
+0075   0000             PORT_F2:                equ #F2
+0076   0000             
+0077   0000             
+0078   0000                 if USE_MEM_IO = 1
+0079   0000               MACRO SET_SPEED
+0080   0000~                xor a
+0081   0000~                ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0082   0000               ENDM
+0083   0000             
+0084   0000                 MACRO WRITE_CMD_PORT_A
+0085   0000~                    ld  (MEM_OUT_CMD_PORT),a
+0086   0000                 ENDM
+0087   0000             
+0088   0000               MACRO CLEAR_UART
+0089   0000~                ld  a,20
+0090   0000~                ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0091   0000               ENDM
+0092   0000             
+0093   0000               MACRO SEND_DATA
+0094   0000~                ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0095   0000               ENDM
+0096   0000             
+0097   0000               MACRO RECEIVE_DATA
+0098   0000~                ld a,(MEM_IN_DATA_PORT)
+0099   0000               ENDM
+0100   0000             
+0101   0000               MACRO LOAD_STS_PORT_IN_A
+0102   0000~                ld  a,(MEM_IN_STS_PORT)
+0103   0000               ENDM
+0104   0000             
+0105   0000               MACRO CHECK_DATA
+0106   0000~                ld  a,(MEM_IN_STS_PORT)
+0107   0000~                bit 0,a                         ; If nz has data
+0108   0000               ENDM
+0109   0000             
+0110   0000               MACRO CHECK_QUICK_RECEIVE
+0111   0000~                ld  a,(MEM_IN_STS_PORT)
+0112   0000~                bit 3,a                         ; Quick Receive Supported?
+0113   0000               ENDM
+0114   0000             
+0115   0000               MACRO CHECK_BUFFER_UNDERRUN
+0116   0000~                ld  a,(MEM_IN_STS_PORT)
+0117   0000~                bit 4,a                         ; Buffer underrun?
+0118   0000               ENDM
+0119   0000             
+0120   0000               MACRO READ_F2
+0121   0000~                ld  a,(MEM_PORT_F2)
+0122   0000               ENDM
+0123   0000             
+0124   0000               MACRO WRITE_F2
+0125   0000~                ld  (MEM_PORT_F2),a
+0126   0000               ENDM
+0127   0000                 else
+0128   0000~            
+0129   0000~              MACRO SET_SPEED
+0130   0000~                xor a
+0131   0000~                out (OUT_CMD_PORT),a            ; Clear UART
+0132   0000~              ENDM
+0133   0000~            
+0134   0000~                MACRO WRITE_CMD_PORT_A
+0135   0000~                    out (OUT_CMD_PORT),a
+0136   0000~                ENDM
+0137   0000~            
+0138   0000~              MACRO CLEAR_UART
+0139   0000~                ld  a,20
+0140   0000~                out (OUT_CMD_PORT),a            ; Clear UART
+0141   0000~              ENDM
+0142   0000~            
+0143   0000~              MACRO SEND_DATA
+0144   0000~                out (OUT_TX_PORT),a             ; Just send, no need to wait response
+0145   0000~              ENDM
+0146   0000~            
+0147   0000~              MACRO RECEIVE_DATA
+0148   0000~                in a,(IN_DATA_PORT)
+0149   0000~              ENDM
+0150   0000~            
+0151   0000~              MACRO LOAD_STS_PORT_IN_A
+0152   0000~                in  a,(IN_STS_PORT)
+0153   0000~              ENDM
+0154   0000~            
+0155   0000~              MACRO CHECK_DATA
+0156   0000~                in  a,(IN_STS_PORT)
+0157   0000~                bit 0,a                         ; If nz has data
+0158   0000~              ENDM
+0159   0000~            
+0160   0000~              MACRO CHECK_QUICK_RECEIVE
+0161   0000~                ld  a,(IN_STS_PORT)
+0162   0000~                bit 3,a                         ; Quick Receive Supported?
+0163   0000~              ENDM
+0164   0000~            
+0165   0000~              MACRO CHECK_BUFFER_UNDERRUN
+0166   0000~                in  a,(IN_STS_PORT)
+0167   0000~                bit 4,a                         ; Buffer underrun?
+0168   0000~              ENDM
+0169   0000~            
+0170   0000~              MACRO READ_F2
+0171   0000~                in  a,(PORT_F2)
+0172   0000~              ENDM
+0173   0000~            
+0174   0000~              MACRO WRITE_F2
+0175   0000~                out (PORT_F2),a
+0176   0000~              ENDM
+0177   0000                 endif
+0178   0000             
+0179   0000             ;--- Scan Page Size
+0180   0000             SCAN_MAX_PAGE_SIZE      equ 8
+0181   0000             
+0182   0000             ;************************
+0183   0000             ;***  MSX ROM HEADER  ***
+0184   0000             ;************************
+0185   0000                 org #4000
+0186   4000 41 42           db                  #41,#42
+0187   4002 10 40           dw                  INIT_CONFIG ; Enter Wi-Fi setup directly
+0188   4004 00 00           dw                  0           ; Statement
+0189   4006 00 00           dw                  0           ; Device
+0190   4008 00 00           dw                  0           ; Text
+0191   400A 00              ds                  6           ; Reserved
+0192   4010             
+0193   4010             ;==================
+0194   4010             ;===  Start-up  ===
+0195   4010             ;==================
+0196   4010             
+0197   4010             INIT_CONFIG:
+0198   4010 7C              ld  a,h                         ; Test if mirrored and executing in wrong page
+0199   4011 FE 40           cp  #40
+0200   4013 C0              ret nz
+0201   4014 AF              xor a
+0202   4015 32 A9 FC        ld  (CSRSW),a                   ; cursor display is disabled
+0203   4018 32 DB F3        ld  (CLIKSW),a                  ; key click disabled
+0204   401B 3E 01           ld  a,1
+0205   401D F7              rst #30
+0206   401E 00              db  0
+0207   401F 5F 00           dw  CHGMOD                      ; SCREEN 1
+0208   4021 3E 1D           ld  a,29                        ; WIDTH 29
+0209   4023 32 B0 F3        ld  (LINLEN),a
+0210   4026 C3 3F 40        jp  ENTERING_ESPSETUP
+0211   4029             
+0212   4029             ;============================
+0213   4029             ;===  SETUP Menu Routines  ==
+0214   4029             ;===       Main Menu       ==
+0215   4029             ;============================
+0216   4029             ESPSETUP.EXIT:
+0217   4029 3E 0C           ld  a,CLS
+0218   402B CD A2 00        call    CHPUT
+0219   402E             CONFIG_RETURN_TO_EXPLORER:
+0220   402E                 CLEAR_UART
+0220   402E 3E 14       >    ld  a,20
+0220   4030 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0221   4033 3E 68           ld  a,CMD_WIFIRELEASE_ESP
+0222   4035                 SEND_DATA
+0222   4035 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0223   4038 3E E0           ld  a,CONFIG_RETURN_MENU
+0224   403A                 WRITE_F2
+0224   403A 32 05 7F    >    ld  (MEM_PORT_F2),a
+0225   403D C7              rst #00
+0226   403E C7              rst #00
+0227   403F             ENTERING_ESPSETUP:
+0228   403F 21 6C 4C        ld  hl,ENTERING_WIFI_SETUP
+0229   4042 CD 9C 4A        call    PRINTHL
+0230   4045 CD D5 4B        call    PATTERN_SETUP
+0231   4048 CD 0D 48        call    WAIT_250MS_AND_THEN_CONTINUE
+0232   404B                 ; Hold Wi-Fi Connection On
+0233   404B                 CLEAR_UART
+0233   404B 3E 14       >    ld  a,20
+0233   404D 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0234   4050                 SET_SPEED
+0234   4050 AF          >    xor a
+0234   4051 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0235   4054 3E 48           ld  a,CMD_WIFIHOLD_ESP
+0236   4056                 SEND_DATA
+0236   4056 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0237   4059 21 3C 00        ld  hl,60                       ; Up to 1s time-out
+0238   405C 3E 48           ld  a,CMD_WIFIHOLD_ESP
+0239   405E CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE ; Wait quick response
+0240   4061                 ; We do not want to error here, just in case user still need to upgrade ESP firmware
+0241   4061                 ; Whether response ok or hold-fail, fall through to ESPSETUP
+0242   4061             ESPSETUP:
+0243   4061 CD 2A 4B        call    RESET_ESP
+0244   4064 B7              or  a
+0245   4065 C2 46 41        jp  nz,CONFIG_ESP_NOT_FOUND     ; Not well, ESP was not found
+0246   4068                 ; Well, if reset successful, continue
+0247   4068 21 88 4C        ld  hl,WELCOME
+0248   406B CD 9C 4A        call    PRINTHL
+0249   406E                 CHECK_QUICK_RECEIVE
+0249   406E 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+0249   4071 CB 5F       >    bit 3,a                         ; Quick Receive Supported?
+0250   4073 20 08           jr  nz,ESPSETUP.2NF             ; If yes, tells Quick Receive support
+0251   4075 21 F3 4C        ld  hl,WELCOME_SF2
+0252   4078 CD 9C 4A        call    PRINTHL                 ; Print Welcome message no QR
+0253   407B 18 06           jr  ESPSETUP.3NF
+0254   407D             ESPSETUP.2NF:
+0255   407D 21 D7 4C        ld  hl,WELCOME_SF
+0256   4080 CD 9C 4A        call    PRINTHL                 ; Print Welcome message QR
+0257   4083             ESPSETUP.3NF:
+0258   4083 21 13 4D        ld  hl,WELCOME_CS
+0259   4086 CD 9C 4A        call    PRINTHL                 ; Print Wi-Fi is reconnecting to:
+0260   4089             ESPSETUP_NEXT:
+0261   4089 CD 56 01        call    KILBUF                  ; Clear Keyboard Buffer
+0262   408C 21 3D 4D        ld  hl,WELCOME_NEXT
+0263   408F CD 9C 4A        call    PRINTHL
+0264   4092 21 47 4D        ld  hl,WELCOME_SF_NEXT
+0265   4095 CD 9C 4A        call    PRINTHL                 ; Print Empty Welcome message
+0266   4098 CD 2E 41        call    GET_AP_STAT
+0267   409B CA D3 40        jp  z,ESPSETUP_NEXT.1G          ; Won't block in case of error
+0268   409E                 ; Success, so connection state is in IX+0, then, zero terminated string with SSID starting at IX+1
+0269   409E DD 7E 00        ld  a,(ix+0)
+0270   40A1 21 4A 4D        ld  hl,WELCOME_CS0_NEXT
+0271   40A4 FE 00           cp  0
+0272   40A6 28 1F           jr  z,ESPSETUP_NEXT.2F
+0273   40A8 21 74 4D        ld  hl,WELCOME_CS1_NEXT
+0274   40AB FE 01           cp  1
+0275   40AD 28 18           jr  z,ESPSETUP_NEXT.2F
+0276   40AF 21 7D 4D        ld  hl,WELCOME_CS2_NEXT
+0277   40B2 FE 02           cp  2
+0278   40B4 28 11           jr  z,ESPSETUP_NEXT.2F
+0279   40B6 21 A7 4D        ld  hl,WELCOME_CS3_NEXT
+0280   40B9 FE 03           cp  3
+0281   40BB 28 0A           jr  z,ESPSETUP_NEXT.2F
+0282   40BD 21 D1 4D        ld  hl,WELCOME_CS4_NEXT
+0283   40C0 FE 04           cp  4
+0284   40C2 28 03           jr  z,ESPSETUP_NEXT.2F
+0285   40C4 21 FB 4D        ld  hl,WELCOME_CS5_NEXT
+0286   40C7             ESPSETUP_NEXT.2F:
+0287   40C7 FD 67           ld  iyh,a                       ; Save current conn status in iyh
+0288   40C9 CD 9C 4A        call    PRINTHL                 ; Print Status
+0289   40CC DD E5           push    ix
+0290   40CE E1              pop hl
+0291   40CF 23              inc hl                          ; HL has AP Name
+0292   40D0 CD A6 4A        call    PRINTHLINE              ; Print AP Name
+0293   40D3             ESPSETUP_NEXT.1G:
+0294   40D3 21 25 4E        ld  hl,MMENU_S_NEXT
+0295   40D6 CD 9C 4A        call    PRINTHL                 ; Print Main Menu
+0296   40D9             MM_CURSOR_BLINK:
+0297   40D9 CD 1A 41        call    MM_CURSOR_SW            ; Cursor On
+0298   40DC             CONN_CHG_LOOP:
+0299   40DC CD 9C 00        call    CHSNS
+0300   40DF 20 13           jr  nz,MM_WAIT_INPUT            ; If not zero, there is a key in buffer
+0301   40E1                 ; Ok, there is not, we can check if connection status changed
+0302   40E1 CD 2E 41        call    GET_AP_STAT
+0303   40E4 CA DC 40        jp  z,CONN_CHG_LOOP             ; Won't block in case of error
+0304   40E7                 ; Success, so connection state is in IX+0
+0305   40E7 DD 7E 00        ld  a,(ix+0)
+0306   40EA FD BC           cp  iyh                         ; If same, zero
+0307   40EC 28 EE           jr  z,CONN_CHG_LOOP             ; Keep loop
+0308   40EE CD 1A 41        call    MM_CURSOR_SW            ; Cursor Off
+0309   40F1 C3 89 40        jp  ESPSETUP_NEXT               ; Changed, re-build menu
+0310   40F4             MM_WAIT_INPUT:
+0311   40F4 CD 9F 00        call    CHGET
+0312   40F7 FE 1B           cp  #1b                         ; ESC?
+0313   40F9 CA 29 40        jp  z,ESPSETUP.EXIT             ; When done, resume initialization
+0314   40FC FE 31           cp  '1'                         ; Setup Nagle?
+0315   40FE CA F7 46        jp  z,SET_NAGLE
+0316   4101 FE 32           cp  '2'                         ; Setup Wi-Fi On Period?
+0317   4103 CA 36 46        jp  z,SET_WIFI_TIMEOUT
+0318   4106 FE 33           cp  '3'                         ; Scan networks?
+0319   4108 CA 8B 43        jp  z,START_WIFI_SCAN
+0320   410B FE 34           cp  '4'                         ; Automatic Setting of Clock?
+0321   410D CA AC 41        jp  z,START_CLK_AUTO
+0322   4110 CD C0 00        call    BEEP                    ; Wrong Input, beep
+0323   4113 CD 1A 41        call    MM_CURSOR_SW            ; Cursor Off
+0324   4116 76              halt
+0325   4117 C3 D9 40        jp  MM_CURSOR_BLINK             ; And return, waiting another key
+0326   411A             MM_CURSOR_SW:                       ; Cursor workaround for CONN_CHG_LOOP
+0327   411A 3E 1D           ld  a,GOLEFT
+0328   411C CD A2 00        call    CHPUT
+0329   411F 3E 01           ld  a,1
+0330   4121 32 A9 FC        ld  (CSRSW),a
+0331   4124 3E 20           ld  a,' '
+0332   4126 CD A2 00        call    CHPUT                   ; Switch the cursor display mode
+0333   4129 AF              xor a
+0334   412A 32 A9 FC        ld  (CSRSW),a
+0335   412D C9              ret
+0336   412E             GET_AP_STAT:                        ; Use 'call GET_AP_STAT'
+0337   412E                 CLEAR_UART
+0337   412E 3E 14       >    ld  a,20
+0337   4130 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0338   4133 3E 67           ld  a,CMD_AP_STS
+0339   4135                 SEND_DATA                       ; Get AP conn status and name
+0339   4135 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0340   4138 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+0341   413B ED 5B 76 F6     ld  de,(TXTTAB)                 ; We will borrow Basic Program memory area for now...
+0342   413F DD 6B           ld  ixl,e
+0343   4141 DD 62           ld  ixh,d                       ; Address in IX
+0344   4143 C3 74 49        jp  WAIT_MENU_CMD_RESPONSE
+0345   4146             
+0346   4146             CONFIG_ESP_NOT_FOUND:
+0347   4146 78              ld  a,b
+0348   4147 B7              or  a
+0349   4148 21 89 57        ld  hl,FAIL_S                   ; If 0, non responsive
+0350   414B 28 03           jr  z,CONFIG_ESP_NOT_FOUND_MSG
+0351   414D 21 D7 57        ld  hl,FAIL_F                   ; Otherwise, firmware is old
+0352   4150             CONFIG_ESP_NOT_FOUND_MSG:
+0353   4150 CD 9C 4A        call    PRINTHL
+0354   4153 3E B4           ld  a,180                       ; 3s
+0355   4155 CD 0F 48        call    WAIT_BEFORE_CONTINUING
+0356   4158 C3 2E 40        jp  CONFIG_RETURN_TO_EXPLORER
+0357   415B             
+0358   415B             ;============================
+0359   415B             ;===  SETUP Menu Routines  ==
+0360   415B             ;===  Wi-Fi and Clock Menu ==
+0361   415B             ;============================
+0362   415B             CLK_MSX1_GO:
+0363   415B 21 0C 50        ld  hl,MMENU_CLOCK_MSX1
+0364   415E CD 9C 4A        call    PRINTHL                 ; Print Main Clock MSX1 message
+0365   4161 CD 14 48        call    ISCLKAUTO
+0366   4164 DD 7E 00        ld  a,(ix+0)                    ; Auto Clock Current setting
+0367   4167 FE 03           cp  3                           ; If 3 adapter disabled
+0368   4169 28 08           jr  z,CLK_MSX1_ADAPTERDIS
+0369   416B 21 98 50        ld  hl,MMENU_CLOCK_0
+0370   416E CD 9C 4A        call    PRINTHL
+0371   4171 18 06           jr  CLK_MSX1_OPT
+0372   4173             CLK_MSX1_ADAPTERDIS:
+0373   4173 21 DE 50        ld  hl,MMENU_CLOCK_3
+0374   4176 CD 9C 4A        call    PRINTHL
+0375   4179             CLK_MSX1_OPT:
+0376   4179 21 F1 50        ld  hl,MMENU_CLOCK_OPT
+0377   417C CD 9C 4A        call    PRINTHL
+0378   417F             CLK_MSX1_WAIT_OPT_INPUT:
+0379   417F CD 9F 00        call    CHGET
+0380   4182 FE 1B           cp  #1b                         ; ESC?
+0381   4184 CA 61 40        jp  z,ESPSETUP                  ; Back to main menu
+0382   4187 FE 30           cp  '0'
+0383   4189 CA 97 41        jp  z,CLK_MSX1_SEND_CMD
+0384   418C FE 33           cp  '3'
+0385   418E CA 4E 42        jp  z,CLK_AUTO_WAIT_GMT
+0386   4191 CD C0 00        call    BEEP                    ; Wrong Input, beep
+0387   4194 C3 7F 41        jp  CLK_MSX1_WAIT_OPT_INPUT     ; And return, waiting another key
+0388   4197             CLK_MSX1_SEND_CMD:
+0389   4197 CD A2 00        call    CHPUT                   ; Print option
+0390   419A D6 30           sub '0'                         ; Adjust format
+0391   419C DD 77 00        ld  (ix+0),a                    ; Save it
+0392   419F 3E 0D           ld  a,#0d
+0393   41A1 CD A2 00        call    CHPUT
+0394   41A4 3E 0A           ld  a,#0a
+0395   41A6 CD A2 00        call    CHPUT
+0396   41A9 C3 45 43        jp  CLK_AUTO_GMT_CHK_DONE       ; And sending the command will be done there
+0397   41AC             
+0398   41AC             START_CLK_AUTO:
+0399   41AC CD 0D 48        call    WAIT_250MS_AND_THEN_CONTINUE
+0400   41AF 3A 2D 00        ld  a,(#002D)                   ; Check MSX Version
+0401   41B2 B7              or  a
+0402   41B3 CA 5B 41        jp  z,CLK_MSX1_GO               ; If zero, MSX1, so can just enable or disable adapter
+0403   41B6             CLK_AUTO_GO:
+0404   41B6 21 B4 4E        ld  hl,MMENU_CLOCK_MSX2
+0405   41B9 CD 9C 4A        call    PRINTHL                 ; Print Main Clock MSX2 message
+0406   41BC CD 14 48        call    ISCLKAUTO
+0407   41BF DD 7E 00        ld  a,(ix+0)                    ; Auto Clock Current setting
+0408   41C2 B7              or  a                           ; If zero, off
+0409   41C3 20 08           jr  nz,CLK_AUTO_CHK1
+0410   41C5 21 98 50        ld  hl,MMENU_CLOCK_0
+0411   41C8 CD 9C 4A        call    PRINTHL
+0412   41CB 18 59           jr  CLK_AUTO_GMT_OPT
+0413   41CD             CLK_AUTO_CHK1:
+0414   41CD 3D              dec a                           ; If 1, on and keep wifi on
+0415   41CE 20 08           jr  nz,CLK_AUTO_CHK2
+0416   41D0 21 AA 50        ld  hl,MMENU_CLOCK_1
+0417   41D3 CD 9C 4A        call    PRINTHL
+0418   41D6 18 13           jr  CLK_AUTO_GMT
+0419   41D8             CLK_AUTO_CHK2:
+0420   41D8 3D              dec a                           ; If 2, on and turn wifi off
+0421   41D9 20 08           jr  nz,CLK_AUTO_3
+0422   41DB 21 C4 50        ld  hl,MMENU_CLOCK_2
+0423   41DE CD 9C 4A        call    PRINTHL
+0424   41E1 18 08           jr  CLK_AUTO_GMT
+0425   41E3             CLK_AUTO_3:
+0426   41E3 21 DE 50        ld  hl,MMENU_CLOCK_3
+0427   41E6 CD 9C 4A        call    PRINTHL
+0428   41E9 18 3B           jr  CLK_AUTO_GMT_OPT
+0429   41EB             CLK_AUTO_GMT:
+0430   41EB DD 66 01        ld  h,(ix+1)                    ; Save it for now
+0431   41EE DD 7E 01        ld  a,(ix+1)                    ; GMT current setting
+0432   41F1 CB 7F           bit 7,a                         ; If set, is -
+0433   41F3 28 0B           jr  z,CLK_AUTO_GMTP
+0434   41F5 3E 2D           ld  a,'-'
+0435   41F7 CD A2 00        call    CHPUT
+0436   41FA DD CB 01 BE     res 7,(ix+1)                    ; Clear - indicator
+0437   41FE 18 05           jr  CLK_AUTO_GMTM
+0438   4200             CLK_AUTO_GMTP:
+0439   4200 3E 2B           ld  a,'+'
+0440   4202 CD A2 00        call    CHPUT
+0441   4205             CLK_AUTO_GMTM:
+0442   4205 3E 09           ld  a,9
+0443   4207 DD BE 01        cp  (ix+1)                      ; Greater than 9?
+0444   420A 30 0F           jr  nc,CLK_AUTO_GMTD            ; If not, just print what is in A + '0'
+0445   420C 3E 31           ld  a,'1'                       ; It is 1
+0446   420E CD A2 00        call    CHPUT
+0447   4211 DD 7E 01        ld  a,(ix+1)
+0448   4214 C6 26           add '0'-10                      ; Need to subtract 10 and add '0' to print
+0449   4216 CD A2 00        call    CHPUT
+0450   4219 18 0B           jr  CLK_AUTO_GMT_OPT
+0451   421B             CLK_AUTO_GMTD:
+0452   421B 3E 30           ld  a,'0'
+0453   421D DD 86 01        add a,(ix+1)                    ; Our value
+0454   4220 CD A2 00        call    CHPUT
+0455   4223 DD 74 01        ld  (ix+1),h                    ; Restore original value
+0456   4226             CLK_AUTO_GMT_OPT:
+0457   4226 21 F1 50        ld  hl,MMENU_CLOCK_OPT
+0458   4229 CD 9C 4A        call    PRINTHL
+0459   422C             CLK_AUTO_WAIT_OPT_INPUT:
+0460   422C CD 9F 00        call    CHGET
+0461   422F FE 1B           cp  #1b                         ; ESC?
+0462   4231 CA 61 40        jp  z,ESPSETUP                  ; Back to main menu
+0463   4234 FE 30           cp  '0'
+0464   4236 CA 4E 42        jp  z,CLK_AUTO_WAIT_GMT
+0465   4239 FE 31           cp  '1'
+0466   423B CA 4E 42        jp  z,CLK_AUTO_WAIT_GMT
+0467   423E FE 32           cp  '2'
+0468   4240 CA 4E 42        jp  z,CLK_AUTO_WAIT_GMT
+0469   4243 FE 33           cp  '3'
+0470   4245 CA 4E 42        jp  z,CLK_AUTO_WAIT_GMT
+0471   4248 CD C0 00        call    BEEP                    ; Wrong Input, beep
+0472   424B C3 2C 42        jp  CLK_AUTO_WAIT_OPT_INPUT     ; And return, waiting another key
+0473   424E             CLK_AUTO_WAIT_GMT:
+0474   424E CD A2 00        call    CHPUT                   ; Print option
+0475   4251 D6 30           sub '0'                         ; Adjust format
+0476   4253 DD 77 00        ld  (ix+0),a                    ; Save it
+0477   4256 B7              or  a
+0478   4257 CA 45 43        jp  z,CLK_AUTO_GMT_CHK_DONE     ; And send the command if just disabling clock auto set
+0479   425A FE 03           cp  3
+0480   425C CA 45 43        jp  z,CLK_AUTO_GMT_CHK_DONE     ; Or send the command if just disabling the adapter
+0481   425F 21 1B 51        ld  hl,MMENU_GMT_OPT
+0482   4262 CD 9C 4A        call    PRINTHL
+0483   4265 16 00           ld  d,0                         ; # of digits entered
+0484   4267 1E 00           ld  e,0                         ; # of characters printed
+0485   4269 DD 36 01 00     ld  (ix+1),0                    ; GMT 0
+0486   426D             CLK_AUTO_WAIT_GMT_INPUT:
+0487   426D CD 9F 00        call    CHGET
+0488   4270 FE 1B           cp  #1b                         ; ESC?
+0489   4272 CA 61 40        jp  z,ESPSETUP                  ; Back to main menu
+0490   4275 FE 0D           cp  #0d                         ; ENTER?
+0491   4277 CA C0 42        jp  z,CLK_AUTO_GMT_CHK_INPUT    ; Check if ok to send command
+0492   427A FE 08           cp  #08                         ; Backspace?
+0493   427C CA 91 42        jp  z,CLK_AUTO_GMT_CHK_BS       ; Check if there is something to erase
+0494   427F FE 2D           cp  '-'                         ; Negative value?
+0495   4281 CA C0 42        jp  z,CLK_AUTO_GMT_CHK_INPUT
+0496   4284 FE 30           cp  '0'                         ; >=0?
+0497   4286 DA B2 42        jp  c,CLK_AUTO_GMT_BAD_INPUT    ; If not, bad input
+0498   4289 FE 3A           cp  '9'+1                       ; <= 9
+0499   428B D2 B2 42        jp  nc,CLK_AUTO_GMT_BAD_INPUT   ; If not, bad input
+0500   428E C3 C0 42        jp  CLK_AUTO_GMT_CHK_INPUT      ; Otherwise, validate digit
+0501   4291             CLK_AUTO_GMT_CHK_BS:
+0502   4291 AF              xor a
+0503   4292 BB              cp  e                           ; Anything on screen?
+0504   4293 28 1D           jr  z,CLK_AUTO_GMT_BAD_INPUT    ; Nothing to erase
+0505   4295 1D              dec e                           ; One less character on the screen
+0506   4296 BA              cp  d                           ; Any digit?
+0507   4297 28 03           jr  z,CLK_AUTO_GMT_CHK_BS_MIN   ; If not, just erase - sign
+0508   4299                 ; There is, so it is one less digit
+0509   4299 15              dec d
+0510   429A 18 04           jr  CLK_AUTO_GMT_CHK_DIGIT
+0511   429C             CLK_AUTO_GMT_CHK_BS_MIN:
+0512   429C DD 36 01 00     ld  (ix+1),0                    ; Reset sign
+0513   42A0             CLK_AUTO_GMT_CHK_DIGIT:
+0514   42A0 3E 08           ld  a,8                         ; Backspace
+0515   42A2 CD A2 00        call    CHPUT                   ; Print it
+0516   42A5 3E 20           ld  a,' '                       ; Space
+0517   42A7 CD A2 00        call    CHPUT                   ; Print it
+0518   42AA 3E 08           ld  a,8                         ; Backspace
+0519   42AC CD A2 00        call    CHPUT                   ; Print it
+0520   42AF C3 6D 42        jp  CLK_AUTO_WAIT_GMT_INPUT     ; Return
+0521   42B2             CLK_AUTO_GMT_BAD_INPUT:
+0522   42B2                 ; Beep might use sub rom, and if so, all registers will be messed up, better save
+0523   42B2 C5              push    bc
+0524   42B3 D5              push    de
+0525   42B4 F5              push    af
+0526   42B5 E5              push    hl
+0527   42B6 CD C0 00        call    BEEP                    ; Wrong Input, beep
+0528   42B9 E1              pop hl
+0529   42BA F1              pop af
+0530   42BB D1              pop de
+0531   42BC C1              pop bc
+0532   42BD C3 6D 42        jp  CLK_AUTO_WAIT_GMT_INPUT     ; And return, waiting another key
+0533   42C0             CLK_AUTO_GMT_CHK_INPUT:
+0534   42C0 4F              ld  c,a                         ; Save in C for printing if needed
+0535   42C1 FE 2D           cp  '-'                         ; - sign?
+0536   42C3 20 11           jr  nz,CLK_AUTO_GMT_CHK_CR      ; If not, check if enter
+0537   42C5                 ; - sign
+0538   42C5 3E 00           ld  a,0
+0539   42C7 BB              cp  e                           ; If not the first character, can't accept
+0540   42C8 20 E8           jr  nz,CLK_AUTO_GMT_BAD_INPUT
+0541   42CA                 ; It is the first, so let's print it
+0542   42CA 79              ld  a,c
+0543   42CB CD A2 00        call    CHPUT
+0544   42CE DD 36 01 80     ld  (ix+1),0x80                 ; Set the - sign bit, for now rest is zero
+0545   42D2 1C              inc e                           ; Increase # of characters printed
+0546   42D3 C3 6D 42        jp  CLK_AUTO_WAIT_GMT_INPUT     ; Continue waiting input
+0547   42D6             CLK_AUTO_GMT_CHK_CR:
+0548   42D6 FE 0D           cp  #0d                         ; ENTER?
+0549   42D8 20 0F           jr  nz,CLK_AUTO_GMT_CHK_CD      ; If not, check if digit is valid
+0550   42DA                 ; Enter
+0551   42DA 3E 00           ld  a,0
+0552   42DC BA              cp  d                           ; Ok, at least one digit entered?
+0553   42DD 28 D3           jr  z,CLK_AUTO_GMT_BAD_INPUT    ; No, so, enter is no good now
+0554   42DF                 ; It is, if it had a digit entered and did not send, it was 1, so...
+0555   42DF 3E 01           ld  a,1
+0556   42E1 DD B6 01        or  a,(ix+1)                    ; Adjust sign, if needed
+0557   42E4 DD 77 01        ld  (ix+1),a                    ; Save
+0558   42E7 18 5C           jr  CLK_AUTO_GMT_CHK_DONE       ; Ok, ready to send
+0559   42E9             CLK_AUTO_GMT_CHK_CD:
+0560   42E9                 ; Ok, it is a digit
+0561   42E9 06 30           ld  b,'0'
+0562   42EB 90              sub a,b                         ; A has digit value
+0563   42EC 47              ld  b,a                         ; Save in B
+0564   42ED 3E 00           ld  a,0
+0565   42EF BA              cp  d
+0566   42F0 20 1E           jr  nz,CLK_AUTO_GMT_CHK_CSD     ; If not zero, it is second digit, so almost done
+0567   42F2                 ; 1st digit, let's check if it is other than 1, if it is, we are almost done
+0568   42F2 3E 01           ld  a,1
+0569   42F4 B8              cp  b
+0570   42F5 28 10           jr  z,CLK_AUTO_GMT_CHK_CD.1     ; If it is 1, wait next digit or enter
+0571   42F7                 ; Not 1, so just adjust ix+1 and go
+0572   42F7 79              ld  a,c
+0573   42F8 CD A2 00        call    CHPUT                   ; Print it
+0574   42FB 78              ld  a,b
+0575   42FC B7              or  a
+0576   42FD 28 03           jr  z,CLK_AUTO_SKIP_SIGN
+0577   42FF DD B6 01        or  a,(ix+1)                    ; Adjust sign, if needed
+0578   4302             CLK_AUTO_SKIP_SIGN:
+0579   4302 DD 77 01        ld  (ix+1),a                    ; Save
+0580   4305 18 3E           jr  CLK_AUTO_GMT_CHK_DONE       ; Ok, ready to send
+0581   4307             CLK_AUTO_GMT_CHK_CD.1:
+0582   4307 79              ld  a,c
+0583   4308 CD A2 00        call    CHPUT                   ; Print it
+0584   430B 14              inc d                           ; Digits entered now is 1
+0585   430C 1C              inc e                           ; Digits printed increased
+0586   430D C3 6D 42        jp  CLK_AUTO_WAIT_GMT_INPUT     ; Continue waiting input
+0587   4310             CLK_AUTO_GMT_CHK_CSD:
+0588   4310                 ; Second digit, easy... First was 1, now need to check if it is 0, 1 or 2, otherwise, bad entry
+0589   4310 78              ld  a,b
+0590   4311 06 03           ld  b,3
+0591   4313 B8              cp  b
+0592   4314 D2 B2 42        jp  nc,CLK_AUTO_GMT_BAD_INPUT   ; 3 or more, so, not valid
+0593   4317 B7              or  a                           ; Is it zero?
+0594   4318 20 0E           jr  nz,CLK_AUTO_GMT_CHK_CSD1    ; If not, check for 1
+0595   431A                 ; It was zero
+0596   431A 3E 0A           ld  a,10                        ; So, 10
+0597   431C DD B6 01        or  a,(ix+1)                    ; Adjust sign, if needed
+0598   431F DD 77 01        ld  (ix+1),a                    ; Save
+0599   4322 79              ld  a,c
+0600   4323 CD A2 00        call    CHPUT                   ; Print it
+0601   4326 18 1D           jr  CLK_AUTO_GMT_CHK_DONE       ; Ready to
+0602   4328             CLK_AUTO_GMT_CHK_CSD1:
+0603   4328 3D              dec a                           ; Is it one?
+0604   4329 20 0E           jr  nz,CLK_AUTO_GMT_CHK_CSD2
+0605   432B                 ; It was one
+0606   432B 3E 0B           ld  a,11                        ; So, eleven
+0607   432D DD B6 01        or  a,(ix+1)                    ; Adjust sign, if needed
+0608   4330 DD 77 01        ld  (ix+1),a                    ; Save
+0609   4333 79              ld  a,c
+0610   4334 CD A2 00        call    CHPUT                   ; Print it
+0611   4337 18 0C           jr  CLK_AUTO_GMT_CHK_DONE       ; Ready to send
+0612   4339             CLK_AUTO_GMT_CHK_CSD2:
+0613   4339                 ; It was two
+0614   4339 3E 0C           ld  a,12                        ; So, twelve
+0615   433B DD B6 01        or  a,(ix+1)                    ; Adjust sign, if needed
+0616   433E DD 77 01        ld  (ix+1),a                    ; Save
+0617   4341 79              ld  a,c
+0618   4342 CD A2 00        call    CHPUT                   ; Print it
+0619   4345                 ; And send command
+0620   4345             CLK_AUTO_GMT_CHK_DONE:
+0621   4345 3E 0D           ld  a,#0d
+0622   4347 CD A2 00        call    CHPUT
+0623   434A 3E 0A           ld  a,#0a
+0624   434C CD A2 00        call    CHPUT
+0625   434F 21 DC 56        ld  hl,STR_SENDING
+0626   4352 CD 9C 4A        call    PRINTHL
+0627   4355                 CLEAR_UART
+0627   4355 3E 14       >    ld  a,20
+0627   4357 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0628   435A 3E 43           ld  a,CMD_SET_ACLK_SETTINGS
+0629   435C                 SEND_DATA
+0629   435C 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0630   435F 3E 00           ld  a,0                         ; Size MSB is 0
+0631   4361                 SEND_DATA
+0631   4361 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0632   4364 3E 02           ld  a,2                         ; Size LSB is 2
+0633   4366                 SEND_DATA
+0633   4366 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0634   4369 DD 7E 00        ld  a,(ix+0)                    ; Option
+0635   436C                 SEND_DATA
+0635   436C 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0636   436F DD 7E 01        ld  a,(ix+1)                    ; GMT
+0637   4372                 SEND_DATA
+0637   4372 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0638   4375 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+0639   4378 3E 43           ld  a,CMD_SET_ACLK_SETTINGS
+0640   437A CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE
+0641   437D 21 F7 56        ld  hl,STR_SENDING_OK
+0642   4380 20 03           jr  nz,CLK_AUTO_GMT_CHK_RESULT
+0643   4382 21 74 57        ld  hl,STR_SENDING_FAIL
+0644   4385             CLK_AUTO_GMT_CHK_RESULT:
+0645   4385 CD 9C 4A        call    PRINTHL
+0646   4388 C3 05 48        jp  WAIT_2S_AND_THEN_MAINMENU
+0647   438B             
+0648   438B             ;============================
+0649   438B             ;===  SETUP Menu Routines  ==
+0650   438B             ;===    Wi-Fi Scan Menu    ==
+0651   438B             ;============================
+0652   438B             START_WIFI_SCAN:
+0653   438B CD 0D 48        call    WAIT_250MS_AND_THEN_CONTINUE
+0654   438E             START_WIFI_RESCAN:
+0655   438E 21 B0 51        ld  hl,MMENU_SCAN
+0656   4391 CD 9C 4A        call    PRINTHL                 ; Print Main Scan message
+0657   4394 CD B2 47        call    STARTWIFISCAN           ; Request Wi-Fi Scan to start
+0658   4397 ED 5B 76 F6     ld  de,(TXTTAB)                 ; We will borrow Basic Program memory area for now...
+0659   439B DD 6B           ld  ixl,e
+0660   439D DD 62           ld  ixh,d                       ; Address in IX
+0661   439F 11 14 00        ld  de,20                       ; At least 10s waiting scan to finish, retry 20 times waiting 0.5s between attempts
+0662   43A2             WIFI_SCAN_WAIT_END:
+0663   43A2                 CLEAR_UART
+0663   43A2 3E 14       >    ld  a,20
+0663   43A4 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+0664   43A7 3E 73           ld  a,CMD_SCAN_RESULTS
+0665   43A9                 SEND_DATA
+0665   43A9 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+0666   43AC 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+0667   43AF CD 05 4A        call    WAIT_MENU_SCMD_RESPONSE
+0668   43B2 C2 CA 43        jp  nz,WIFI_SCAN_SHOW_LIST      ; if success show the list
+0669   43B5 78              ld  a,b
+0670   43B6 FE 02           cp  2                           ; If 2, scan is done and nothing found
+0671   43B8 CA 24 46        jp  z,WIFI_SCAN_NONETWORKS
+0672   43BB 2E 1E           ld  l,30
+0673   43BD             WIFI_SCAN_WAITHS:
+0674   43BD 76              halt
+0675   43BE 2D              dec l
+0676   43BF 20 FC           jr  nz,WIFI_SCAN_WAITHS
+0677   43C1 1B              dec de
+0678   43C2 7B              ld  a,e
+0679   43C3 B2              or  d
+0680   43C4 CA 2D 46        jp  z,WIFI_SCAN_TIMEOUT
+0681   43C7 C3 A2 43        jp  WIFI_SCAN_WAIT_END
+0682   43CA             WIFI_SCAN_SHOW_LIST:
+0683   43CA 57              ld  d,a                         ; Save access point counter here
+0684   43CB 1E 00           ld  e,0                         ; And here how many were printed
+0685   43CD 21 35 52        ld  hl,MMENU_SCANS
+0686   43D0 CD 9C 4A        call    PRINTHL
+0687   43D3 DD E5           push    ix
+0688   43D5 E1              pop hl                          ; IX in HL
+0689   43D6             WIFI_LIST_LOOP:
+0690   43D6 7B              ld  a,e
+0691   43D7 C6 30           add a,'0'                       ; Convert to number
+0692   43D9 CD A2 00        call    CHPUT
+0693   43DC 3E 20           ld  a,' '                       ; Space
+0694   43DE CD A2 00        call    CHPUT
+0695   43E1 3E 2D           ld  a,'-'                       ; Dash
+0696   43E3 CD A2 00        call    CHPUT
+0697   43E6 3E 20           ld  a,' '                       ; Space
+0698   43E8 CD A2 00        call    CHPUT
+0699   43EB 06 18           ld  b,24                        ; Cuts AP names > 23 chars
+0700   43ED             PRT_APNAMELP:
+0701   43ED 7E              ld  a,(hl)
+0702   43EE B7              or  a
+0703   43EF CA 09 44        jp  z,PRT_APENC
+0704   43F2 CD A2 00        call    CHPUT
+0705   43F5 23              inc hl
+0706   43F6 10 F5           djnz    PRT_APNAMELP
+0707   43F8 E5              push    hl
+0708   43F9 21 CC 53        ld  hl,SCAN_TERMINATOR_CUT
+0709   43FC CD 9C 4A        call    PRINTHL
+0710   43FF E1              pop hl
+0711   4400             PRT_APNAMELP_CUT:
+0712   4400 7E              ld  a,(hl)
+0713   4401 B7              or  a
+0714   4402 CA 09 44        jp  z,PRT_APENC
+0715   4405 23              inc hl
+0716   4406 C3 00 44        jp  PRT_APNAMELP_CUT
+0717   4409             PRT_APENC:
+0718   4409 23              inc hl
+0719   440A 7E              ld  a,(hl)
+0720   440B B7              or  a
+0721   440C CA 1A 44        jp  z,PRT_APNOTENC
+0722   440F E5              push    hl
+0723   4410 21 DA 53        ld  hl,SCAN_TERMINATOR_ENC
+0724   4413 CD 9C 4A        call    PRINTHL
+0725   4416 E1              pop hl
+0726   4417 C3 22 44        jp  PRT_AP_CHKLOOP
+0727   441A             PRT_APNOTENC:
+0728   441A E5              push    hl
+0729   441B 21 D3 53        ld  hl,SCAN_TERMINATOR_OPEN
+0730   441E CD 9C 4A        call    PRINTHL
+0731   4421 E1              pop hl
+0732   4422             PRT_AP_CHKLOOP:
+0733   4422 23              inc hl
+0734   4423 1C              inc e
+0735   4424 3E 08           ld  a,SCAN_MAX_PAGE_SIZE
+0736   4426 BB              cp  e
+0737   4427 CA 32 44        jp  z,APLIST_OVERFLOW
+0738   442A 15              dec d
+0739   442B C2 D6 43        jp  nz,WIFI_LIST_LOOP
+0740   442E 06 00           ld  b,0                         ; Signal no more list data
+0741   4430 18 10           jr  APLIST_NO_OVERFLOW
+0742   4432             APLIST_OVERFLOW:
+0743   4432 15              dec d                           ; Update remaining items
+0744   4433 AF              xor a
+0745   4434 B2              or  d                           ; Still has items?
+0746   4435 28 0B           jr  z,APLIST_NO_OVERFLOW        ; No more items
+0747   4437 06 01           ld  b,1                         ; Signal that there still is data pending to list in another page
+0748   4439 E5              push    hl
+0749   443A FD E1           pop iy                          ; Save in IY the address to continue from
+0750   443C 4A              ld  c,d                         ; And C has the remaining AP count
+0751   443D 21 5D 53        ld  hl,MMENU_SCANQM
+0752   4440 18 03           jr  APLIST_NOFLW
+0753   4442             APLIST_NO_OVERFLOW:
+0754   4442                 ; If here, current page has been printed
+0755   4442                 ; E has the maximum allowable AP number
+0756   4442                 ; B will indicate if there are more items for a next page
+0757   4442                 ; IY will hold the address of the following items
+0758   4442                 ; Let's ask which one to connect
+0759   4442 21 F2 52        ld  hl,MMENU_SCANQ
+0760   4445             APLIST_NOFLW:
+0761   4445 CD 9C 4A        call    PRINTHL                 ; Show message asking which network to connect
+0762   4448 3E 30           ld  a,'0'
+0763   444A 83              add a,e
+0764   444B 5F              ld  e,a                         ; To make it easy in the selection screen
+0765   444C             WIFI_SELECT_AP:
+0766   444C CD 9F 00        call    CHGET
+0767   444F FE 1B           cp  #1b                         ; ESC?
+0768   4451 CA 61 40        jp  z,ESPSETUP                  ; When done, back to main setup
+0769   4454 FE 20           cp  #20                         ; Spacebar?
+0770   4456 CA 6A 44        jp  z,WIFI_SELECT_SPACEBAR      ; Check if re-scan or next page
+0771   4459 FE 0D           cp  CR                          ; ENTER?
+0772   445B CA 77 44        jp  z,WIFI_CONNECT_ME_CHOOSEN   ; Request AP Name and Password if needed
+0773   445E FE 30           cp  '0'                         ; Check if A is less than 0
+0774   4460 DA 0E 46        jp  c,INPUT_WFSAP_BAD_INPUT     ; If it is, ignore
+0775   4463 BB              cp  e                           ; Check if a is greater than what is in E
+0776   4464 D2 0E 46        jp  nc,INPUT_WFSAP_BAD_INPUT    ; If it is, ignore
+0777   4467 C3 01 45        jp  WIFI_CONNECT_SELECTION_OK   ; Selection Ok if here
+0778   446A             
+0779   446A             WIFI_SELECT_SPACEBAR:
+0780   446A AF              xor a
+0781   446B B2              or  d                           ; D = AP counter
+0782   446C CA 8E 43        jp  z,START_WIFI_RESCAN         ; Rescan if no more items
+0783   446F                 ; Otherwise, more items, start at IY
+0784   446F FD E5           push    iy
+0785   4471 DD E1           pop ix                          ; Restore the list from where we finished last time
+0786   4473 79              ld  a,c                         ; Restore the remaining APs to list
+0787   4474 C3 CA 43        jp  WIFI_SCAN_SHOW_LIST         ; And show
+0788   4477             
+0789   4477             WIFI_CONNECT_ME_CHOOSEN:
+0790   4477 21 34 51        ld  hl,MMENU_MANUALENTRY
+0791   447A CD 9C 4A        call    PRINTHL                 ; Show message asking AP details....
+0792   447D                 ; IX has the AP list, we don't care, but that address is ours to use to handle SSID Entry
+0793   447D DD E5           push    ix
+0794   447F E1              pop hl                          ; HL has the address
+0795   4480 0E 00           ld  c,0                         ; AP name size
+0796   4482             WIFI_CONNECT_MANUAL_ENTRY:
+0797   4482 CD 9F 00        call    CHGET
+0798   4485 FE 1B           cp  #1b                         ; ESC?
+0799   4487 CA 61 40        jp  z,ESPSETUP                  ; Back to main setup
+0800   448A FE 08           cp  #08                         ; Backspace?
+0801   448C 28 55           jr  z,WIFI_CONNECT_ME_BS        ; Check if there is something to erase
+0802   448E FE 0D           cp  #0d                         ; ENTER?
+0803   4490 28 68           jr  z,WIFI_ME_CHECK_INPUT       ; Check if ok
+0804   4492                 ; Otherwise it is a digit
+0805   4492 77              ld  (hl),a
+0806   4493 79              ld  a,c
+0807   4494 D6 20           sub 32                          ; SSID maximum is 32 characters
+0808   4496 28 EA           jr  z,WIFI_CONNECT_MANUAL_ENTRY
+0809   4498 7E              ld  a,(hl)
+0810   4499 0C              inc c
+0811   449A 23              inc hl
+0812   449B FE 20           cp  32
+0813   449D 30 04           jr  nc,WIFI_CONNECT_ME_CHKPRT2  ; Ok, not below space, but is it delete?
+0814   449F 3E 3F           ld  a,'?'                       ; Prints a question mark
+0815   44A1 18 06           jr  WIFI_CONNECT_ME_CHKPRTD
+0816   44A3             WIFI_CONNECT_ME_CHKPRT2:
+0817   44A3 FE 7F           cp  #7f
+0818   44A5 20 02           jr  nz,WIFI_CONNECT_ME_CHKPRTD
+0819   44A7 3E 3F           ld  a,'?'                       ; Prints a question mark if it is delete
+0820   44A9             WIFI_CONNECT_ME_CHKPRTD:
+0821   44A9 CD A2 00        call    CHPUT                   ; Print a char
+0822   44AC C3 82 44        jp  WIFI_CONNECT_MANUAL_ENTRY
+0823   44AF             WIFI_CONNECT_ME_0_TERM:
+0824   44AF AF              xor a
+0825   44B0 77              ld  (hl),a
+0826   44B1 23              inc hl
+0827   44B2 E5              push    hl                      ; Save it
+0828   44B3 21 95 51        ld  hl,MENU_MANUALENTRY_PWD
+0829   44B6 CD 9C 4A        call    PRINTHL                 ; We are asking if password is needed
+0830   44B9 E1              pop hl                          ; Restore it
+0831   44BA CD 9F 00        call    CHGET                   ; Get key, if Y or y, needed, otherwise not
+0832   44BD CB AF           res 5,a                         ; Force upper case
+0833   44BF FE 59           cp  'Y'
+0834   44C1 28 08           jr  z,WIFI_CONNECT_ME_PWD_Y     ; And tell using encryption
+0835   44C3 3E 6E           ld  a,'n'
+0836   44C5 CD A2 00        call    CHPUT                   ; Overwrite what was typed with 'n'
+0837   44C8 AF              xor a                           ; Ok, if here, no pwd, so no encryption
+0838   44C9 18 07           jr  WIFI_CONNECT_ME_PWD
+0839   44CB             WIFI_CONNECT_ME_PWD_Y:
+0840   44CB 3E 79           ld  a,'y'
+0841   44CD CD A2 00        call    CHPUT                   ; Print 'y'
+0842   44D0 3E 01           ld  a,1                         ; Do not change flags, pwd needed
+0843   44D2             WIFI_CONNECT_ME_PWD:
+0844   44D2 77              ld  (hl),a                      ; Save if encryption is expected
+0845   44D3 DD E5           push    ix
+0846   44D5 E1              pop hl                          ; HL containing the beginning of SSID name
+0847   44D6 3E 0D           ld  a,#0d
+0848   44D8 CD A2 00        call    CHPUT
+0849   44DB 3E 0A           ld  a,#0a
+0850   44DD CD A2 00        call    CHPUT
+0851   44E0 C3 25 45        jp  WIFI_CONNECT_AP_PWDQ        ; And the rest is handled like if menu selected
+0852   44E3             WIFI_CONNECT_ME_BS:
+0853   44E3 AF              xor a
+0854   44E4 B9              cp  c                           ; Has any data to delete?
+0855   44E5 28 9B           jr  z,WIFI_CONNECT_MANUAL_ENTRY ; No
+0856   44E7                 ; Yes
+0857   44E7 2B              dec hl                          ; Decrement pointer
+0858   44E8 0D              dec c                           ; Decrement counter
+0859   44E9 3E 08           ld  a,8                         ; Backspace
+0860   44EB CD A2 00        call    CHPUT                   ; Print it
+0861   44EE 3E 20           ld  a,' '                       ; Space
+0862   44F0 CD A2 00        call    CHPUT                   ; Print it
+0863   44F3 3E 08           ld  a,8                         ; Backspace
+0864   44F5 CD A2 00        call    CHPUT                   ; Print it
+0865   44F8 18 88           jr  WIFI_CONNECT_MANUAL_ENTRY   ; Return
+0866   44FA             WIFI_ME_CHECK_INPUT:
+0867   44FA AF              xor a
+0868   44FB B9              cp  c                           ; Has received any data?
+0869   44FC 28 84           jr  z,WIFI_CONNECT_MANUAL_ENTRY ; No
+0870   44FE C3 AF 44        jp  WIFI_CONNECT_ME_0_TERM      ; Yes, so handle SSID input termination
+0871   4501             
+0872   4501             WIFI_CONNECT_SELECTION_OK:
+0873   4501 CD A2 00        call    CHPUT                   ; Valid input, print it
+0874   4504 1E 30           ld  e,'0'
+0875   4506 93              sub a,e                         ; Get in decimal
+0876   4507 5F              ld  e,a                         ; Back in E
+0877   4508                 ; IX has the AP list, A which one has been selected, now our routine will do it
+0878   4508 3E 0D           ld  a,#0d
+0879   450A CD A2 00        call    CHPUT
+0880   450D 3E 0A           ld  a,#0a
+0881   450F CD A2 00        call    CHPUT
+0882   4512 DD E5           push    ix
+0883   4514 E1              pop hl                          ; put IX in HL
+0884   4515             WIFI_CONNECT_AP_SRCH:
+0885   4515 7B              ld  a,e
+0886   4516 B7              or  a
+0887   4517             WIFI_CONNECT_AP_SRCH.1:
+0888   4517 CA 25 45        jp  z,WIFI_CONNECT_AP_PWDQ
+0889   451A 7E              ld  a,(hl)
+0890   451B 23              inc hl
+0891   451C B7              or  a
+0892   451D C2 17 45        jp  nz,WIFI_CONNECT_AP_SRCH.1   ; Find string terminator
+0893   4520                 ; Found, jump encryption byte
+0894   4520 23              inc hl
+0895   4521 1D              dec e                           ; Decrement selection, if 0 we are done
+0896   4522 C2 17 45        jp  nz,WIFI_CONNECT_AP_SRCH.1
+0897   4525             WIFI_CONNECT_AP_PWDQ:
+0898   4525                 ; HL has the address of AP name string
+0899   4525 54              ld  d,h
+0900   4526 5D              ld  e,l                         ; Save copy in D
+0901   4527 01 00 00        ld  bc,0                        ; BC will have the ap connection data length
+0902   452A             WIFI_CONNECT_APSIZE:
+0903   452A 03              inc bc
+0904   452B 1A              ld  a,(de)
+0905   452C 13              inc de
+0906   452D B7              or  a
+0907   452E C2 2A 45        jp  nz,WIFI_CONNECT_APSIZE      ; Count size, including zero terminator
+0908   4531                 ; Check for encryption
+0909   4531 1A              ld  a,(de)
+0910   4532 B7              or  a
+0911   4533 CA C4 45        jp  z,WIFI_CONNECT_SENDCMD      ; If no password requested, good to go
+0912   4536                 ; Shoot, need to request password, well, let's do it
+0913   4536 E5              push    hl                      ; Save HL
+0914   4537 21 AF 52        ld  hl,MMENU_ASKPWD
+0915   453A CD 9C 4A        call    PRINTHL                 ; Inform that user need to input PWD
+0916   453D E1              pop hl                          ; Restore HL
+0917   453E FD 21 00 00     ld  iy,0                        ; IY will help in backspacing
+0918   4542 DD 26 01        ld  ixh,1                       ; Start hidden
+0919   4545             WIFI_CONNECT_RCV_PWD:
+0920   4545 CD 9F 00        call    CHGET
+0921   4548 FE 1B           cp  #1b                         ; ESC?
+0922   454A CA 61 40        jp  z,ESPSETUP                  ; When done, back to main setup
+0923   454D FE 08           cp  #08                         ; Backspace?
+0924   454F CA A0 45        jp  z,WIFI_CONNECT_RCV_PWD_BS   ; Check if there is something to erase
+0925   4552 FE 0D           cp  #0d                         ; ENTER?
+0926   4554 CA BD 45        jp  z,WIFI_PWD_CHECK_INPUT      ; Check if ok
+0927   4557 FE 7F           cp  #7f                         ; Delete?
+0928   4559 CA 8C 45        jp  z,WIFI_CONNECT_RCV_PWDH     ; Change password from clear to hidden or vice versa
+0929   455C             WIFI_CONNECT_RCV_PWD_STR:
+0930   455C                 ; Ok, so it is a digit and store
+0931   455C 12              ld  (de),a
+0932   455D FD 7D           ld  a,iyl
+0933   455F D6 3F           sub 63                          ; 63 chars password limit (WPA2 encryption)
+0934   4561 28 E2           jr  z,WIFI_CONNECT_RCV_PWD
+0935   4563 1A              ld  a,(de)
+0936   4564 03              inc bc
+0937   4565 13              inc de
+0938   4566 FD 23           inc iy                          ; Increment counters and pointer
+0939   4568 F5              push    af                      ; Save A
+0940   4569 DD 7C           ld  a,ixh
+0941   456B B7              or  a                           ; If zero, print char, otherwise print *
+0942   456C 28 09           jr  z,WIFI_CONNECT_RCV_PWD_CHAR
+0943   456E F1              pop af
+0944   456F 3E 2A           ld  a,'*'                       ; Print * and keep password hidden
+0945   4571 CD A2 00        call    CHPUT
+0946   4574 C3 45 45        jp  WIFI_CONNECT_RCV_PWD        ; And back to receiving digits
+0947   4577             WIFI_CONNECT_RCV_PWD_CHAR:
+0948   4577 F1              pop af
+0949   4578 FE 20           cp  32
+0950   457A 30 04           jr  nc,WIFI_CONNECT_RCV_CHKPRT2 ; Ok, not below space, but is it delete?
+0951   457C 3E 3F           ld  a,'?'                       ; Prints a question mark
+0952   457E 18 06           jr  WIFI_CONNECT_RCV_CHKPRTD
+0953   4580             WIFI_CONNECT_RCV_CHKPRT2:
+0954   4580 FE 7F           cp  #7f
+0955   4582 20 02           jr  nz,WIFI_CONNECT_RCV_CHKPRTD
+0956   4584 3E 3F           ld  a,'?'                       ; Prints a question mark if it is delete
+0957   4586             WIFI_CONNECT_RCV_CHKPRTD:
+0958   4586 CD A2 00        call    CHPUT                   ; Print a char
+0959   4589 C3 45 45        jp  WIFI_CONNECT_RCV_PWD        ; And back to receiving digits
+0960   458C             
+0961   458C             WIFI_CONNECT_RCV_PWDH:
+0962   458C FD 7D           ld  a,iyl
+0963   458E FD B4           or  iyh
+0964   4590 C2 5C 45        jp  nz,WIFI_CONNECT_RCV_PWD_STR ; If digits entered, can't change password behavior, so it is a pass phrase char
+0965   4593 AF              xor a
+0966   4594 DD B4           or  ixh
+0967   4596 DD 26 01        ld  ixh,1
+0968   4599 28 AA           jr  z,WIFI_CONNECT_RCV_PWD      ; Return if it was 0
+0969   459B DD 26 00        ld  ixh,0
+0970   459E 28 A5           jr  z,WIFI_CONNECT_RCV_PWD      ; Otherwise set to 0 and return
+0971   45A0             
+0972   45A0             WIFI_CONNECT_RCV_PWD_BS:
+0973   45A0 FD 7D           ld  a,iyl
+0974   45A2 FD B4           or  iyh
+0975   45A4 CA 45 45        jp  z,WIFI_CONNECT_RCV_PWD      ; If no digits entered, nothing to erase
+0976   45A7 FD 2B           dec iy                          ; Decrement counter
+0977   45A9 0B              dec bc                          ; Decrement counter
+0978   45AA 1B              dec de                          ; Decrement pointer
+0979   45AB 3E 08           ld  a,8                         ; Backspace
+0980   45AD CD A2 00        call    CHPUT                   ; Print it
+0981   45B0 3E 20           ld  a,' '                       ; Space
+0982   45B2 CD A2 00        call    CHPUT                   ; Print it
+0983   45B5 3E 08           ld  a,8                         ; Backspace
+0984   45B7 CD A2 00        call    CHPUT                   ; Print it
+0985   45BA C3 45 45        jp  WIFI_CONNECT_RCV_PWD        ; Return
+0986   45BD             
+0987   45BD             WIFI_PWD_CHECK_INPUT:
+0988   45BD FD 7D           ld  a,iyl
+0989   45BF FD B4           or  iyh
+0990   45C1 CA 45 45        jp  z,WIFI_CONNECT_RCV_PWD      ; If no digits entered, no password to send
+0991   45C4                 ; Otherwise done and ready to send
+0992   45C4             WIFI_CONNECT_SENDCMD:
+0993   45C4 CD 0D 48        call    WAIT_250MS_AND_THEN_CONTINUE
+0994   45C7 E5              push    hl
+0995   45C8 21 6B 52        ld  HL,MMENU_CONNECTING
+0996   45CB CD 9C 4A        call    PRINTHL
+0997   45CE E1              pop hl
+0998   45CF                 ; Print AP name
+0999   45CF E5              push    hl
+1000   45D0 CD A6 4A        call    PRINTHLINE              ; Print AP Name
+1001   45D3 E1              pop hl
+1002   45D4                 ; HL has the address of our data, BC the data size, so it is just needed to send the command
+1003   45D4                 CLEAR_UART
+1003   45D4 3E 14       >    ld  a,20
+1003   45D6 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1004   45D9 3E 41           ld  a,CMD_WIFI_CONNECT
+1005   45DB                 SEND_DATA
+1005   45DB 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1006   45DE 78              ld  a,b                         ; Size MSB is in B
+1007   45DF                 SEND_DATA
+1007   45DF 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1008   45E2 79              ld  a,c                         ; Size LSB is in c
+1009   45E3                 SEND_DATA
+1009   45E3 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1010   45E6             WIFI_CONNECT_SENDCMDLP:
+1011   45E6 7E              ld  a,(hl)
+1012   45E7                 SEND_DATA
+1012   45E7 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1013   45EA 23              inc hl
+1014   45EB 0B              dec bc
+1015   45EC 78              ld  a,b
+1016   45ED B1              or  c
+1017   45EE C2 E6 45        jp  nz,WIFI_CONNECT_SENDCMDLP
+1018   45F1 21 58 02        ld  hl,600                      ; Wait Up To 10s
+1019   45F4 3E 41           ld  a,CMD_WIFI_CONNECT          ; Our command
+1020   45F6 CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE
+1021   45F9 CA 05 46        jp  z,WIFI_CONNECT_FAIL
+1022   45FC 21 10 57        ld  hl,STR_SENDING_OK_JN        ; Success
+1023   45FF CD 9C 4A        call    PRINTHL
+1024   4602 C3 05 48        jp  WAIT_2S_AND_THEN_MAINMENU
+1025   4605             WIFI_CONNECT_FAIL:
+1026   4605 21 32 57        ld  hl,STR_SENDING_NOK_JN       ; Failure
+1027   4608 CD 9C 4A        call    PRINTHL
+1028   460B C3 01 48        jp  WAIT_4S_AND_THEN_MAINMENU
+1029   460E             
+1030   460E             INPUT_WFSAP_BAD_INPUT:
+1031   460E C5              push    bc
+1032   460F D5              push    de
+1033   4610 F5              push    af
+1034   4611 E5              push    hl
+1035   4612 DD E5           push    ix
+1036   4614 FD E5           push    iy
+1037   4616 CD C0 00        call    BEEP                    ; Wrong Input, beep
+1038   4619 FD E1           pop iy
+1039   461B DD E1           pop ix
+1040   461D E1              pop hl
+1041   461E F1              pop af
+1042   461F D1              pop de
+1043   4620 C1              pop bc
+1044   4621 C3 4C 44        jp WIFI_SELECT_AP               ; Return
+1045   4624             
+1046   4624             WIFI_SCAN_NONETWORKS:
+1047   4624 21 1E 52        ld  hl,MMENU_SCANN
+1048   4627 CD 9C 4A        call    PRINTHL
+1049   462A C3 01 48        jp  WAIT_4S_AND_THEN_MAINMENU
+1050   462D             
+1051   462D             WIFI_SCAN_TIMEOUT:
+1052   462D 21 FE 51        ld  hl,MMENU_SCANF
+1053   4630 CD 9C 4A        call    PRINTHL
+1054   4633 C3 01 48        jp  WAIT_4S_AND_THEN_MAINMENU
+1055   4636             
+1056   4636             SET_WIFI_TIMEOUT:
+1057   4636 CD 0D 48        call    WAIT_250MS_AND_THEN_CONTINUE
+1058   4639 21 E1 53        ld  hl,MMENU_TIMEOUT
+1059   463C CD 9C 4A        call    PRINTHL                 ; Print Main Timeout message
+1060   463F CD 7E 48        call    CHECKTIMEOUT            ; TimeOut is on or off?
+1061   4642 CA 5A 46        jp  z,WIFI_SET_ALWAYS_ON        ; If 0, always on
+1062   4645                 ; Otherwise there is a timeout
+1063   4645 E5              push    hl
+1064   4646 21 18 55        ld hl,MMENU_TIMEOUT_NOTALWAYSON1
+1065   4649 CD 9C 4A        call    PRINTHL
+1066   464C E1              pop hl
+1067   464D CD 9C 4A        call    PRINTHL
+1068   4650 21 2E 55        ld hl,MMENU_TIMEOUT_NOTALWAYSON2
+1069   4653 CD 9C 4A        call    PRINTHL
+1070   4656 16 00           ld  d,0                         ; Count digits
+1071   4658 18 10           jr  INPUT_TIMEOUT
+1072   465A             WIFI_SET_ALWAYS_ON:
+1073   465A 21 C3 54        ld  hl,MMENU_TIMEOUT_ALWAYSON
+1074   465D CD 9C 4A        call    PRINTHL
+1075   4660 ED 5B 76 F6     ld  de,(TXTTAB)                 ; We will borrow Basic Program memory area for now...
+1076   4664 DD 6B           ld  ixl,e
+1077   4666 DD 62           ld  ixh,d                       ; Address in IX
+1078   4668 16 00           ld  d,0                         ; Count digits
+1079   466A             INPUT_TIMEOUT:
+1080   466A CD 9F 00        call    CHGET
+1081   466D FE 1B           cp  #1b                         ; ESC?
+1082   466F CA 61 40        jp  z,ESPSETUP                  ; When done, back to main setup
+1083   4672 FE 0D           cp  #0d                         ; ENTER?
+1084   4674 CA B8 46        jp  z,SET_WIFI_CHECK_INPUT      ; Check if ok
+1085   4677 FE 08           cp  #08                         ; Backspace?
+1086   4679 CA 9E 46        jp  z,SET_WIFI_BS_INPUT         ; Check if there is something to erase
+1087   467C FE 30           cp  '0'                         ; Check if A is less than 0
+1088   467E DA 98 46        jp  c,INPUT_TIMEOUT_BAD_INPUT   ; if it is, ignore
+1089   4681 FE 3A           cp  '9'+1                       ; Check if a is greater than  9
+1090   4683 D2 98 46        jp  nc,INPUT_TIMEOUT_BAD_INPUT  ; If it is, ignore
+1091   4686 DD 77 00        ld  (ix+0),a                    ; Save it
+1092   4689 CD A2 00        call    CHPUT                   ; It is valid, so print it
+1093   468C 14              inc d                           ; Increment digit count
+1094   468D DD 23           inc ix                          ; Increment pointer
+1095   468F 3E 03           ld  a,3
+1096   4691 BA              cp  d
+1097   4692 CA B8 46        jp  z,SET_WIFI_CHECK_INPUT      ; All we can do is accept up to 3 digits, check if ok
+1098   4695 C3 6A 46        jp  INPUT_TIMEOUT               ; Not done yet, so continue
+1099   4698             
+1100   4698             INPUT_TIMEOUT_BAD_INPUT:
+1101   4698 CD C0 00        call    BEEP                    ; Wrong Input, beep
+1102   469B C3 6A 46        jp INPUT_TIMEOUT                ; Return
+1103   469E             
+1104   469E             SET_WIFI_BS_INPUT:
+1105   469E AF              xor a
+1106   469F B2              or  d                           ; Counter has any digit?
+1107   46A0 CA 6A 46        jp  z,INPUT_TIMEOUT             ; Nope, so just continue
+1108   46A3 15              dec d                           ; Decrement counter
+1109   46A4 DD 2B           dec ix                          ; Decrement pointer
+1110   46A6 3E 08           ld  a,8                         ; Backspace
+1111   46A8 CD A2 00        call    CHPUT                   ; Print it
+1112   46AB 3E 20           ld  a,' '                       ; Space
+1113   46AD CD A2 00        call    CHPUT                   ; Print it
+1114   46B0 3E 08           ld  a,8                         ; Backspace
+1115   46B2 CD A2 00        call    CHPUT                   ; Print it
+1116   46B5 C3 6A 46        jp  INPUT_TIMEOUT               ; Return
+1117   46B8             
+1118   46B8             SET_WIFI_CHECK_INPUT:
+1119   46B8 AF              xor a
+1120   46B9 B2              or  d                           ; Counter has any digits
+1121   46BA CA 6A 46        jp  z,INPUT_TIMEOUT             ; Nope, so just continue
+1122   46BD                 ; IX is pointing one position after last digit, so revert
+1123   46BD DD 2B           dec ix
+1124   46BF DD 7E 00        ld  a,(ix+0)                    ; Digit in A
+1125   46C2 D6 30           sub '0'                         ; Convert it to decimal
+1126   46C4 26 00           ld  h,0                         ; First digit, so H is 0
+1127   46C6 6F              ld  l,a                         ; And L has the digit
+1128   46C7 15              dec d                           ; If digits finished, just set
+1129   46C8 CA F4 46        jp  z,SET_WIFI_EXECUTE_SET_COMMAND
+1130   46CB DD 2B           dec ix
+1131   46CD DD 7E 00        ld  a,(ix+0)                    ; Digit in A
+1132   46D0 D6 30           sub '0'                         ; Convert it to decimal
+1133   46D2 87              add a,a                         ; A*2
+1134   46D3 4F              ld  c,a                         ; A*2 in C
+1135   46D4 87              add a,a                         ; A*4
+1136   46D5 87              add a,a                         ; A*8
+1137   46D6 81              add a,c                         ; A*10
+1138   46D7                 ; Up to here, we can get 90 + 9, 99, won't go to H anyway, just add to L
+1139   46D7 85              add a,l                         ; L has the first digit
+1140   46D8 6F              ld  l,a                         ; And now L has the two digits
+1141   46D9 15              dec d                           ; If digits finished, just set
+1142   46DA CA F4 46        jp  z,SET_WIFI_EXECUTE_SET_COMMAND
+1143   46DD DD 2B           dec ix
+1144   46DF DD 7E 00        ld  a,(ix+0)                    ; Digit in A
+1145   46E2 D6 30           sub '0'                         ; Convert it to decimal
+1146   46E4 87              add a,a                         ; A*2
+1147   46E5 4F              ld  c,a                         ; A*2 in C
+1148   46E6 87              add a,a                         ; A*4
+1149   46E7 87              add a,a                         ; A*8
+1150   46E8 81              add a,c                         ; A*10
+1151   46E9 EB              ex  de,hl                       ; Get the two digits results in de
+1152   46EA 6F              ld  l,a
+1153   46EB 26 00           ld  h,0                         ; HL = A*10
+1154   46ED 29              add hl,hl                       ; HL = A*20
+1155   46EE 4D              ld  c,l
+1156   46EF 44              ld  b,h                         ; BC = A*20
+1157   46F0 29              add hl,hl                       ; HL = A*40
+1158   46F1 29              add hl,hl                       ; HL = A*80
+1159   46F2 09              add hl,bc                       ; HL = A*100
+1160   46F3 19              add hl,de                       ; HL = three digits result
+1161   46F4                 ; This was the last digit, up to three
+1162   46F4             SET_WIFI_EXECUTE_SET_COMMAND:
+1163   46F4 C3 41 47        jp  SET_ESP_WIFI_TIMEOUT        ; And set and done
+1164   46F7             
+1165   46F7             ;============================
+1166   46F7             ;===  SETUP Menu Routines  ==
+1167   46F7             ;===      NAGLE Menu       ==
+1168   46F7             ;============================
+1169   46F7             SET_NAGLE:
+1170   46F7 CD 0D 48        call    WAIT_250MS_AND_THEN_CONTINUE
+1171   46FA 21 66 55        ld  hl,MMENU_NAGLE
+1172   46FD CD 9C 4A        call    PRINTHL                 ; Print Main Nagle message
+1173   4700 CD 30 48        call    CHECKNAGLE              ; Nagle is on or off?
+1174   4703 20 1E           jr  nz,NAGLE_IS_ON              ;
+1175   4705 21 9B 56        ld  hl,MMENU_NAGLE_OFF          ; Show the menu telling nagle is off
+1176   4708 CD 9C 4A        call    PRINTHL                 ; Print options
+1177   470B             SET_NAGLE_WI_ON:
+1178   470B CD 9F 00        call    CHGET
+1179   470E FE 1B           cp  #1b                         ; ESC?
+1180   4710 CA 61 40        jp  z,ESPSETUP                  ; When done, back to main setup
+1181   4713 FE 4F           cp  'O'                         ; Toggle Nagle On
+1182   4715 CA D0 47        jp  z,SET_NAGLE_ON              ;
+1183   4718 FE 6F           cp  'o'                         ; Toggle Nagle On
+1184   471A CA D0 47        jp  z,SET_NAGLE_ON              ;
+1185   471D CD C0 00        call    BEEP                    ; Wrong Input, beep
+1186   4720 C3 0B 47        jp  SET_NAGLE_WI_ON             ; And return waiting key
+1187   4723             
+1188   4723             NAGLE_IS_ON:
+1189   4723 21 5B 56        ld  hl,MMENU_NAGLE_ON           ; Show the menu telling nagle is on
+1190   4726 CD 9C 4A        call    PRINTHL                 ; Print options
+1191   4729             SET_NAGLE_WI_OFF:
+1192   4729 CD 9F 00        call    CHGET
+1193   472C FE 1B           cp  #1b                         ; ESC?
+1194   472E CA 61 40        jp  z,ESPSETUP                  ; When done, back to main setup
+1195   4731 FE 4F           cp  'O'                         ; Toggle Nagle Off
+1196   4733 CA 81 47        jp  z,SET_NAGLE_OFF             ;
+1197   4736 FE 6F           cp  'o'                         ; Toggle Nagle Off
+1198   4738 CA 81 47        jp  z,SET_NAGLE_OFF             ;
+1199   473B CD C0 00        call    BEEP                    ; Wrong Input, beep
+1200   473E C3 29 47        jp  SET_NAGLE_WI_OFF            ; And return waiting key
+1201   4741             
+1202   4741             ;============================
+1203   4741             ;===  SETUP Menu Routines  ==
+1204   4741             ;===  Auxiliary Functions  ==
+1205   4741             ;============================
+1206   4741             SET_ESP_WIFI_TIMEOUT:
+1207   4741 EB              ex  de,hl
+1208   4742 3E 0D           ld  a,#0d
+1209   4744 CD A2 00        call    CHPUT
+1210   4747 3E 0A           ld  a,#0a
+1211   4749 CD A2 00        call    CHPUT
+1212   474C 21 DC 56        ld  hl,STR_SENDING              ; Indicate it is sending a command
+1213   474F CD 9C 4A        call    PRINTHL
+1214   4752                 CLEAR_UART
+1214   4752 3E 14       >    ld  a,20
+1214   4754 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1215   4757 3E 54           ld  a,CMD_TIMER_SET
+1216   4759                 SEND_DATA
+1216   4759 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1217   475C AF              xor a                           ; Size MSB is 0
+1218   475D                 SEND_DATA
+1218   475D 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1219   4760 3E 02           ld  a,2                         ; Size LSB is 2
+1220   4762                 SEND_DATA
+1220   4762 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1221   4765 7A              ld  a,d                         ; Timeout MSB
+1222   4766                 SEND_DATA
+1222   4766 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1223   4769 7B              ld  a,e                         ; Timeout LSB
+1224   476A                 SEND_DATA
+1224   476A 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1225   476D 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1226   4770 3E 54           ld  a,CMD_TIMER_SET             ; Our command
+1227   4772 CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE
+1228   4775 CA 26 49        jp  z,MENU_BAD_END
+1229   4778 21 F7 56        ld  hl,STR_SENDING_OK           ; Success
+1230   477B CD 9C 4A        call    PRINTHL
+1231   477E C3 05 48        jp  WAIT_2S_AND_THEN_MAINMENU
+1232   4781             
+1233   4781             SET_NAGLE_OFF:
+1234   4781 3E 4F           ld  a,'O'
+1235   4783 CD A2 00        call    CHPUT
+1236   4786 3E 0D           ld  a,#0d
+1237   4788 CD A2 00        call    CHPUT
+1238   478B 3E 0A           ld  a,#0a
+1239   478D CD A2 00        call    CHPUT
+1240   4790 21 DC 56        ld  hl,STR_SENDING              ; Indicate it is sending a command
+1241   4793 CD 9C 4A        call    PRINTHL
+1242   4796                 CLEAR_UART
+1242   4796 3E 14       >    ld  a,20
+1242   4798 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1243   479B 3E 4E           ld  a,CMD_NAGLE_OFF
+1244   479D                 SEND_DATA
+1244   479D 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1245   47A0 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1246   47A3 CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE
+1247   47A6 CA 26 49        jp  z,MENU_BAD_END
+1248   47A9 21 F7 56        ld  hl,STR_SENDING_OK           ; Success
+1249   47AC CD 9C 4A        call    PRINTHL
+1250   47AF C3 05 48        jp  WAIT_2S_AND_THEN_MAINMENU
+1251   47B2             
+1252   47B2             STARTWIFISCAN:
+1253   47B2                 CLEAR_UART
+1253   47B2 3E 14       >    ld  a,20
+1253   47B4 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1254   47B7 3E 53           ld  a,CMD_SCAN_START
+1255   47B9                 SEND_DATA
+1255   47B9 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1256   47BC 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1257   47BF CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE
+1258   47C2 C0              ret nz                          ; If success return
+1259   47C3 3E 0D           ld  a,CR
+1260   47C5 CD A2 00        call    CHPUT
+1261   47C8 3E 0A           ld  a,LF
+1262   47CA CD A2 00        call    CHPUT
+1263   47CD C3 25 49        jp  MENU_SUB_BAD_END            ; If error, nothing much to do, main menu
+1264   47D0             
+1265   47D0             SET_NAGLE_ON:
+1266   47D0 3E 4F           ld  a,'O'
+1267   47D2 CD A2 00        call    CHPUT
+1268   47D5 3E 0D           ld  a,#0d
+1269   47D7 CD A2 00        call    CHPUT
+1270   47DA 3E 0A           ld  a,#0a
+1271   47DC CD A2 00        call    CHPUT
+1272   47DF 21 DC 56        ld  hl,STR_SENDING              ; Indicate it is sending a command
+1273   47E2 CD 9C 4A        call    PRINTHL
+1274   47E5                 CLEAR_UART
+1274   47E5 3E 14       >    ld  a,20
+1274   47E7 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1275   47EA 3E 44           ld  a,CMD_NAGLE_ON
+1276   47EC                 SEND_DATA
+1276   47EC 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1277   47EF 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1278   47F2 CD 2F 49        call    WAIT_MENU_QCMD_RESPONSE
+1279   47F5 CA 26 49        jp  z,MENU_BAD_END
+1280   47F8 21 F7 56        ld  hl,STR_SENDING_OK           ; Success
+1281   47FB CD 9C 4A        call    PRINTHL
+1282   47FE C3 05 48        jp  WAIT_2S_AND_THEN_MAINMENU
+1283   4801             
+1284   4801             WAIT_4S_AND_THEN_MAINMENU:
+1285   4801 3E F0           ld  a,240                       ; Wait 4 seconds with message on screen
+1286   4803 18 02           jr  WAIT_AND_THEN_MAINMENU
+1287   4805             WAIT_2S_AND_THEN_MAINMENU:
+1288   4805 3E 78           ld  a,120                       ; Wait 2 seconds with message on screen
+1289   4807             WAIT_AND_THEN_MAINMENU:
+1290   4807 CD 0F 48        call    WAIT_BEFORE_CONTINUING
+1291   480A C3 61 40        jp  ESPSETUP                    ; When done, back to main setup
+1292   480D             WAIT_250MS_AND_THEN_CONTINUE:
+1293   480D 3E 0F           ld  a,15                        ; Wait 250 ms then continue
+1294   480F             WAIT_BEFORE_CONTINUING:
+1295   480F 76              halt
+1296   4810 3D              dec a
+1297   4811                 ; If not zero, our time out has not elapsed
+1298   4811 20 FC           jr  nz,WAIT_BEFORE_CONTINUING
+1299   4813 C9              ret                             ; Time out and continue
+1300   4814             
+1301   4814             ; Check Auto Clock
+1302   4814             ISCLKAUTO:
+1303   4814                 CLEAR_UART
+1303   4814 3E 14       >    ld  a,20
+1303   4816 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1304   4819 3E 63           ld  a,CMD_QUERY_ACLK_SETTINGS
+1305   481B                 SEND_DATA
+1305   481B 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1306   481E 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1307   4821 ED 5B 76 F6     ld  de,(TXTTAB)                 ; We will borrow Basic Program memory area for now...
+1308   4825 DD 6B           ld  ixl,e
+1309   4827 DD 62           ld  ixh,d                       ; address in IX
+1310   4829 CD 74 49        call    WAIT_MENU_CMD_RESPONSE
+1311   482C CA 25 49        jp  z,MENU_SUB_BAD_END
+1312   482F                 ; Response received, IX+0 and IX+1 has Auto Clock and GMT, A
+1313   482F C9              ret
+1314   4830             
+1315   4830             ; Check what is the current NAGLE setting
+1316   4830             CHECKNAGLE:
+1317   4830                 CLEAR_UART
+1317   4830 3E 14       >    ld  a,20
+1317   4832 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1318   4835 3E 51           ld  a,CMD_QUERY_ESP_SETTINGS
+1319   4837                 SEND_DATA
+1319   4837 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1320   483A 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1321   483D ED 5B 76 F6     ld  de,(TXTTAB)                 ; We will borrow Basic Program memory area for now...
+1322   4841 DD 6B           ld  ixl,e
+1323   4843 DD 62           ld  ixh,d                       ; Address in IX
+1324   4845 CD 74 49        call    WAIT_MENU_CMD_RESPONSE
+1325   4848 CA 25 49        jp  z,MENU_SUB_BAD_END
+1326   484B                 ; Response received, nagle is the first one, ON: or OFF:
+1327   484B 3E 4F           ld  a,'O'
+1328   484D DD BE 00        cp  (ix+0)
+1329   4850 C2 25 49        jp  nz,MENU_SUB_BAD_END
+1330   4853 3E 4E           ld  a,'N'
+1331   4855 DD BE 01        cp  (ix+1)
+1332   4858 C2 65 48        jp  nz,CHECK_NAGLE_OFF
+1333   485B 3E 3A           ld  a,':'
+1334   485D DD BE 02        cp  (ix+2)
+1335   4860 C2 25 49        jp  nz,MENU_SUB_BAD_END
+1336   4863 B7              or  a                           ; It will make it NZ
+1337   4864 C9              ret
+1338   4865             CHECK_NAGLE_OFF:
+1339   4865 3E 46           ld  a,'F'
+1340   4867 DD BE 01        cp  (ix+1)
+1341   486A C2 25 49        jp  nz,MENU_SUB_BAD_END
+1342   486D 3E 46           ld  a,'F'
+1343   486F DD BE 02        cp  (ix+2)
+1344   4872 C2 25 49        jp  nz,MENU_SUB_BAD_END
+1345   4875 3E 3A           ld  a,':'
+1346   4877 DD BE 03        cp  (ix+3)
+1347   487A C2 25 49        jp  nz,MENU_SUB_BAD_END
+1348   487D                 ; Already has zero, so just ret
+1349   487D C9              ret
+1350   487E             
+1351   487E             ; Check what is the current TIMEOUT setting, return 0 if always on, otherwise there is a timeout
+1352   487E             ; Will return a zero terminated string @ HL that can be printed
+1353   487E             ; Will return the value in DE
+1354   487E             CHECKTIMEOUT:
+1355   487E                 CLEAR_UART
+1355   487E 3E 14       >    ld  a,20
+1355   4880 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1356   4883 3E 51           ld  a,CMD_QUERY_ESP_SETTINGS
+1357   4885                 SEND_DATA
+1357   4885 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1358   4888 21 3C 00        ld  hl,60                       ; Wait Up To 1s
+1359   488B ED 5B 76 F6     ld  de,(TXTTAB)                 ; We will borrow Basic Program memory area for now...
+1360   488F DD 6B           ld  ixl,e
+1361   4891 DD 62           ld  ixh,d                       ; Address in IX
+1362   4893 CD 74 49        call    WAIT_MENU_CMD_RESPONSE
+1363   4896 CA 25 49        jp  z,MENU_SUB_BAD_END
+1364   4899                 ; Response received, nagle is the first one, ON: or OFF:
+1365   4899 3E 3A           ld  a,':'
+1366   489B DD 23           inc ix
+1367   489D DD 23           inc ix                          ; Nagle response is two or three bytes long, let's check
+1368   489F 0B              dec bc
+1369   48A0 0B              dec bc                          ; Remaining bytes
+1370   48A1 DD BE 00        cp  (ix+0)
+1371   48A4 CA B0 48        jp  z,CHECKTIMEOUT.1
+1372   48A7 DD 23           inc ix
+1373   48A9 0B              dec bc                          ; Remaining bytes
+1374   48AA DD BE 00        cp  (ix+0)
+1375   48AD C2 25 49        jp  nz,MENU_SUB_BAD_END         ; If not here, sorry to say it is an error
+1376   48B0             CHECKTIMEOUT.1:
+1377   48B0 78              ld  a,b
+1378   48B1 B1              or  c                           ; All data read?
+1379   48B2 CA 25 49        jp  z,MENU_SUB_BAD_END          ; If so, sorry to say it is an error
+1380   48B5 DD 23           inc ix                          ; At the first digit
+1381   48B7 0B              dec bc                          ; Remaining bytes
+1382   48B8 78              ld  a,b
+1383   48B9 B1              or  c                           ; All data read?
+1384   48BA CA 25 49        jp  z,MENU_SUB_BAD_END          ; If so, sorry to say it is an error
+1385   48BD DD E5           push    ix                      ; This is the start of the string, save it
+1386   48BF 26 00           ld  h,0                         ; No digit so far
+1387   48C1                 ; It can have up to three digits
+1388   48C1             CHECKTIMEOUT.2:
+1389   48C1 3E 3A           ld  a,':'
+1390   48C3 DD BE 00        cp  (ix+0)                      ; Check if it is the separator
+1391   48C6 CA E7 48        jp  z,CHECKTIMEOUT.3            ; If it is routine will follow through
+1392   48C9 DD 7E 00        ld  a,(ix+0)                    ; Get the supposed digit in A
+1393   48CC 2E 3A           ld  l,'9'+1
+1394   48CE BD              cp  l
+1395   48CF D2 24 49        jp  nc,MENU_SUB_BAD_END_1S      ; If more than '9', sorry to say it is an error
+1396   48D2 2E 30           ld  l,'0'
+1397   48D4 BD              cp  l
+1398   48D5 DA 24 49        jp  c,MENU_SUB_BAD_END_1S       ; If less than '0', sorry to say it is an error
+1399   48D8 24              inc h                           ; It is not, so it is a digit
+1400   48D9 3E 03           ld  a,3
+1401   48DB BC              cp  h
+1402   48DC DA 24 49        jp  c,MENU_SUB_BAD_END_1S       ; If more than three digits, sorry to say it is an error
+1403   48DF DD 23           inc ix                          ; Increase pointer
+1404   48E1 0B              dec bc                          ; Decrease remaining
+1405   48E2 78              ld  a,b
+1406   48E3 B1              or  c                           ; All data read?
+1407   48E4 C2 C1 48        jp  nz,CHECKTIMEOUT.2           ; Not, so rinse and repeat
+1408   48E7             CHECKTIMEOUT.3:
+1409   48E7 DD 36 00 00     ld  (ix+0),0                    ; Null terminate string value
+1410   48EB DD 2B           dec ix
+1411   48ED DD 7E 00        ld  a,(ix+0)                    ; 1st Digit in A
+1412   48F0 D6 30           sub '0'                         ; Convert it to decimal value
+1413   48F2 5F              ld  e,a
+1414   48F3 16 00           ld  d,0                         ; DE has first digit
+1415   48F5 25              dec h                           ; Decrement digit counter
+1416   48F6 28 28           jr  z,CHECKTIMEOUT.END          ; If all digits, done
+1417   48F8                 ; Now second digit, multiply it by 10 and add to E, even if 90 + 9, still fits E
+1418   48F8 DD 2B           dec ix
+1419   48FA DD 7E 00        ld  a,(ix+0)                    ; 2nd Digit
+1420   48FD D6 30           sub '0'                         ; Convert it to decimal value
+1421   48FF 87              add a,a                         ; A has *2
+1422   4900 4F              ld  c,a                         ; C has *2
+1423   4901 87              add a,a                         ; A has *4
+1424   4902 87              add a,a                         ; A has *8
+1425   4903 81              add a,c                         ; A has *10
+1426   4904 83              add a,e                         ; A has two digits result
+1427   4905 5F              ld  e,a                         ; Back to E, DE has two digits results
+1428   4906 25              dec h                           ; Decrement digit counter
+1429   4907 28 17           jr  z,CHECKTIMEOUT.END          ; If all digits, done
+1430   4909                 ; Now Third digit, multiply it by 100 and add to DE
+1431   4909 DD 2B           dec ix
+1432   490B DD 7E 00        ld  a,(ix+0)                    ; 3rd Digit
+1433   490E D6 30           sub '0'                         ; Convert it to decimal value
+1434   4910 87              add a,a                         ; A has *2
+1435   4911 4F              ld  c,a                         ; C has *2
+1436   4912 87              add a,a                         ; A has *4
+1437   4913 87              add a,a                         ; A has *8
+1438   4914 81              add a,c                         ; A has *10
+1439   4915 26 00           ld  h,0
+1440   4917 6F              ld  l,a                         ; HL has *10
+1441   4918 29              add hl,hl                       ; HL has *20
+1442   4919 44              ld  b,h
+1443   491A 4D              ld  c,l                         ; BC has *20
+1444   491B 29              add hl,hl                       ; HL has *40
+1445   491C 29              add hl,hl                       ; HL has *80
+1446   491D 09              add hl,bc                       ; HL has *100
+1447   491E 19              add hl,de                       ; HL has three digit value
+1448   491F EB              ex  de,hl                       ; now in DE
+1449   4920             CHECKTIMEOUT.END:
+1450   4920 E1              pop hl                          ; Restore address of string version of time count
+1451   4921 7A              ld  a,d
+1452   4922 B3              or  e                           ; Set zero flag according to the time out set
+1453   4923 C9              ret
+1454   4924             
+1455   4924             MENU_SUB_BAD_END_1S:
+1456   4924 F1              pop af                          ; 1 register was stacked, pop it
+1457   4925             MENU_SUB_BAD_END:
+1458   4925 F1              pop af                          ; It was a sub, so clear stack
+1459   4926             MENU_BAD_END:
+1460   4926 21 74 57        ld  hl,STR_SENDING_FAIL         ; error message
+1461   4929 CD 9C 4A        call    PRINTHL
+1462   492C C3 05 48        jp  WAIT_2S_AND_THEN_MAINMENU
+1463   492F             
+1464   492F             ; WAIT an ESP quick command Response
+1465   492F             ; Inputs:
+1466   492F             ; A -> Command Code
+1467   492F             ; HL -> Timeout
+1468   492F             ;
+1469   492F             ; Returns:
+1470   492F             ; Flag Z is zero if failure, non zero if success
+1471   492F             ;
+1472   492F             ; Affect:
+1473   492F             ; AF and HL
+1474   492F             ;
+1475   492F             WAIT_MENU_QCMD_RESPONSE:
+1476   492F D5              push    de
+1477   4930 57              ld  d,a                         ; Command to wait in D
+1478   4931             WAIT_MENU_QCMD_RESPONSE_ST1:
+1479   4931                 LOAD_STS_PORT_IN_A
+1479   4931 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1480   4934 CB 6F           bit 5,a                         ; If nz Port #07 is not available
+1481   4936 C2 6E 49        jp  nz,WAIT_MENU_QCMD_RESPONSE_END_NOK
+1482   4939 CB 47           bit 0,a                         ; If nz has data
+1483   493B 20 08           jr  nz,WAIT_MENU_QCMD_RESPONSE_ST1.1
+1484   493D CD 96 4A        call    HLTIMEOUT
+1485   4940 20 EF           jr  nz,WAIT_MENU_QCMD_RESPONSE_ST1
+1486   4942 C3 6C 49        jp  WAIT_MENU_QCMD_RESPONSE_END ; If time out waiting, return
+1487   4945             WAIT_MENU_QCMD_RESPONSE_ST1.1:
+1488   4945                 ; nz, check the data
+1489   4945                 RECEIVE_DATA
+1489   4945 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1490   4948 BA              cp  d                           ; Is response of our command?
+1491   4949 28 08           jr  z,WAIT_MENU_QCMD_RESPONSE_RC
+1492   494B CD 96 4A        call    HLTIMEOUT
+1493   494E 20 E1           jr  nz,WAIT_MENU_QCMD_RESPONSE_ST1
+1494   4950 C3 6C 49        jp  WAIT_MENU_QCMD_RESPONSE_END ; Give up if unexpected bytes keep arriving until timeout
+1495   4953                 ; Now get return code, if return code other than 0, it is failure, otherwise success
+1496   4953             WAIT_MENU_QCMD_RESPONSE_RC:
+1497   4953                 CHECK_DATA
+1497   4953 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1497   4956 CB 47       >    bit 0,a                         ; If nz has data
+1498   4958 20 08           jr  nz,WAIT_MENU_QCMD_RESPONSE_RC.1
+1499   495A CD 96 4A        call    HLTIMEOUT
+1500   495D 20 F4           jr  nz,WAIT_MENU_QCMD_RESPONSE_RC
+1501   495F C3 6C 49        jp  WAIT_MENU_QCMD_RESPONSE_END ; If time-out waiting, return
+1502   4962             WAIT_MENU_QCMD_RESPONSE_RC.1:
+1503   4962                 RECEIVE_DATA
+1503   4962 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1504   4965 B7              or  a                           ; 0?
+1505   4966                 ; If not, done
+1506   4966 C2 6E 49        jp  nz,WAIT_MENU_QCMD_RESPONSE_END_NOK
+1507   4969             WAIT_MENU_QCMD_RESPONSE_END_OK:
+1508   4969 3E 01           ld  a,1
+1509   496B B7              or  a                           ; NZ to indicate success
+1510   496C             WAIT_MENU_QCMD_RESPONSE_END:
+1511   496C D1              pop de
+1512   496D C9              ret
+1513   496E             WAIT_MENU_QCMD_RESPONSE_END_NOK:
+1514   496E 21 00 00        ld  hl,0
+1515   4971 AF              xor a
+1516   4972 D1              pop de
+1517   4973 C9              ret
+1518   4974             
+1519   4974             ; WAIT an ESP regular command Response
+1520   4974             ; Inputs:
+1521   4974             ; A -> Command Code
+1522   4974             ; HL -> Timeout
+1523   4974             ; IX -> Where to store response
+1524   4974             ;
+1525   4974             ; Returns:
+1526   4974             ; Flag Z is zero if failure, non zero if success
+1527   4974             ; BC is the response size
+1528   4974             ;
+1529   4974             ; Affect:
+1530   4974             ; AF , BC and HL
+1531   4974             WAIT_MENU_CMD_RESPONSE:
+1532   4974 D5              push    de
+1533   4975 DD E5           push    ix
+1534   4977 57              ld  d,a                         ; Command to wait in D
+1535   4978             WAIT_MENU_CMD_RESPONSE_ST1:
+1536   4978                 LOAD_STS_PORT_IN_A
+1536   4978 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1537   497B CB 6F           bit 5,a                         ; If nz Port #07 is not available
+1538   497D C2 FC 49        jp  nz,WAIT_MENU_CMD_RESPONSE_END_NOK
+1539   4980 CB 47           bit 0,a                         ; If nz has data
+1540   4982 20 08           jr  nz,WAIT_MENU_CMD_RESPONSE_ST1.1
+1541   4984 CD 96 4A        call    HLTIMEOUT
+1542   4987 20 EF           jr  nz,WAIT_MENU_CMD_RESPONSE_ST1
+1543   4989 C3 F6 49        jp  WAIT_MENU_CMD_RESPONSE_END  ; If time out waiting, return
+1544   498C             WAIT_MENU_CMD_RESPONSE_ST1.1:
+1545   498C                 ; nz, check the data
+1546   498C                 RECEIVE_DATA
+1546   498C 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1547   498F BA              cp  d                           ; Is response of our command?
+1548   4990 20 E6           jr  nz,WAIT_MENU_CMD_RESPONSE_ST1
+1549   4992                 ; Now get return code, if return code other than 0, it is finished
+1550   4992             WAIT_MENU_CMD_RESPONSE_RC:
+1551   4992                 CHECK_DATA
+1551   4992 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1551   4995 CB 47       >    bit 0,a                         ; If nz has data
+1552   4997 20 08           jr  nz,WAIT_MENU_CMD_RESPONSE_RC.1
+1553   4999 CD 96 4A        call    HLTIMEOUT
+1554   499C 20 F4           jr  nz,WAIT_MENU_CMD_RESPONSE_RC
+1555   499E C3 F6 49        jp  WAIT_MENU_CMD_RESPONSE_END  ; If time out waiting, return
+1556   49A1             WAIT_MENU_CMD_RESPONSE_RC.1:
+1557   49A1                 RECEIVE_DATA
+1557   49A1 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1558   49A4 B7              or  a                           ; 0?
+1559   49A5                 ; If not, done
+1560   49A5 C2 FC 49        jp  nz,WAIT_MENU_CMD_RESPONSE_END_NOK
+1561   49A8                 ; Next two bytes are size bytes, save it to BC
+1562   49A8             WAIT_MENU_CMD_RESPONSE_ST2A:
+1563   49A8                 CHECK_DATA
+1563   49A8 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1563   49AB CB 47       >    bit 0,a                         ; If nz has data
+1564   49AD 20 08           jr  nz,WAIT_MENU_CMD_RESPONSE_ST2A.1
+1565   49AF CD 96 4A        call    HLTIMEOUT
+1566   49B2 20 F4           jr  nz,WAIT_MENU_CMD_RESPONSE_ST2A
+1567   49B4 C3 F6 49        jp  WAIT_MENU_CMD_RESPONSE_END  ; If time out waiting, return
+1568   49B7             WAIT_MENU_CMD_RESPONSE_ST2A.1:
+1569   49B7                 RECEIVE_DATA
+1569   49B7 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1570   49BA 47              ld  b,a
+1571   49BB             WAIT_MENU_CMD_RESPONSE_ST2B:
+1572   49BB                 CHECK_DATA
+1572   49BB 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1572   49BE CB 47       >    bit 0,a                         ; If nz has data
+1573   49C0 20 08           jr  nz,WAIT_MENU_CMD_RESPONSE_ST2B.1
+1574   49C2 CD 96 4A        call    HLTIMEOUT
+1575   49C5 20 F4           jr  nz,WAIT_MENU_CMD_RESPONSE_ST2B
+1576   49C7 C3 F6 49        jp  WAIT_MENU_CMD_RESPONSE_END  ; If time out waiting, return
+1577   49CA             WAIT_MENU_CMD_RESPONSE_ST2B.1:
+1578   49CA                 RECEIVE_DATA
+1578   49CA 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1579   49CD 4F              ld  c,a
+1580   49CE B0              or  b                           ; Zero size in response?
+1581   49CF 28 1E           jr  z,WAIT_MENU_CMD_RESPONSE_END_OK
+1582   49D1 50              ld  d,b
+1583   49D2 59              ld  e,c                         ; Copy to DE
+1584   49D3                 ; Now loop getting the data until received everything or time-out
+1585   49D3             WAIT_MENU_CMD_RESPONSE_GET_DATA:
+1586   49D3                 CHECK_DATA
+1586   49D3 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1586   49D6 CB 47       >    bit 0,a                         ; If nz has data
+1587   49D8 20 08           jr  nz,WAIT_MENU_CMD_RESPONSE_GET_DATA.1
+1588   49DA CD 96 4A        call    HLTIMEOUT
+1589   49DD 20 F4           jr  nz,WAIT_MENU_CMD_RESPONSE_GET_DATA
+1590   49DF C3 F6 49        jp  WAIT_MENU_CMD_RESPONSE_END  ; If time out waiting, return
+1591   49E2             WAIT_MENU_CMD_RESPONSE_GET_DATA.1:
+1592   49E2                 RECEIVE_DATA            ; Get data
+1592   49E2 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1593   49E5 DD 77 00        ld  (ix+0),a                    ; Put it in the buffer
+1594   49E8 DD 23           inc ix                          ; Increment pointer
+1595   49EA 1B              dec de                          ; Decrement counter
+1596   49EB 7A              ld  a,d
+1597   49EC B3              or  e                           ; Is counter 0?
+1598   49ED 20 E4           jr  nz,WAIT_MENU_CMD_RESPONSE_GET_DATA
+1599   49EF             WAIT_MENU_CMD_RESPONSE_END_OK:
+1600   49EF 3E 01           ld  a,1
+1601   49F1 B7              or  a                           ; NZ to indicate success
+1602   49F2 DD E1           pop ix
+1603   49F4 D1              pop de
+1604   49F5 C9              ret
+1605   49F6             WAIT_MENU_CMD_RESPONSE_END:
+1606   49F6 06 FF           ld  b,#FF
+1607   49F8 DD E1           pop ix
+1608   49FA D1              pop de
+1609   49FB C9              ret
+1610   49FC             WAIT_MENU_CMD_RESPONSE_END_NOK:
+1611   49FC 21 00 00        ld  hl,0
+1612   49FF 47              ld  b,a                         ; Get result in B, 0xFF for time-out, otherwise was an error return code
+1613   4A00 AF              xor a
+1614   4A01 DD E1           pop ix
+1615   4A03 D1              pop de
+1616   4A04 C9              ret
+1617   4A05             
+1618   4A05             ; WAIT an ESP Wi-Fi Scan command Response
+1619   4A05             ; Inputs:
+1620   4A05             ; A -> Command Code
+1621   4A05             ; HL -> Timeout
+1622   4A05             ; IX -> Where to store response
+1623   4A05             ;
+1624   4A05             ; Returns:
+1625   4A05             ; Flag Z is zero if failure, non zero if success
+1626   4A05             ; A is the number of access points scanned
+1627   4A05             ;
+1628   4A05             ; Response is stored as:
+1629   4A05             ; Access Point SSID zero terminated and after first 0
+1630   4A05             ; 0 if Open otherwise requires a password to join
+1631   4A05             ; And this repeats...
+1632   4A05             ;
+1633   4A05             ; Affect:
+1634   4A05             ; AF , BC and HL
+1635   4A05             ;
+1636   4A05             WAIT_MENU_SCMD_RESPONSE:
+1637   4A05 D5              push    de
+1638   4A06 DD E5           push    ix
+1639   4A08 57              ld  d,a                         ; Command to wait in D
+1640   4A09             WAIT_MENU_SCMD_RESPONSE_ST1:
+1641   4A09                 LOAD_STS_PORT_IN_A
+1641   4A09 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1642   4A0C CB 6F           bit 5,a                         ; If nz Port #07 is not available
+1643   4A0E C2 8D 4A        jp  nz,WAIT_MENU_SCMD_RESPONSE_END_NOK
+1644   4A11 CB 47           bit 0,a                         ; If nz has data
+1645   4A13 20 08           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST1.1
+1646   4A15 CD 96 4A        call    HLTIMEOUT
+1647   4A18 20 EF           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST1
+1648   4A1A C3 89 4A        jp  WAIT_MENU_SCMD_RESPONSE_END ; If time out waiting, return
+1649   4A1D             WAIT_MENU_SCMD_RESPONSE_ST1.1:
+1650   4A1D                 ; nz, check the data
+1651   4A1D                 RECEIVE_DATA
+1651   4A1D 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1652   4A20 BA              cp  d                           ; Is response of our command?
+1653   4A21 20 E6           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST1
+1654   4A23                 ; Now get return code, if return code other than 0, it is finished
+1655   4A23             WAIT_MENU_SCMD_RESPONSE_RC:
+1656   4A23                 CHECK_DATA
+1656   4A23 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1656   4A26 CB 47       >    bit 0,a                         ; If nz has data
+1657   4A28 20 08           jr  nz,WAIT_MENU_SCMD_RESPONSE_RC.1
+1658   4A2A CD 96 4A        call    HLTIMEOUT
+1659   4A2D 20 F4           jr  nz,WAIT_MENU_SCMD_RESPONSE_RC
+1660   4A2F C3 89 4A        jp  WAIT_MENU_SCMD_RESPONSE_END ; If time out waiting, return
+1661   4A32             WAIT_MENU_SCMD_RESPONSE_RC.1:
+1662   4A32                 RECEIVE_DATA
+1662   4A32 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1663   4A35 B7              or  a                           ; 0?
+1664   4A36                 ; If not, done
+1665   4A36 C2 8D 4A        jp  nz,WAIT_MENU_SCMD_RESPONSE_END_NOK
+1666   4A39                 ; Next byte is how many access points are available
+1667   4A39             WAIT_MENU_SCMD_RESPONSE_ST2A:
+1668   4A39                 CHECK_DATA
+1668   4A39 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1668   4A3C CB 47       >    bit 0,a                         ; If nz has data
+1669   4A3E 20 08           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST2A.1
+1670   4A40 CD 96 4A        call    HLTIMEOUT
+1671   4A43 20 F4           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST2A
+1672   4A45 C3 89 4A        jp  WAIT_MENU_SCMD_RESPONSE_END ; If time out waiting, return
+1673   4A48             WAIT_MENU_SCMD_RESPONSE_ST2A.1:
+1674   4A48                 RECEIVE_DATA
+1674   4A48 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1675   4A4B 47              ld  b,a                         ; Save in B
+1676   4A4C 4F              ld  c,a                         ; And C as well
+1677   4A4D                 ; Now should loop this until c is 0, c will control access point received count
+1678   4A4D             WAIT_MENU_SCMD_RESPONSE_ST2B:
+1679   4A4D                 CHECK_DATA
+1679   4A4D 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1679   4A50 CB 47       >    bit 0,a                         ; If nz has data
+1680   4A52 20 08           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST2B.1
+1681   4A54 CD 96 4A        call    HLTIMEOUT
+1682   4A57 20 F4           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST2B
+1683   4A59 C3 89 4A        jp  WAIT_MENU_SCMD_RESPONSE_END ; If time out waiting, return
+1684   4A5C             WAIT_MENU_SCMD_RESPONSE_ST2B.1:
+1685   4A5C                 RECEIVE_DATA
+1685   4A5C 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1686   4A5F DD 77 00        ld  (ix+0),a
+1687   4A62 DD 23           inc ix                          ; Increment pointer
+1688   4A64 B7              or  a                           ; Terminator of AP Name?
+1689   4A65 20 E6           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST2B
+1690   4A67                 ; Get encryption
+1691   4A67             WAIT_MENU_SCMD_RESPONSE_GET_ENC:
+1692   4A67                 CHECK_DATA
+1692   4A67 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1692   4A6A CB 47       >    bit 0,a                         ; If nz has data
+1693   4A6C 20 08           jr  nz,WAIT_MENU_SCMD_RESPONSE_GET_ENC.1
+1694   4A6E CD 96 4A        call    HLTIMEOUT
+1695   4A71 20 F4           jr  nz,WAIT_MENU_SCMD_RESPONSE_GET_ENC
+1696   4A73 C3 89 4A        jp  WAIT_MENU_SCMD_RESPONSE_END  ; If time out waiting, return
+1697   4A76             WAIT_MENU_SCMD_RESPONSE_GET_ENC.1:
+1698   4A76                 RECEIVE_DATA            ; Get data
+1698   4A76 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1699   4A79 D6 4F           sub 'O'                         ; If O, open, will be 0, otherwise, will be notzero
+1700   4A7B DD 77 00        ld  (ix+0),a                    ; Put it in the buffer
+1701   4A7E DD 23           inc ix                          ; Increment pointer
+1702   4A80 0D              dec c                           ; Decrement counter
+1703   4A81 AF              xor a
+1704   4A82 B1              or  c                           ; Is counter 0?
+1705   4A83                 ; If not continue getting more SSIDs
+1706   4A83 20 C8           jr  nz,WAIT_MENU_SCMD_RESPONSE_ST2B
+1707   4A85                 ; It is zero, so, done
+1708   4A85             WAIT_MENU_SCMD_RESPONSE_END_OK:
+1709   4A85 3E 01           ld  a,1
+1710   4A87 B7              or  a                           ; NZ to indicate success
+1711   4A88 78              ld  a,b                         ; Number of APs in A
+1712   4A89             WAIT_MENU_SCMD_RESPONSE_END:
+1713   4A89 DD E1           pop ix
+1714   4A8B D1              pop de
+1715   4A8C C9              ret
+1716   4A8D             WAIT_MENU_SCMD_RESPONSE_END_NOK:
+1717   4A8D 21 00 00        ld  hl,0
+1718   4A90 47              ld  b,a                         ; Return code in B
+1719   4A91 AF              xor a
+1720   4A92 DD E1           pop ix
+1721   4A94 D1              pop de
+1722   4A95 C9              ret
+1723   4A96             
+1724   4A96             ; This routine will check if HL is 0, if it is, will return immediatelly
+1725   4A96             ; If it is not, will decrease HL value and halt (wait one interrupt)
+1726   4A96             HLTIMEOUT:
+1727   4A96 7C              ld  a,h
+1728   4A97 B5              or  l
+1729   4A98 C8              ret z
+1730   4A99 2B              dec hl
+1731   4A9A 76              halt
+1732   4A9B C9              ret
+1733   4A9C             
+1734   4A9C             ; Routine to print the string addressed by HL
+1735   4A9C             PRINTHL:
+1736   4A9C 7E              ld  a,(hl)
+1737   4A9D B7              or  a
+1738   4A9E C8              ret z                           ; When string is finished, done!
+1739   4A9F CD A2 00        call    CHPUT
+1740   4AA2 23              inc hl
+1741   4AA3 C3 9C 4A        jp  PRINTHL
+1742   4AA6             
+1743   4AA6             ; Routine to print the string addressed by HL on a line, if exceeding it, ends with ..
+1744   4AA6             PRINTHLINE:
+1745   4AA6 C5              push    bc
+1746   4AA7 06 18           ld  b,24
+1747   4AA9             PHLINEL:
+1748   4AA9 7E              ld  a,(hl)
+1749   4AAA B7              or  a
+1750   4AAB 28 1F           jr  z,PHLINESPC                 ; When string is finished, done!
+1751   4AAD CD A2 00        call    CHPUT
+1752   4AB0 23              inc hl
+1753   4AB1 10 F6           djnz    PHLINEL
+1754   4AB3 3E 1D           ld  a,GOLEFT
+1755   4AB5 CD A2 00        call    CHPUT
+1756   4AB8 CD A2 00        call    CHPUT
+1757   4ABB 3E 01           ld  a,1
+1758   4ABD CD A2 00        call    CHPUT
+1759   4AC0 3E 5B           ld  a,91
+1760   4AC2 CD A2 00        call    CHPUT
+1761   4AC5 3E 20           ld  a,' '
+1762   4AC7 CD A2 00        call    CHPUT
+1763   4ACA 18 07           jr  PHLINELR
+1764   4ACC             PHLINESPC:
+1765   4ACC 3E 20           ld  a,' '
+1766   4ACE CD A2 00        call    CHPUT
+1767   4AD1 10 F9           djnz    PHLINESPC
+1768   4AD3             PHLINELR:
+1769   4AD3 3E 1D           ld  a,GOLEFT
+1770   4AD5 CD A2 00        call    CHPUT
+1771   4AD8 CD A2 00        call    CHPUT
+1772   4ADB C1              pop bc
+1773   4ADC C9              ret
+1774   4ADD             
+1775   4ADD             ;============================
+1776   4ADD             ;===  ESP helper routines  ===
+1777   4ADD             ;============================
+1778   4ADD             
+1779   4ADD             WRFE_WAIT_DATA:
+1780   4ADD                 LOAD_STS_PORT_IN_A
+1780   4ADD 3A 07 7F    >    ld  a,(MEM_IN_STS_PORT)
+1781   4AE0 CB 6F           bit 5,a                         ; If nz Port #07 is not available
+1782   4AE2 20 06           jr  nz,WRFE_STS_NOT_AVAILABLE
+1783   4AE4 CB 47           bit 0,a                         ; if nz has data
+1784   4AE6 C0              ret nz
+1785   4AE7 1B              dec de
+1786   4AE8 76              halt
+1787   4AE9 C9              ret
+1788   4AEA             WRFE_STS_NOT_AVAILABLE:
+1789   4AEA 11 00 00        ld  de,0
+1790   4AED AF              xor a
+1791   4AEE C9              ret
+1792   4AEF             
+1793   4AEF             WRFE_COMPARE:
+1794   4AEF 47              ld  b,a
+1795   4AF0 7E              ld  a,(hl)
+1796   4AF1 B8              cp  b
+1797   4AF2 C0              ret nz
+1798   4AF3 23              inc hl
+1799   4AF4 C9              ret
+1800   4AF5             
+1801   4AF5             WAIT_RESPONSE_FROM_ESP:
+1802   4AF5 4F              ld  c,a                         ; Response size in C
+1803   4AF6 E5              push    hl                      ; Save HL
+1804   4AF7 AF              xor a
+1805   4AF8             WRFE_ST1:
+1806   4AF8 DD 67           ld  ixh,a                       ; We start at index 0
+1807   4AFA             
+1808   4AFA             WRFE_LOOP:
+1809   4AFA CD DD 4A        call    WRFE_WAIT_DATA
+1810   4AFD 20 07           jr  nz,WRFE_LOOP.1
+1811   4AFF 7B              ld  a,e
+1812   4B00 B2              or  d
+1813   4B01 CA 26 4B        jp  z,WRFE_RET_ERROR
+1814   4B04 18 F4           jr  WRFE_LOOP
+1815   4B06             WRFE_LOOP.1:
+1816   4B06                 ; nz, check the data
+1817   4B06                 RECEIVE_DATA
+1817   4B06 3A 06 7F    >    ld a,(MEM_IN_DATA_PORT)
+1818   4B09                 ; Ok, now the byte is in A, let's compare
+1819   4B09             WRFE_IDXCMD:
+1820   4B09 CD EF 4A        call WRFE_COMPARE
+1821   4B0C                 ; if match
+1822   4B0C 28 0C           jr  z,WRFE_RSP_MATCH
+1823   4B0E                 ; did not match, let's zero the rsp index
+1824   4B0E 1B              dec de
+1825   4B0F 7B              ld  a,e
+1826   4B10 B2              or  d
+1827   4B11 28 13           jr  z,WRFE_RET_ERROR
+1828   4B13 AF              xor a
+1829   4B14 DD 67           ld  ixh,a                       ; re-start at index 0
+1830   4B16 E1              pop hl                          ; restore the response index
+1831   4B17 E5              push    hl                      ; and keep it in stack
+1832   4B18                 ; back to get another byte
+1833   4B18 18 E0           jr  WRFE_LOOP
+1834   4B1A             WRFE_RSP_MATCH:
+1835   4B1A                 ; match
+1836   4B1A DD 24           inc ixh
+1837   4B1C DD 7C           ld  a,ixh
+1838   4B1E B9              cp  c
+1839   4B1F                 ; if a = c done and response is success
+1840   4B1F 28 02           jr  z,WRFE_RET_OK
+1841   4B21                 ; not done, back to get more bytes
+1842   4B21 18 D7           jr  WRFE_LOOP
+1843   4B23             WRFE_RET_OK:
+1844   4B23 E1              pop hl
+1845   4B24 AF              xor a
+1846   4B25 C9              ret
+1847   4B26             WRFE_RET_ERROR:
+1848   4B26 E1              pop hl
+1849   4B27 3E 01           ld  a,1
+1850   4B29 C9              ret
+1851   4B2A             
+1852   4B2A             ;*********************************************
+1853   4B2A             ;***              RESET ESP                ***
+1854   4B2A             ;*** If RESET ok, A will be 0, otherwise   ***
+1855   4B2A             ;*** failure                               ***
+1856   4B2A             ;*********************************************
+1857   4B2A             RESET_ESP:
+1858   4B2A                 ; Is ESP installed?
+1859   4B2A                 CLEAR_UART                      ; Clear UART
+1859   4B2A 3E 14       >    ld  a,20
+1859   4B2C 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1860   4B2F 3E 51           ld  a,'Q'
+1861   4B31 CD A2 00        call    CHPUT
+1862   4B34 3E 3F           ld  a,CMD_QUERY_ESP
+1863   4B36                 SEND_DATA
+1863   4B36 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1864   4B39 3E 71           ld  a,'q'
+1865   4B3B CD A2 00        call    CHPUT
+1866   4B3E 21 6A 4C        ld  hl,RSP_CMD_QUERY_ESP        ; Expected response
+1867   4B41 11 3C 00        ld  de,60                       ; Up to 1s @ 60Hz
+1868   4B44 3E 02           ld  a,RSP_CMD_QUERY_ESP_SIZE    ; Size of response
+1869   4B46 CD F5 4A        call    WAIT_RESPONSE_FROM_ESP
+1870   4B49 B7              or  a
+1871   4B4A 3E 01           ld  a,1
+1872   4B4C 28 0B           jr  z,RESET_ESP_INIT            ; ESP Found
+1873   4B4E 3E 58           ld  a,'X'
+1874   4B50 CD A2 00        call    CHPUT
+1875   4B53 CD A5 4B        call    SCAN_ESP_QUERY_SPEED
+1876   4B56 06 00           ld  b,0                         ; 0 if no response
+1877   4B58 C9              ret
+1878   4B59             RESET_ESP_INIT:
+1879   4B59 3E 49           ld  a,'I'
+1880   4B5B CD A2 00        call    CHPUT
+1881   4B5E 06 03           ld  b,3                         ; Retry up to 10 times
+1882   4B60             RESET_ESP_LOOP:
+1883   4B60                 CLEAR_UART
+1883   4B60 3E 14       >    ld  a,20
+1883   4B62 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1884   4B65 3E 52           ld  a,'R'
+1885   4B67 CD A2 00        call    CHPUT
+1886   4B6A                 SET_SPEED
+1886   4B6A AF          >    xor a
+1886   4B6B 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1887   4B6E 3E 53           ld  a,'S'
+1888   4B70 CD A2 00        call    CHPUT
+1889   4B73 76              halt
+1890   4B74 76              halt                            ; Wait a little to make sure speed is adjusted
+1891   4B75 3E 57           ld  a,CMD_WRESET_ESP
+1892   4B77                 SEND_DATA
+1892   4B77 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1893   4B7A 3E 57           ld  a,'W'
+1894   4B7C CD A2 00        call    CHPUT
+1895   4B7F 21 65 4C        ld  hl,RSP_CMD_RESET_ESP        ; Expected response
+1896   4B82 11 5A 00        ld  de,90                       ; Up to 1.5s @ 60Hz
+1897   4B85 3E 05           ld  a,RSP_CMD_RESET_ESP_SIZE    ; Size of response
+1898   4B87 C5              push    bc                      ; Save retry counter
+1899   4B88 CD F5 4A        call    WAIT_RESPONSE_FROM_ESP
+1900   4B8B C1              pop bc                          ; restore retry counter
+1901   4B8C B7              or  a                           ; Did WAIT RESPONSE return zero?
+1902   4B8D 20 07           jr  nz,RESET_ESP_LOOP_FAIL
+1903   4B8F 3E 4F           ld  a,'O'
+1904   4B91 CD A2 00        call    CHPUT
+1905   4B94 AF              xor a                           ; A=0, success (CHPUT clobbered flags so cannot rely on ret z)
+1906   4B95 C9              ret                             ; Warm Reset Ok
+1907   4B96             RESET_ESP_LOOP_FAIL:
+1908   4B96 3E 78           ld  a,'x'
+1909   4B98 CD A2 00        call    CHPUT
+1910   4B9B 10 C3           djnz RESET_ESP_LOOP             ; No, decrement retry counter and let the loop check
+1911   4B9D                 ; No more retries? Then check if it is old ESP FW
+1912   4B9D             RESET_CHK_IF_INSTALLED:
+1913   4B9D                 ; No more retries? Then it is old ESP FW
+1914   4B9D 3E 46           ld  a,'F'
+1915   4B9F CD A2 00        call    CHPUT
+1916   4BA2 06 01           ld  b,1
+1917   4BA4 C9              ret
+1918   4BA5             
+1919   4BA5             SCAN_ESP_QUERY_SPEED:
+1920   4BA5 C5              push    bc
+1921   4BA6 D5              push    de
+1922   4BA7 E5              push    hl
+1923   4BA8 0E 00           ld  c,0
+1924   4BAA 06 0A           ld  b,10
+1925   4BAC             SCAN_ESP_QUERY_SPEED_LOOP:
+1926   4BAC                 CLEAR_UART
+1926   4BAC 3E 14       >    ld  a,20
+1926   4BAE 32 06 7F    >    ld  (MEM_OUT_CMD_PORT),a            ; Clear UART
+1927   4BB1 79              ld  a,c
+1928   4BB2                 WRITE_CMD_PORT_A
+1928   4BB2 32 06 7F    >        ld  (MEM_OUT_CMD_PORT),a
+1929   4BB5 76              halt
+1930   4BB6 76              halt
+1931   4BB7 3E 3F           ld  a,CMD_QUERY_ESP
+1932   4BB9                 SEND_DATA
+1932   4BB9 32 07 7F    >    ld  (MEM_OUT_TX_PORT),a             ; Just send, no need to wait response
+1933   4BBC 21 6A 4C        ld  hl,RSP_CMD_QUERY_ESP
+1934   4BBF 11 14 00        ld  de,20                       ; Short probe timeout per speed slot
+1935   4BC2 3E 02           ld  a,RSP_CMD_QUERY_ESP_SIZE
+1936   4BC4 CD F5 4A        call    WAIT_RESPONSE_FROM_ESP
+1937   4BC7 B7              or  a
+1938   4BC8 28 07           jr  z,SCAN_ESP_QUERY_SPEED_FOUND
+1939   4BCA 0C              inc c
+1940   4BCB 10 DF           djnz    SCAN_ESP_QUERY_SPEED_LOOP
+1941   4BCD E1              pop hl
+1942   4BCE D1              pop de
+1943   4BCF C1              pop bc
+1944   4BD0 C9              ret
+1945   4BD1             SCAN_ESP_QUERY_SPEED_FOUND:
+1946   4BD1 E1              pop hl
+1947   4BD2 D1              pop de
+1948   4BD3 C1              pop bc
+1949   4BD4 C9              ret
+1950   4BD5             
+1951   4BD5             ;*********************************************
+1952   4BD5             ;***              SET TIME                 ***
+1953   4BD5             ;*** H - Hour                              ***
+1954   4BD5             ;*** L - Minutes                           ***
+1955   4BD5             ;*** D - Seconds                           ***
+1956   4BD5             ;***                                       ***
+1957   4BD5             ;*** A - 0 if Ok otherwise invalid time    ***
+1958   4BD5             ;*********************************************
+1959   4BD5             PATTERN_SETUP:
+1960   4BD5 AF              xor a                           ; Bit-16, V9938 and V9958 only
+1961   4BD6 21 88 00        ld  hl,#0088                    ; Bit-15 to 0, pattern base address = #0088
+1962   4BD9 CD 49 4C        call SET_VDP_WRITE
+1963   4BDC 21 E9 4B        ld  hl,PATTERN_DATA             ; Point to hl
+1964   4BDF 06 60           ld  b,8*12                      ; Redraw 12 chars, max 12 chars are suggested
+1965   4BE1 0E 98           ld  c,#98                       ; port #98
+1966   4BE3             OUTI_TO_VRAM_TMS9918:
+1967   4BE3 ED A3           outi                            ; Slower than otir but useful on TMS9918 which requires 29 T-states
+1968   4BE5 C2 E3 4B        jp  nz,OUTI_TO_VRAM_TMS9918     ; Therefore, don't use 'djnz' here!
+1969   4BE8 C9              ret
+1970   4BE9             PATTERN_DATA:
+1971   4BE9             ; Pattern-01 is CHR$(1)+CHR$(81) = SCAN_TERMINATOR_OPEN
+1972   4BE9 06              db  %00000110
+1973   4BEA 09              db  %00001001
+1974   4BEB 09              db  %00001001
+1975   4BEC FC              db  %11111100                   ; "Opened Padlock"
+1976   4BED FC              db  %11111100
+1977   4BEE FC              db  %11111100
+1978   4BEF FC              db  %11111100
+1979   4BF0 00              db  %00000000
+1980   4BF1             ; Pattern-02 is CHR$(1)+CHR$(82) = SCAN_TERMINATOR_ENC
+1981   4BF1 30              db  %00110000
+1982   4BF2 48              db  %01001000
+1983   4BF3 48              db  %01001000
+1984   4BF4 FC              db  %11111100                   ; "Closed Padlock"
+1985   4BF5 FC              db  %11111100
+1986   4BF6 FC              db  %11111100
+1987   4BF7 FC              db  %11111100
+1988   4BF8 00              db  %00000000
+1989   4BF9             ; Pattern-03 is CHR$(1)+CHR$(83) = Wi-Fi Connected to the AP:
+1990   4BF9 00              db  %00000000
+1991   4BFA 00              db  %00000000
+1992   4BFB 70              db  %01110000
+1993   4BFC 70              db  %01110000                   ; "Full Access Point"
+1994   4BFD 70              db  %01110000
+1995   4BFE 20              db  %00100000
+1996   4BFF 20              db  %00100000
+1997   4C00 70              db  %01110000
+1998   4C01             ; Pattern-04 is CHR$(1)+CHR$(84) = Wi-Fi Failed to connect to:
+1999   4C01 00              db  %00000000
+2000   4C02 88              db  %10001000
+2001   4C03 50              db  %01010000
+2002   4C04 20              db  %00100000                   ; "X"
+2003   4C05 50              db  %01010000
+2004   4C06 88              db  %10001000
+2005   4C07 00              db  %00000000
+2006   4C08 00              db  %00000000
+2007   4C09             ; Pattern-05 is CHR$(1)+CHR$(85) = Requesting connection to:
+2008   4C09 00              db  %00000000
+2009   4C0A 00              db  %00000000
+2010   4C0B 50              db  %01010000
+2011   4C0C 20              db  %00100000                   ; "Partial Access Point"
+2012   4C0D 50              db  %01010000
+2013   4C0E 20              db  %00100000
+2014   4C0F 20              db  %00100000
+2015   4C10 70              db  %01110000
+2016   4C11             ; Pattern-06 is CHR$(1)+CHR$(86) = Wi-Fi Did not find the AP:
+2017   4C11 00              db  %00000000
+2018   4C12 70              db  %01110000
+2019   4C13 88              db  %10001000
+2020   4C14 10              db  %00010000                   ; "?"
+2021   4C15 20              db  %00100000
+2022   4C16 00              db  %00000000
+2023   4C17 20              db  %00100000
+2024   4C18 00              db  %00000000
+2025   4C19             ; Pattern-07 is CHR$(1)+CHR$(87) = Wi-Fi is Idle, AP configured:
+2026   4C19 00              db  %00000000
+2027   4C1A 00              db  %00000000
+2028   4C1B 00              db  %00000000
+2029   4C1C 20              db  %00100000                   ; "i"
+2030   4C1D 00              db  %00000000
+2031   4C1E 20              db  %00100000
+2032   4C1F 20              db  %00100000
+2033   4C20 70              db  %01110000
+2034   4C21             ; Pattern-08 is CHR$(1)+CHR$(88) = Left Middle Wave
+2035   4C21 00              db  %00000000
+2036   4C22 20              db  %00100000
+2037   4C23 40              db  %01000000
+2038   4C24 40              db  %01000000                   ; "("
+2039   4C25 40              db  %01000000
+2040   4C26 20              db  %00100000
+2041   4C27 00              db  %00000000
+2042   4C28 00              db  %00000000
+2043   4C29             ; Pattern-09 is CHR$(1)+CHR$(89) = Right Middle Wave
+2044   4C29 00              db  %00000000
+2045   4C2A 20              db  %00100000
+2046   4C2B 10              db  %00010000
+2047   4C2C 10              db  %00010000                   ; ")"
+2048   4C2D 10              db  %00010000
+2049   4C2E 20              db  %00100000
+2050   4C2F 00              db  %00000000
+2051   4C30 00              db  %00000000
+2052   4C31             ; Pattern-10 is CHR$(1)+CHR$(90) = Wi-Fi is reconnecting to:
+2053   4C31 00              db  %00000000
+2054   4C32 00              db  %00000000
+2055   4C33 00              db  %00000000
+2056   4C34 A8              db  %10101000                   ; "..."
+2057   4C35 00              db  %00000000
+2058   4C36 00              db  %00000000
+2059   4C37 00              db  %00000000
+2060   4C38 00              db  %00000000
+2061   4C39             ; Pattern-11 is CHR$(1)+CHR$(91) = Double Dot
+2062   4C39 00              db  %00000000
+2063   4C3A 00              db  %00000000
+2064   4C3B 00              db  %00000000
+2065   4C3C 00              db  %00000000                   ; ".."
+2066   4C3D 00              db  %00000000
+2067   4C3E 66              db  %01100110
+2068   4C3F 66              db  %01100110
+2069   4C40 00              db  %00000000
+2070   4C41             ; Pattern-12 is CHR$(1)+CHR$(92) = Copyright
+2071   4C41 38              db  %00111000
+2072   4C42 44              db  %01000100
+2073   4C43 BA              db  %10111010
+2074   4C44 A2              db  %10100010                   ; "(c)"
+2075   4C45 BA              db  %10111010
+2076   4C46 44              db  %01000100
+2077   4C47 38              db  %00111000
+2078   4C48 00              db  %00000000
+2079   4C49             ; http://map.grauw.nl/articles/vdp_tut.php
+2080   4C49             ; Set VDP address counter to write from address AHL (17-bits)
+2081   4C49             ; Enables the interrupts
+2082   4C49             SET_VDP_WRITE:
+2083   4C49 CB 04           rlc h
+2084   4C4B 17              rla
+2085   4C4C CB 04           rlc h
+2086   4C4E 17              rla
+2087   4C4F CB 3C           srl h
+2088   4C51 CB 3C           srl h
+2089   4C53 F3              di
+2090   4C54 D3 99           out (#99),a
+2091   4C56 3E 8E           ld  a,14+128
+2092   4C58 D3 99           out (#99),a
+2093   4C5A 7D              ld  a,l
+2094   4C5B 00              nop                             ; Do not remove this 'nop' here!
+2095   4C5C D3 99           out (#99),a
+2096   4C5E 7C              ld  a,h
+2097   4C5F F6 40           or  64
+2098   4C61 FB              ei
+2099   4C62 D3 99           out (#99),a
+2100   4C64 C9              ret
+2101   4C65             
+2102   4C65             ;*********************************************
+2103   4C65             ;***    ESP Specific Commands/Responses    ***
+2104   4C65             ;*********************************************
+2105   4C65             ; Cold reset of ESP firmware
+2106   4C65             CMD_RESET_ESP           equ 'R'
+2107   4C65             ; Warm reset of ESP firmware
+2108   4C65             CMD_WRESET_ESP          equ 'W'
+2109   4C65             ; Hold Wi-Fi Connection On
+2110   4C65             CMD_WIFIHOLD_ESP        equ 'H'
+2111   4C65             ; Release Wi-Fi Connection Hold
+2112   4C65             CMD_WIFIRELEASE_ESP     equ 'h'
+2113   4C65             ; Query Auto Clock settings
+2114   4C65             CMD_QUERY_ACLK_SETTINGS equ 'c'
+2115   4C65             ; Set Auto Clock settings
+2116   4C65             CMD_SET_ACLK_SETTINGS   equ 'C'
+2117   4C65             ; Query ESP settings
+2118   4C65             CMD_QUERY_ESP_SETTINGS  equ 'Q'
+2119   4C65             ; Set Timer Value
+2120   4C65             CMD_TIMER_SET           equ 'T'
+2121   4C65             ; Turn Nagle On
+2122   4C65             CMD_NAGLE_ON            equ 'D'
+2123   4C65             ; Turn Nagle Off
+2124   4C65             CMD_NAGLE_OFF           equ 'N'
+2125   4C65             ; Request to connect to a network
+2126   4C65             CMD_WIFI_CONNECT        equ 'A'
+2127   4C65             ; Request to start network scan
+2128   4C65             CMD_SCAN_START          equ 'S'
+2129   4C65             ; Request network scan result
+2130   4C65             CMD_SCAN_RESULTS        equ 's'
+2131   4C65             ; Request AP Status
+2132   4C65             CMD_AP_STS              equ 'g'
+2133   4C65             ; After finishing Warm reset, ESP returns ready
+2134   4C65 5265616479  RSP_CMD_RESET_ESP       db  "Ready"
+2135   4C6A             RSP_CMD_RESET_ESP_SIZE  equ 5
+2136   4C6A             ; Query ESP Presence
+2137   4C6A             CMD_QUERY_ESP           equ '?'
+2138   4C6A             ; Query response
+2139   4C6A 4F 4B       RSP_CMD_QUERY_ESP       db  "OK"
+2140   4C6C             RSP_CMD_QUERY_ESP_SIZE  equ 2
+2141   4C6C             
+2142   4C6C             ;--- Strings
+2143   4C6C             ; Special thanks to KdL
+2144   4C6C             ; He has contributed a lot to make the menus and strings
+2145   4C6C             ; concise and much easier to read and understand!
+2146   4C6C             STTERMINATOR            equ 0
+2147   4C6C             LF                      equ 10
+2148   4C6C             HOME                    equ 11
+2149   4C6C             CLS                     equ 12
+2150   4C6C             CR                      equ 13
+2151   4C6C             GORIGHT                 equ 28
+2152   4C6C             GOLEFT                  equ 29
+2153   4C6C             
+2154   4C6C             ENTERING_WIFI_SETUP:
+2155   4C6C 0C              db  CLS
+2156   4C6D                 db  "Entering Wi-Fi Setup..."       ,CR,LF,LF,STTERMINATOR
+2156   4C6D 456E746572696E672057692D46692053657475702E2E2E0D0A0A00
+2157   4C88             ;---
+2158   4C88             
+2159   4C88             WELCOME:
+2160   4C88 0C              db  CLS
+2161   4C89                 db  "PICOVERSE Wi-Fi Setup 1.3"       ,CR,LF
+2161   4C89 5049434F56455253452057692D466920536574757020312E330D0A
+2162   4CA4                 db  1,92," 2024 Oduvaldo Pavan Junior" ,CR,LF
+2162   4CA4 015C2032303234204F647576616C646F20506176616E204A756E696F720D0A
+2163   4CC3                 db  "ducasp@gmail.com"              ,CR,LF,LF,STTERMINATOR
+2163   4CC3 64756361737040676D61696C2E636F6D0D0A0A00
+2164   4CD7             ;---
+2165   4CD7             
+2166   4CD7             WELCOME_SF:
+2167   4CD7                 db  "Quick Receive supported."      ,CR,LF,LF,STTERMINATOR
+2167   4CD7 517569636B205265636569766520737570706F727465642E0D0A0A00
+2168   4CF3             ;---
+2169   4CF3             
+2170   4CF3             WELCOME_SF2:
+2171   4CF3                 db  "Quick Receive not supported."      ,CR,LF,LF,STTERMINATOR
+2171   4CF3 517569636B2052656365697665206E6F7420737570706F727465642E0D0A0A00
+2172   4D13             ;---
+2173   4D13             
+2174   4D13             WELCOME_CS:
+2175   4D13                 db  "Wi-Fi is reconnecting to:    " ,GOLEFT,CR,LF
+2175   4D13 57692D4669206973207265636F6E6E656374696E6720746F3A202020201D0D0A
+2176   4D33                 db  "(",1,88,1,90,1,89,") "         ,STTERMINATOR
+2176   4D33 280158015A0159292000
+2177   4D3D             
+2178   4D3D             WELCOME_NEXT:
+2179   4D3D 0B              db  HOME
+2180   4D3E 0A              db  LF
+2181   4D3F 0A              db  LF
+2182   4D40 0A 0A 00        db  LF,LF,STTERMINATOR
+2183   4D43             ;---
+2184   4D43             
+2185   4D43             WELCOME_S_NEXT:
+2186   4D43 0A              db  LF
+2187   4D44 0A 0A 00        db  LF,LF,STTERMINATOR
+2188   4D47             ;---
+2189   4D47             
+2190   4D47             WELCOME_SF_NEXT:
+2191   4D47 0A 0A 00        db  LF,LF,STTERMINATOR
+2192   4D4A             ;---
+2193   4D4A             
+2194   4D4A             WELCOME_CS0_NEXT:
+2195   4D4A                 db  "Wi-Fi is Idle, AP configured:" ,GOLEFT,CR,LF
+2195   4D4A 57692D46692069732049646C652C20415020636F6E666967757265643A1D0D0A
+2196   4D6A                 db  "(",1,88,1,87,1,89,") "         ,STTERMINATOR
+2196   4D6A 28015801570159292000
+2197   4D74             
+2198   4D74             WELCOME_CS1_NEXT:
+2199   4D74 0D 0A           db  CR,LF
+2200   4D76                 db  GORIGHT,GORIGHT,GORIGHT,GORIGHT,GORIGHT,GORIGHT,STTERMINATOR
+2200   4D76 1C1C1C1C1C1C00
+2201   4D7D             
+2202   4D7D             WELCOME_CS2_NEXT:
+2203   4D7D                 db  "Wi-Fi Wrong Password for:    " ,GOLEFT,CR,LF
+2203   4D7D 57692D46692057726F6E672050617373776F726420666F723A202020201D0D0A
+2204   4D9D                 db  "(",1,88,1,82,1,89,") "         ,STTERMINATOR
+2204   4D9D 28015801520159292000
+2205   4DA7             
+2206   4DA7             WELCOME_CS3_NEXT:
+2207   4DA7                 db  "Wi-Fi Did not find the AP:   " ,GOLEFT,CR,LF
+2207   4DA7 57692D466920446964206E6F742066696E64207468652041503A2020201D0D0A
+2208   4DC7                 db  "(",1,88,1,86,1,89,") "         ,STTERMINATOR
+2208   4DC7 28015801560159292000
+2209   4DD1             
+2210   4DD1             WELCOME_CS4_NEXT:
+2211   4DD1                 db  "Wi-Fi Failed to connect to:  " ,GOLEFT,CR,LF
+2211   4DD1 57692D4669204661696C656420746F20636F6E6E65637420746F3A20201D0D0A
+2212   4DF1                 db  "(",1,88,1,84,1,89,") "         ,STTERMINATOR
+2212   4DF1 28015801540159292000
+2213   4DFB             
+2214   4DFB             WELCOME_CS5_NEXT:
+2215   4DFB                 db  "Wi-Fi Connected to the AP:   " ,GOLEFT,CR,LF
+2215   4DFB 57692D466920436F6E6E656374656420746F207468652041503A2020201D0D0A
+2216   4E1B                 db  "(",1,88,1,83,1,89,") "         ,STTERMINATOR
+2216   4E1B 28015801530159292000
+2217   4E25             
+2218   4E25             MMENU_S_NEXT:
+2219   4E25 0D 0A 0A        db  CR,LF,LF
+2220   4E28                 db  "1 - Set Nagle Algorithm"       ,CR,LF
+2220   4E28 31202D20536574204E61676C6520416C676F726974686D0D0A
+2221   4E41                 db  "2 - Set Wi-Fi On Period"       ,CR,LF
+2221   4E41 32202D205365742057692D4669204F6E20506572696F640D0A
+2222   4E5A                 db  "3 - Scan/Join Access Points"   ,CR,LF
+2222   4E5A 33202D205363616E2F4A6F696E2041636365737320506F696E74730D0A
+2223   4E77                 db  "4 - Wi-Fi and Clock Settings"  ,CR,LF,LF
+2223   4E77 34202D2057692D466920616E6420436C6F636B2053657474696E67730D0A0A
+2224   4E96             ;---
+2225   4E96                 db  "ESC to exit setup."            ,CR,LF,LF
+2225   4E96 45534320746F20657869742073657475702E0D0A0A
+2226   4EAB             ;---
+2227   4EAB                 db  "Option: "                      ,STTERMINATOR
+2227   4EAB 4F7074696F6E3A2000
+2228   4EB4             
+2229   4EB4             MMENU_CLOCK_MSX2:
+2230   4EB4 0C              db  CLS
+2231   4EB5                 db  "[ Wi-Fi and Clock Settings ]"  ,CR,LF,LF
+2231   4EB5 5B2057692D466920616E6420436C6F636B2053657474696E6773205D0D0A0A
+2232   4ED4             ;---
+2233   4ED4                 db  "0 - Wi-Fi adapter online"      ,CR,LF
+2233   4ED4 30202D2057692D46692061646170746572206F6E6C696E650D0A
+2234   4EEE                 db  "1 - Also wait up to 10s for"   ,CR,LF
+2234   4EEE 31202D20416C736F207761697420757020746F2031307320666F720D0A
+2235   4F0B                 db  "    internet availability and" ,GOLEFT,CR,LF
+2235   4F0B 20202020696E7465726E657420617661696C6162696C69747920616E641D0D0A
+2236   4F2B                 db  "    get time from SNTP server" ,GOLEFT,CR,LF
+2236   4F2B 202020206765742074696D652066726F6D20534E5450207365727665721D0D0A
+2237   4F4B                 db  "    adjusting the time zone"   ,CR,LF
+2237   4F4B 2020202061646A757374696E67207468652074696D65207A6F6E650D0A
+2238   4F68                 db  "2 - The same as option 1 but"  ,CR,LF
+2238   4F68 32202D205468652073616D65206173206F7074696F6E2031206275740D0A
+2239   4F86                 db  "    also will turn off Wi-Fi"  ,CR,LF
+2239   4F86 20202020616C736F2077696C6C207475726E206F66662057692D46690D0A
+2240   4FA4                 db  "    when done"                 ,CR,LF
+2240   4FA4 202020207768656E20646F6E650D0A
+2241   4FB3                 db  "3 - Wi-Fi adapter offline"     ,GOLEFT,CR,LF,LF
+2241   4FB3 33202D2057692D46692061646170746572206F66666C696E651D0D0A0A
+2242   4FD0             ;---
+2243   4FD0                 db  "MSX boot will take longer if"  ,CR,LF
+2243   4FD0 4D535820626F6F742077696C6C2074616B65206C6F6E6765722069660D0A
+2244   4FEE                 db  "options 1 or 2 are active."    ,CR,LF,LF,STTERMINATOR
+2244   4FEE 6F7074696F6E732031206F72203220617265206163746976652E0D0A0A00
+2245   500C             ;---
+2246   500C             
+2247   500C             MMENU_CLOCK_MSX1:
+2248   500C 0C              db  CLS
+2249   500D                 db  "[ Wi-Fi and Clock Settings ]"  ,CR,LF,LF
+2249   500D 5B2057692D466920616E6420436C6F636B2053657474696E6773205D0D0A0A
+2250   502C             ;---
+2251   502C                 db  "0 - Wi-Fi adapter online"      ,CR,LF
+2251   502C 30202D2057692D46692061646170746572206F6E6C696E650D0A
+2252   5046                 db  "1 - Unavailable for MSX1"      ,CR,LF
+2252   5046 31202D20556E617661696C61626C6520666F72204D5358310D0A
+2253   5060                 db  "2 - Unavailable for MSX1"      ,CR,LF
+2253   5060 32202D20556E617661696C61626C6520666F72204D5358310D0A
+2254   507A                 db  "3 - Wi-Fi adapter offline"     ,GOLEFT,CR,LF,LF,STTERMINATOR
+2254   507A 33202D2057692D46692061646170746572206F66666C696E651D0D0A0A00
+2255   5098             ;---
+2256   5098             
+2257   5098             MMENU_CLOCK_0:
+2258   5098                 db  "Currently: ONLINE"             ,STTERMINATOR
+2258   5098 43757272656E746C793A204F4E4C494E4500
+2259   50AA             
+2260   50AA             MMENU_CLOCK_1:
+2261   50AA                 db  "Currently: TIME-OPT1, GMT"     ,STTERMINATOR
+2261   50AA 43757272656E746C793A2054494D452D4F5054312C20474D5400
+2262   50C4             
+2263   50C4             MMENU_CLOCK_2:
+2264   50C4                 db  "Currently: TIME-OPT2, GMT"     ,STTERMINATOR
+2264   50C4 43757272656E746C793A2054494D452D4F5054322C20474D5400
+2265   50DE             
+2266   50DE             MMENU_CLOCK_3:
+2267   50DE                 db  "Currently: OFFLINE"            ,STTERMINATOR
+2267   50DE 43757272656E746C793A204F46464C494E4500
+2268   50F1             
+2269   50F1             MMENU_CLOCK_OPT:
+2270   50F1 0D 0A 0A        db  CR,LF,LF
+2271   50F4             ;---
+2272   50F4                 db  "ESC to return to main menu."   ,CR,LF,LF
+2272   50F4 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A0A
+2273   5112             ;---
+2274   5112                 db  "Option: "                      ,STTERMINATOR
+2274   5112 4F7074696F6E3A2000
+2275   511B             
+2276   511B             MMENU_GMT_OPT:
+2277   511B 0D 0A           db  CR,LF
+2278   511D                 db  "Time Zone adjustment: "        ,STTERMINATOR
+2278   511D 54696D65205A6F6E652061646A7573746D656E743A2000
+2279   5134             
+2280   5134             MMENU_MANUALENTRY:
+2281   5134 0C              db  CLS
+2282   5135                 db  "[ Scan/Join Access Points ]"   ,CR,LF,LF
+2282   5135 5B205363616E2F4A6F696E2041636365737320506F696E7473205D0D0A0A
+2283   5153             ;---
+2284   5153                 db  "ESC to return to main menu."   ,CR,LF,LF
+2284   5153 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A0A
+2285   5171             ;---
+2286   5171                 db  "Manual entry, type SSID:"      ,CR,LF
+2286   5171 4D616E75616C20656E7472792C207479706520535349443A0D0A
+2287   518B                 db  "(",1,88,1,83,1,89,") "         ,STTERMINATOR
+2287   518B 28015801530159292000
+2288   5195             
+2289   5195             MENU_MANUALENTRY_PWD:
+2290   5195 0D 0A 0A        db  CR,LF,LF
+2291   5198             ;---
+2292   5198                 db  "Password needed (y/n)? "             ,STTERMINATOR
+2292   5198 50617373776F7264206E65656465642028792F6E293F2000
+2293   51B0             
+2294   51B0             MMENU_SCAN:
+2295   51B0 0C              db  CLS
+2296   51B1                 db  "[ Scan/Join Access Points ]"   ,CR,LF,LF
+2296   51B1 5B205363616E2F4A6F696E2041636365737320506F696E7473205D0D0A0A
+2297   51CF             ;---
+2298   51CF                 db  "Up to ",SCAN_MAX_PAGE_SIZE+48," APs per page." ,CR,LF,LF
+2298   51CF 557020746F2038204150732070657220706167652E0D0A0A
+2299   51E7             ;---
+2300   51E7                 db  "Scanning networks..."          ,CR,LF,STTERMINATOR
+2300   51E7 5363616E6E696E67206E6574776F726B732E2E2E0D0A00
+2301   51FE             
+2302   51FE             MMENU_SCANF:
+2303   51FE 0D 0A           db  CR,LF
+2304   5200                 db  "Error or no networks found!"   ,CR,LF,STTERMINATOR
+2304   5200 4572726F72206F72206E6F206E6574776F726B7320666F756E64210D0A00
+2305   521E             
+2306   521E             MMENU_SCANN:
+2307   521E 0D 0A           db  CR,LF
+2308   5220                 db  "No networks found!"            ,CR,LF,STTERMINATOR
+2308   5220 4E6F206E6574776F726B7320666F756E64210D0A00
+2309   5235             
+2310   5235             MMENU_SCANS:
+2311   5235 0C              db  CLS
+2312   5236                 db  "[ Scan/Join Access Points ]"   ,CR,LF,LF
+2312   5236 5B205363616E2F4A6F696E2041636365737320506F696E7473205D0D0A0A
+2313   5254             ;---
+2314   5254                 db  "Networks available:"           ,CR,LF,LF,STTERMINATOR
+2314   5254 4E6574776F726B7320617661696C61626C653A0D0A0A00
+2315   526B             ;---
+2316   526B             
+2317   526B             MMENU_CONNECTING:
+2318   526B 0C              db  CLS
+2319   526C                 db  "[ Scan/Join Access Points ]"   ,CR,LF,LF
+2319   526C 5B205363616E2F4A6F696E2041636365737320506F696E7473205D0D0A0A
+2320   528A             ;---
+2321   528A                 db  "Requesting connection to:"     ,CR,LF
+2321   528A 52657175657374696E6720636F6E6E656374696F6E20746F3A0D0A
+2322   52A5                 db  "(",1,88,1,85,1,89,") "         ,STTERMINATOR
+2322   52A5 28015801550159292000
+2323   52AF             
+2324   52AF             MMENU_ASKPWD:
+2325   52AF 0D 0A           db  CR,LF
+2326   52B1                 db  "Hit DEL as first character"    ,CR,LF
+2326   52B1 4869742044454C206173206669727374206368617261637465720D0A
+2327   52CD                 db  "to hide/show the typing."      ,CR,LF
+2327   52CD 746F20686964652F73686F772074686520747970696E672E0D0A
+2328   52E7                 db  "Password: "                    ,STTERMINATOR
+2328   52E7 50617373776F72643A2000
+2329   52F2             
+2330   52F2             MMENU_SCANQ:
+2331   52F2 0D 0A           db  CR,LF
+2332   52F4                 db  "ESC to return to main menu."   ,CR,LF
+2332   52F4 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A
+2333   5311                 db  "SPACE BAR to scan again."  ,CR,LF
+2333   5311 53504143452042415220746F207363616E20616761696E2E0D0A
+2334   532B                 db  "ENTER to type SSID/AP name."   ,CR,LF,LF
+2334   532B 454E54455220746F207479706520535349442F4150206E616D652E0D0A0A
+2335   5349             ;---
+2336   5349                 db  "Number to connect: "       ,STTERMINATOR
+2336   5349 4E756D62657220746F20636F6E6E6563743A2000
+2337   535D             
+2338   535D             MMENU_SCANQM:
+2339   535D 0D 0A           db  CR,LF
+2340   535F                 db  "ESC to return to main menu."   ,CR,LF
+2340   535F 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A
+2341   537C                 db  "SPACE BAR to show next page."  ,CR,LF
+2341   537C 53504143452042415220746F2073686F77206E65787420706167652E0D0A
+2342   539A                 db  "ENTER to type SSID/AP name."   ,CR,LF,LF
+2342   539A 454E54455220746F207479706520535349442F4150206E616D652E0D0A0A
+2343   53B8             ;---
+2344   53B8                 db  "Number to connect: "       ,STTERMINATOR
+2344   53B8 4E756D62657220746F20636F6E6E6563743A2000
+2345   53CC             
+2346   53CC             SCAN_TERMINATOR_CUT:
+2347   53CC                 db  GOLEFT,GOLEFT,1,91," ",GOLEFT,STTERMINATOR
+2347   53CC 1D1D015B201D00
+2348   53D3             
+2349   53D3             SCAN_TERMINATOR_OPEN:
+2350   53D3                 db  " ",1,81,GOLEFT,CR,LF,STTERMINATOR
+2350   53D3 2001511D0D0A00
+2351   53DA             
+2352   53DA             SCAN_TERMINATOR_ENC:
+2353   53DA                 db  " ",1,82,GOLEFT,CR,LF,STTERMINATOR
+2353   53DA 2001521D0D0A00
+2354   53E1             
+2355   53E1             MMENU_TIMEOUT:
+2356   53E1 0C              db  CLS
+2357   53E2                 db  "   [ Set Wi-Fi On Period ]"    ,CR,LF,LF
+2357   53E2 2020205B205365742057692D4669204F6E20506572696F64205D0D0A0A
+2358   53FF             ;---
+2359   53FF                 db  "Wi-Fi On Period allows to set" ,GOLEFT,CR,LF
+2359   53FF 57692D4669204F6E20506572696F6420616C6C6F777320746F207365741D0D0A
+2360   541F                 db  "a given period of time of"     ,CR,LF
+2360   541F 6120676976656E20706572696F64206F662074696D65206F660D0A
+2361   543A                 db  "inactivity to turn off Wi-Fi"  ,CR,LF
+2361   543A 696E616374697669747920746F207475726E206F66662057692D46690D0A
+2362   5458                 db  "automatically."                ,CR,LF,LF
+2362   5458 6175746F6D61746963616C6C792E0D0A0A
+2363   5469             ;---
+2364   5469                 db  "0         - Always on"         ,CR,LF
+2364   5469 302020202020202020202D20416C77617973206F6E0D0A
+2365   5480                 db  "1 to 30   - 30s"               ,CR,LF
+2365   5480 3120746F2033302020202D203330730D0A
+2366   5491                 db  "31 to 600 - Use given period"  ,CR,LF
+2366   5491 333120746F20363030202D2055736520676976656E20706572696F640D0A
+2367   54AF                 db  "> 600     - 600s"              ,CR,LF,LF,STTERMINATOR
+2367   54AF 3E2036303020202020202D20363030730D0A0A00
+2368   54C3             ;---
+2369   54C3             
+2370   54C3             MMENU_TIMEOUT_ALWAYSON:
+2371   54C3                 db  "Wi-Fi is currently: ALWAYS ON" ,GOLEFT,CR,LF,LF
+2371   54C3 57692D46692069732063757272656E746C793A20414C57415953204F4E1D0D0A
+2371   54E3 0A
+2372   54E4             ;---
+2373   54E4                 db  "ESC to return to main menu."   ,CR,LF,LF
+2373   54E4 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A0A
+2374   5502             ;---
+2375   5502                 db  "Type desired period: "         ,STTERMINATOR
+2375   5502 54797065206465736972656420706572696F643A2000
+2376   5518             
+2377   5518             MMENU_TIMEOUT_NOTALWAYSON1:
+2378   5518                 db  "Wi-Fi period set to: "         ,STTERMINATOR
+2378   5518 57692D466920706572696F642073657420746F3A2000
+2379   552E             
+2380   552E             MMENU_TIMEOUT_NOTALWAYSON2:
+2381   552E 73 0D 0A 0A     db  "s"                             ,CR,LF,LF
+2382   5532             ;---
+2383   5532                 db  "ESC to return to main menu."   ,CR,LF,LF
+2383   5532 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A0A
+2384   5550             ;---
+2385   5550                 db  "Type desired period: "         ,STTERMINATOR
+2385   5550 54797065206465736972656420706572696F643A2000
+2386   5566             
+2387   5566             MMENU_NAGLE:
+2388   5566 0C              db  CLS
+2389   5567                 db  "   [ Set Nagle Algorithm ]"    ,CR,LF,LF
+2389   5567 2020205B20536574204E61676C6520416C676F726974686D205D0D0A0A
+2390   5584             ;---
+2391   5584                 db  "Nagle Algorithm might lower"   ,CR,LF
+2391   5584 4E61676C6520416C676F726974686D206D69676874206C6F7765720D0A
+2392   55A1                 db  "performance but create less"   ,CR,LF
+2392   55A1 706572666F726D616E63652062757420637265617465206C6573730D0A
+2393   55BE                 db  "network congestion."           ,CR,LF
+2393   55BE 6E6574776F726B20636F6E67657374696F6E2E0D0A
+2394   55D3                 db  "Nowadays it is mostly not"     ,CR,LF
+2394   55D3 4E6F776164617973206974206973206D6F73746C79206E6F740D0A
+2395   55EE                 db  "needed and is the cause of"    ,CR,LF
+2395   55EE 6E656564656420616E6420697320746865206361757365206F660D0A
+2396   560A                 db  "latency and low performance"   ,CR,LF
+2396   560A 6C6174656E637920616E64206C6F7720706572666F726D616E63650D0A
+2397   5627                 db  "on packet-driven protocols."   ,CR,LF,LF
+2397   5627 6F6E207061636B65742D64726976656E2070726F746F636F6C732E0D0A0A
+2398   5645             ;---
+2399   5645                 db  "O - Turn it on/off"            ,CR,LF,LF,STTERMINATOR
+2399   5645 4F202D205475726E206974206F6E2F6F66660D0A0A00
+2400   565B             ;---
+2401   565B             
+2402   565B             MMENU_NAGLE_ON:
+2403   565B                 db  "Nagle is currently: ON"        ,CR,LF,LF
+2403   565B 4E61676C652069732063757272656E746C793A204F4E0D0A0A
+2404   5674             ;---
+2405   5674                 db  "ESC to return to main menu."   ,CR,LF,LF
+2405   5674 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A0A
+2406   5692             ;---
+2407   5692                 db  "Option: "                      ,STTERMINATOR
+2407   5692 4F7074696F6E3A2000
+2408   569B             
+2409   569B             MMENU_NAGLE_OFF:
+2410   569B                 db  "Nagle is currently: OFF"       ,CR,LF,LF
+2410   569B 4E61676C652069732063757272656E746C793A204F46460D0A0A
+2411   56B5             ;---
+2412   56B5                 db  "ESC to return to main menu."   ,CR,LF,LF
+2412   56B5 45534320746F2072657475726E20746F206D61696E206D656E752E0D0A0A
+2413   56D3             ;---
+2414   56D3                 db  "Option: "                      ,STTERMINATOR
+2414   56D3 4F7074696F6E3A2000
+2415   56DC             
+2416   56DC             STR_SENDING:
+2417   56DC                 db  "Sending command, wait..."      ,CR,LF,STTERMINATOR
+2417   56DC 53656E64696E6720636F6D6D616E642C20776169742E2E2E0D0A00
+2418   56F7             
+2419   56F7             STR_SENDING_OK:
+2420   56F7                 db  "Command sent Ok, done!"        ,CR,LF,STTERMINATOR
+2420   56F7 436F6D6D616E642073656E74204F6B2C20646F6E65210D0A00
+2421   5710             
+2422   5710             STR_SENDING_OK_JN:
+2423   5710                 db  CR,GORIGHT,GORIGHT,1,83,CR,LF,LF
+2423   5710 0D1C1C01530D0A0A
+2424   5718             ;---
+2425   5718                 db  "Successfully connected!"       ,CR,LF,STTERMINATOR
+2425   5718 5375636365737366756C6C7920636F6E6E6563746564210D0A00
+2426   5732             
+2427   5732             STR_SENDING_NOK_JN:
+2428   5732                 db  CR,GORIGHT,GORIGHT,1,84,CR,LF,LF
+2428   5732 0D1C1C01540D0A0A
+2429   573A             ;---
+2430   573A                 db  "Fail to connect, if protected" ,GOLEFT,CR,LF
+2430   573A 4661696C20746F20636F6E6E6563742C2069662070726F7465637465641D0D0A
+2431   575A                 db  "network check password!"       ,CR,LF,STTERMINATOR
+2431   575A 6E6574776F726B20636865636B2070617373776F7264210D0A00
+2432   5774             
+2433   5774             STR_SENDING_FAIL:
+2434   5774                 db  "Command failure..."            ,CR,LF,STTERMINATOR
+2434   5774 436F6D6D616E64206661696C7572652E2E2E0D0A00
+2435   5789             
+2436   5789             FAIL_S:
+2437   5789 0C              db  CLS
+2438   578A                 db  "ESP8266 Not Found!"            ,CR,LF,LF
+2438   578A 45535038323636204E6F7420466F756E64210D0A0A
+2439   579F             ;---
+2440   579F                 db  "Check that it is properly"     ,CR,LF
+2440   579F 436865636B20746861742069742069732070726F7065726C790D0A
+2441   57BA                 db  "inserted in its connector."    ,CR,LF,STTERMINATOR
+2441   57BA 696E73657274656420696E2069747320636F6E6E6563746F722E0D0A00
+2442   57D7             
+2443   57D7             FAIL_F:
+2444   57D7 0C              db  CLS
+2445   57D8                 db  "ESP8266 FW Update Required!"   ,CR,LF,STTERMINATOR
+2445   57D8 4553503832363620465720557064617465205265717569726564210D0A00
+2446   57F6             
+2447   57F6             SEG_CODE_END:
+2448   57F6             ; End of configuration-only ROM payload

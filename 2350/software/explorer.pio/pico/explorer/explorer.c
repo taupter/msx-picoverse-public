@@ -21,14 +21,19 @@
 #include "hardware/structs/qmi.h"
 #include "hardware/regs/qmi.h"
 #include "hardware/structs/xip_ctrl.h"
+#include "hardware/sync.h"
+#include "hardware/uart.h"
+#include "hardware/regs/uart.h"
+#include "hardware/irq.h"
 #include "hw_config.h"
 #include "explorer.h"
-#include "nextor.h"
 #include "mapper_detect.h"
 #include "mp3.h"
 #include "emu2212.h"
 #include "msx_bus.pio.h"
 #include "pico/audio_i2s.h"
+#include "sunrise_ide.h"
+#include "sunrise_sd.h"
 
 // config area and buffer for the ROM data
 #define ROM_NAME_MAX    60          // Maximum size of the ROM name
@@ -36,7 +41,15 @@
 #define MAX_FLASH_RECORDS 128       // Maximum ROM files stored in flash
 #define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2)) // Name + mapper + size + offset
 #define MENU_ROM_SIZE   (32u * 1024u) // Full menu ROM size stored before config records
-#define MONITOR_ADDR    (0xBB01)    // Monitor ROM address within image
+#define CONFIG_AREA_SIZE (16u * 1024u)
+#define ROM_SELECT_MENU 0xFEu
+#define ROM_SELECT_WIFI_CONFIG 0xFFF0u
+#define WIFI_CONFIG_FLASH_OFFSET (MENU_ROM_SIZE + CONFIG_AREA_SIZE)
+#define WIFI_CONFIG_ROM_SIZE (8u * 1024u)
+#define WIFI_BIOS_FLASH_OFFSET (WIFI_CONFIG_FLASH_OFFSET + WIFI_CONFIG_ROM_SIZE)
+#define WIFI_BIOS_ROM_SIZE (16u * 1024u)
+#define WIFI_CONFIG_RETURN_MENU 0xE0u
+#define MONITOR_ADDR    (0xBF7F)    // ROM select register just below the menu control window
 #define CACHE_SIZE      (256u * 1024u)     // 256KB cache size for ROM data (also SD ROM upper limit)
 
 #define SOURCE_SD_FLAG  0x80 // Flag in the mapper byte indicating the ROM is on SD
@@ -71,11 +84,72 @@
 #define CMD_ENTER_DIR    0x03 // Command: enter directory
 #define CMD_DETECT_MAPPER 0x04 // Command: detect mapper on demand
 #define CMD_SET_MAPPER    0x05 // Command: set mapper override
+#define CMD_SET_SOURCE    0x06 // Command: switch visible source set
+#define CMD_FH_LIST_PAGE   0x40 // Command: File Hunter list page from menu ROM
+#define CMD_FH_DOWNLOAD    0x41 // Command: File Hunter download/save from menu ROM
+#define CMD_FH_SEARCH      0x42 // Command: File Hunter search from menu ROM
+#define CMD_FH_WIFI_STATUS 0x43 // Command: File Hunter WiFi status from menu ROM
+#define CMD_FH_WIFI_CONFIG 0x44 // Command: File Hunter WiFi setup from menu ROM
+
+#define FH_CTRL_BASE    0xBFF0
+#define FH_COUNT_L      (FH_CTRL_BASE + 0)
+#define FH_COUNT_H      (FH_CTRL_BASE + 1)
+#define FH_PAGE         (FH_CTRL_BASE + 2)
+#define FH_STATUS       (FH_CTRL_BASE + 3)
+#define FH_CMD          (FH_CTRL_BASE + 4)
+#define FH_SELECT_L     (FH_CTRL_BASE + 5)
+#define FH_SELECT_H     (FH_CTRL_BASE + 6)
+#define FH_PROGRESS_L   (FH_CTRL_BASE + 7)
+#define FH_PROGRESS_H   (FH_CTRL_BASE + 8)
+#define FH_RESULT       (FH_CTRL_BASE + 9)
+#define FH_QUERY_BASE   0xBFC0
+#define FH_QUERY_SIZE   32
+#define FH_STATUS_TEXT_BASE 0xBF80
+#define FH_STATUS_TEXT_SIZE 64
+#define FH_DATA_BASE    0xB900
+#define FH_RECORD_SIZE  64
+#define FH_FILES_PER_PAGE 19
+#define FH_MAX_RESULTS 384
+#define FH_HTTP_BUFFER_SIZE (256u * 1024u)
+#define FH_HTTP_CHUNK_SIZE 2048u
+#define FH_HOST "api.file-hunter.com"
+#define FH_DEFAULT_QUERY "1"
+#define FH_WIFI_CONNECT_WAIT_US 30000000u
+#define FH_STATUS_READY 0xA5
+#define FH_STATUS_BUSY  0x5A
+#define FH_RESULT_SAVING 0x02
+#define FH_CMD_LIST_PAGE 0x01
+#define FH_CMD_DOWNLOAD  0x02
+#define FH_CMD_EXIT      0x03
+#define FH_CMD_SEARCH    0x04
+#define FH_CMD_WIFI_STATUS 0x05
+
+#define SOURCE_MODE_ALL   0x00
+#define SOURCE_MODE_FLASH 0x01
+#define SOURCE_MODE_SD    0x02
+#define SOURCE_MODE_FILEHUNTER 0x03
 
 #define CTRL_AUDIO      (CTRL_BASE_ADDR + 9) // Control: audio selection (0=None, 1=SCC, 2=SCC+)
+#define CTRL_WIFI_SUPPORT (CTRL_BASE_ADDR + 10) // Control: Sunrise WiFi support (0=No, 1=Yes)
 
-#define DATA_BASE_ADDR   0xA000 // Data buffer base address
-#define DATA_BUFFER_SIZE (CTRL_QUERY_BASE - DATA_BASE_ADDR) // Data buffer size
+#define WIFI_MEM_F2_ADDR      0x7F05u
+#define WIFI_MEM_CMD_ADDR     0x7F06u
+#define WIFI_MEM_DATA_ADDR    0x7F07u
+#define WIFI_F2_FORCE_SETUP   0xF1u
+#define WIFI_RX_FIFO_SIZE     2080u
+#define WIFI_RX_SERVICE_BUDGET 32u
+#define WIFI_QUICK_WAIT_US    25000u
+#define WIFI_UART_DEFAULT_BAUD 859372u
+#define WIFI_STATUS_RX_READY  0x01u
+#define WIFI_STATUS_TX_BUSY   0x02u
+#define WIFI_STATUS_RX_FULL   0x04u
+#define WIFI_STATUS_QUICK_RX  0x08u
+#define WIFI_STATUS_UNDERRUN  0x10u
+#define WIFI_STATUS_FREE_BITS 0x80u
+#define WIFI_UART_INSTANCE    uart1
+
+#define DATA_BASE_ADDR   0xB900 // Data buffer base address
+#define DATA_BUFFER_SIZE (FH_STATUS_TEXT_BASE - DATA_BASE_ADDR) // Data buffer size
 #define DATA_MAGIC_0     'P' // Data header magic bytes
 #define DATA_MAGIC_1     'V' // Data header magic bytes
 #define DATA_MAGIC_2     'E' // Data header magic bytes
@@ -116,11 +190,22 @@ typedef struct {
     uint offset_write;
 } msx_pio_bus_t;
 
+typedef struct {
+    PIO pio_read;
+    PIO pio_write;
+    uint sm_io_read;
+    uint sm_io_write;
+    uint offset_io_read;
+    uint offset_io_write;
+} msx_pio_io_bus_t;
+
 static msx_pio_bus_t msx_bus;
 static bool msx_bus_programs_loaded = false;
+static msx_pio_io_bus_t msx_io_bus;
+static bool msx_io_bus_programs_loaded = false;
 
 typedef struct {
-    uint8_t rom_index;
+    uint16_t rom_index;
     bool rom_selected;
 } menu_select_ctx_t;
 
@@ -151,10 +236,229 @@ static const uint8_t *flash_rom = (const uint8_t *)&__flash_binary_end;
 static const uint8_t *rom_data = (const uint8_t *)&__flash_binary_end;
 static bool rom_data_in_ram = false;
 
+static uint8_t wifi_rx_fifo[WIFI_RX_FIFO_SIZE];
+static volatile uint16_t wifi_rx_head = 0u;
+static volatile uint16_t wifi_rx_tail = 0u;
+static volatile uint16_t wifi_rx_count = 0u;
+static uint8_t wifi_f2_state = 0xFFu;
+static bool wifi_uart_ready = false;
+static uint32_t wifi_uart_baud = WIFI_UART_DEFAULT_BAUD;
+static uint32_t wifi_tx_busy_deadline_us = 0u;
+static bool wifi_rx_underrun = false;
+
+static inline void __not_in_flash_func(wifi_reset_fifo)(void)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    wifi_rx_head = 0u;
+    wifi_rx_tail = 0u;
+    wifi_rx_count = 0u;
+    wifi_rx_underrun = false;
+    restore_interrupts(irq_state);
+}
+
+static inline bool __not_in_flash_func(wifi_push_rx_byte_locked)(uint8_t data)
+{
+    if (wifi_rx_count >= WIFI_RX_FIFO_SIZE) return false;
+    wifi_rx_fifo[wifi_rx_head] = data;
+    wifi_rx_head = (uint16_t)((wifi_rx_head + 1u) % WIFI_RX_FIFO_SIZE);
+    ++wifi_rx_count;
+    return true;
+}
+
+static inline bool __not_in_flash_func(wifi_push_rx_byte)(uint8_t data)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    bool pushed = wifi_push_rx_byte_locked(data);
+    restore_interrupts(irq_state);
+    return pushed;
+}
+
+static inline bool __not_in_flash_func(wifi_pop_rx_byte)(uint8_t *data_out)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    if (wifi_rx_count == 0u)
+    {
+        restore_interrupts(irq_state);
+        return false;
+    }
+    *data_out = wifi_rx_fifo[wifi_rx_tail];
+    wifi_rx_tail = (uint16_t)((wifi_rx_tail + 1u) % WIFI_RX_FIFO_SIZE);
+    --wifi_rx_count;
+    restore_interrupts(irq_state);
+    return true;
+}
+
+static inline uint16_t __not_in_flash_func(wifi_rx_count_snapshot)(void)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    uint16_t count = wifi_rx_count;
+    restore_interrupts(irq_state);
+    return count;
+}
+
+static inline bool __not_in_flash_func(wifi_hw_tx_busy)(void)
+{
+    return (uart_get_hw(WIFI_UART_INSTANCE)->fr & UART_UARTFR_BUSY_BITS) != 0u;
+}
+
+static inline void __not_in_flash_func(wifi_hw_rx_drain)(void)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    while (uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        (void)uart_getc(WIFI_UART_INSTANCE);
+    }
+    restore_interrupts(irq_state);
+}
+
+static inline void __not_in_flash_func(wifi_pio_rx_reset)(void)
+{
+    wifi_hw_rx_drain();
+}
+
+static inline void __not_in_flash_func(wifi_pio_tx_reset)(void)
+{
+    while (wifi_hw_tx_busy()) { }
+    wifi_tx_busy_deadline_us = 0u;
+}
+
+static inline void __not_in_flash_func(wifi_service_rx)(void)
+{
+    uint16_t budget = WIFI_RX_SERVICE_BUDGET;
+    uint32_t irq_state;
+
+    if (!wifi_uart_ready) return;
+    irq_state = save_and_disable_interrupts();
+    while (budget-- != 0u && uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        if (!wifi_push_rx_byte_locked((uint8_t)uart_getc(WIFI_UART_INSTANCE))) break;
+    }
+    restore_interrupts(irq_state);
+}
+
+static void __not_in_flash_func(wifi_uart_rx_irq)(void)
+{
+    while (uart_is_readable(WIFI_UART_INSTANCE))
+    {
+        uint8_t data = (uint8_t)uart_getc(WIFI_UART_INSTANCE);
+        (void)wifi_push_rx_byte_locked(data);
+    }
+}
+
+static inline uint32_t __not_in_flash_func(wifi_uart_frame_time_us)(void)
+{
+    return (10000000u + (wifi_uart_baud - 1u)) / wifi_uart_baud;
+}
+
+static inline void __not_in_flash_func(wifi_uart_init_once)(void)
+{
+    if (wifi_uart_ready) return;
+
+    (void)uart_init(WIFI_UART_INSTANCE, wifi_uart_baud);
+    gpio_set_function(PIN_ESP_UART_TX, GPIO_FUNC_UART_AUX);
+    gpio_set_function(PIN_ESP_UART_RX, GPIO_FUNC_UART_AUX);
+    uart_set_format(WIFI_UART_INSTANCE, 8, 1, UART_PARITY_NONE);
+    uart_set_hw_flow(WIFI_UART_INSTANCE, false, false);
+    uart_set_fifo_enabled(WIFI_UART_INSTANCE, true);
+
+    wifi_hw_rx_drain();
+    wifi_f2_state = 0xFFu;
+    wifi_reset_fifo();
+    wifi_tx_busy_deadline_us = 0u;
+    wifi_uart_ready = true;
+
+    int uart_irq = (WIFI_UART_INSTANCE == uart0) ? UART0_IRQ : UART1_IRQ;
+    irq_set_exclusive_handler(uart_irq, wifi_uart_rx_irq);
+    irq_set_enabled(uart_irq, true);
+    uart_set_irq_enables(WIFI_UART_INSTANCE, true, false);
+}
+
+static inline void __not_in_flash_func(wifi_handle_cmd_write)(uint8_t cmd)
+{
+    wifi_uart_init_once();
+    if (cmd == 20u)
+    {
+        wifi_reset_fifo();
+        wifi_pio_tx_reset();
+        wifi_pio_rx_reset();
+    }
+}
+
+static inline uint8_t __not_in_flash_func(wifi_status_read)(void)
+{
+    wifi_uart_init_once();
+    wifi_service_rx();
+
+    uint8_t status = WIFI_STATUS_QUICK_RX | WIFI_STATUS_FREE_BITS;
+    uint16_t rx_count = wifi_rx_count_snapshot();
+    if (rx_count != 0u) status |= WIFI_STATUS_RX_READY;
+    if (rx_count >= WIFI_RX_FIFO_SIZE) status |= WIFI_STATUS_RX_FULL;
+    if (wifi_hw_tx_busy() || !uart_is_writable(WIFI_UART_INSTANCE) ||
+        (int32_t)(time_us_32() - wifi_tx_busy_deadline_us) < 0)
+    {
+        status |= WIFI_STATUS_TX_BUSY;
+    }
+    if (wifi_rx_underrun)
+    {
+        status |= WIFI_STATUS_UNDERRUN;
+        wifi_rx_underrun = false;
+    }
+    return status;
+}
+
+static inline uint8_t __not_in_flash_func(wifi_data_read)(void)
+{
+    wifi_uart_init_once();
+
+    uint8_t data;
+    wifi_service_rx();
+    if (wifi_pop_rx_byte(&data)) return data;
+
+    uint32_t deadline = time_us_32() + WIFI_QUICK_WAIT_US;
+    while ((int32_t)(time_us_32() - deadline) < 0)
+    {
+        wifi_service_rx();
+        if (wifi_pop_rx_byte(&data)) return data;
+    }
+
+    wifi_rx_underrun = true;
+    return 0xFFu;
+}
+
+static inline bool __not_in_flash_func(wifi_handle_mem_write)(uint16_t addr, uint8_t data)
+{
+    if (addr == WIFI_MEM_F2_ADDR) { wifi_f2_state = data; return true; }
+    if (addr == WIFI_MEM_CMD_ADDR) { wifi_handle_cmd_write(data); return true; }
+    if (addr == WIFI_MEM_DATA_ADDR)
+    {
+        wifi_uart_init_once();
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)data);
+        wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+        return true;
+    }
+    return false;
+}
+
+static inline uint8_t __not_in_flash_func(wifi_handle_mem_read)(const uint8_t *wifi_rom_base, uint32_t wifi_rom_size, uint16_t addr)
+{
+    if (addr == WIFI_MEM_F2_ADDR) return wifi_f2_state;
+    if (addr == WIFI_MEM_CMD_ADDR) return wifi_data_read();
+    if (addr == WIFI_MEM_DATA_ADDR) return wifi_status_read();
+    if (addr >= 0x4000u && addr <= 0x7FFFu)
+    {
+        uint32_t rel = (uint32_t)(addr - 0x4000u);
+        if (rel < wifi_rom_size) return wifi_rom_base[rel];
+    }
+    return 0xFFu;
+}
+
 // External PSRAM region used to buffer SD-loaded ROMs. Defined later
 // alongside the PSRAM bring-up code; declared here for use by earlier
 // functions such as load_rom_from_sd().
 static psram_region_t sd_rom_region;
+static psram_region_t mapper_region;
+static psram_region_t fh_list_region;
+static psram_region_t fh_download_region;
 static bool psram_bring_up_once(void);
 
 uint8_t ctr_val = 0xFF;    
@@ -181,7 +485,11 @@ ROMRecord records[MAX_ROM_RECORDS]; // Array to store the ROM records
 #define MIN_ROM_SIZE       8192
 #define MAX_ROM_SIZE       (15u * 1024u * 1024u)
 #define SD_ROM_MAX_SIZE    (2u * 1024u * 1024u) // PSRAM region capacity for SD-loaded ROMs
-#define MAPPER_SYSTEM      10
+#define MAPPER_SUNRISE_USB        10
+#define MAPPER_SUNRISE_MAPPER_USB 11
+#define MAPPER_SYSTEM             MAPPER_SUNRISE_USB
+#define MAPPER_SUNRISE_SD         15
+#define MAPPER_SUNRISE_MAPPER_SD  16
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
@@ -209,6 +517,7 @@ static uint16_t match_index = 0xFFFF;
 static ROMRecord flash_records[MAX_FLASH_RECORDS];
 static uint16_t flash_record_count = 0;
 static char sd_current_path[SD_PATH_MAX] = "/";
+static uint8_t browse_source_mode = SOURCE_MODE_FLASH;
 static volatile bool refresh_requested = false;
 static volatile bool refresh_in_progress = false;
 static bool refresh_worker_started = false;
@@ -238,6 +547,43 @@ static volatile uint8_t mp3_play_mode = MP3_PLAY_MODE_SINGLE;
 static uint16_t mp3_playing_filtered_index = 0xFFFF;
 static uint8_t mp3_now_playing_buf[MP3_NOW_PLAYING_SIZE];
 static volatile uint8_t ctrl_audio_selection = 0; // 0=None, 1=SCC, 2=SCC+
+static volatile uint8_t ctrl_wifi_support = 0; // 0=disabled, 1=enabled for Sunrise Nextor launches
+
+static uint8_t fh_page_index = 0;
+static uint8_t fh_status = FH_STATUS_READY;
+static uint8_t fh_result = 0;
+static uint16_t fh_progress_percent = 0;
+static uint8_t fh_query[FH_QUERY_SIZE];
+static uint16_t fh_selected_index = 0;
+static char fh_wifi_status_text[FH_STATUS_TEXT_SIZE];
+static uint8_t fh_tcp_last_error = 0;
+static uint32_t fh_download_size = 0;
+static char fh_download_name[ROM_NAME_MAX + 1];
+
+#define FH_SAVE_IDLE 0u
+#define FH_SAVE_RUNNING 1u
+#define FH_SAVE_DONE 2u
+#define FH_SAVE_FAILED 3u
+
+static uint8_t fh_sd_save_chunk[1024];
+static volatile uint8_t fh_save_state = FH_SAVE_IDLE;
+static FIL fh_save_file;
+static uint32_t fh_save_offset = 0;
+static bool fh_save_file_open = false;
+static bool fh_save_close_pending = false;
+static volatile bool fh_menu_window_active = false;
+static volatile bool fh_service_menu_window = false;
+
+typedef struct {
+    char name[ROM_NAME_MAX + 1];
+    uint16_t size_kb;
+} fh_catalog_record_t;
+
+static fh_catalog_record_t fh_catalog[FH_MAX_RESULTS];
+static uint16_t fh_catalog_count = 0;
+static bool fh_catalog_loaded = false;
+static uint8_t fh_tcp_buffer[FH_HTTP_CHUNK_SIZE + 2u];
+static char fh_active_query[FH_QUERY_SIZE];
 
 // SCC emulation state + I2S audio
 #define SCC_VOLUME_SHIFT 2  // Left-shift SCC output for volume boost (4x)
@@ -255,16 +601,48 @@ static void write_u16_le(uint8_t *ptr, uint16_t value);
 static void build_page_buffer(uint8_t page_index);
 static void refresh_records_for_current_path(void);
 
+static bool is_system_mapper(uint8_t mapper) {
+    return mapper == MAPPER_SUNRISE_USB ||
+           mapper == MAPPER_SUNRISE_MAPPER_USB ||
+           mapper == MAPPER_SUNRISE_SD ||
+           mapper == MAPPER_SUNRISE_MAPPER_SD;
+}
+
+static uint8_t mapper_code_from_record_byte(uint8_t mapper) {
+    uint8_t raw = (uint8_t)(mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG));
+
+    if (raw == OVERRIDE_FLAG) {
+        return MAPPER_SUNRISE_MAPPER_SD;
+    }
+
+    if (raw & OVERRIDE_FLAG) {
+        return (uint8_t)(raw & (uint8_t)~OVERRIDE_FLAG);
+    }
+
+    return raw;
+}
+
 static int compare_record_names(const ROMRecord *a, const ROMRecord *b) {
     return strncmp(a->Name, b->Name, ROM_NAME_MAX);
 }
 
 static bool is_system_record(const ROMRecord *record) {
-    return ((record->Mapper & ~(SOURCE_SD_FLAG | OVERRIDE_FLAG)) == MAPPER_SYSTEM);
+    return is_system_mapper(mapper_code_from_record_byte(record->Mapper));
 }
 
 static bool is_folder_record(const ROMRecord *record) {
     return (record->Mapper & FOLDER_FLAG) != 0;
+}
+
+static bool record_matches_source_mode(const ROMRecord *record) {
+    switch (browse_source_mode) {
+        case SOURCE_MODE_FLASH:
+            return !is_folder_record(record) && ((record->Mapper & SOURCE_SD_FLAG) == 0);
+        case SOURCE_MODE_SD:
+            return is_folder_record(record) || ((record->Mapper & SOURCE_SD_FLAG) != 0);
+        default:
+            return true;
+    }
 }
 
 static size_t trim_name_copy(char *dest, const char *src) {
@@ -311,13 +689,18 @@ static void apply_filter(void) {
     total_record_count = 0;
     if (filter_query[0] == '\0') {
         for (uint16_t i = 0; i < full_record_count; i++) {
-            filtered_indices[total_record_count++] = i;
+            if (record_matches_source_mode(&records[i])) {
+                filtered_indices[total_record_count++] = i;
+            }
         }
         return;
     }
 
     char name_buf[ROM_NAME_MAX + 1];
     for (uint16_t i = 0; i < full_record_count; i++) {
+        if (!record_matches_source_mode(&records[i])) {
+            continue;
+        }
         trim_name_copy(name_buf, records[i].Name);
         if (contains_ignore_case(name_buf, filter_query)) {
             filtered_indices[total_record_count++] = i;
@@ -332,8 +715,12 @@ static void find_first_match(void) {
     }
 
     char name_buf[ROM_NAME_MAX + 1];
-    for (uint16_t i = 0; i < full_record_count; i++) {
-        trim_name_copy(name_buf, records[i].Name);
+    for (uint16_t i = 0; i < total_record_count; i++) {
+        uint16_t record_index = filtered_indices[i];
+        if (record_index >= full_record_count) {
+            continue;
+        }
+        trim_name_copy(name_buf, records[record_index].Name);
         if (contains_ignore_case(name_buf, filter_query)) {
             match_index = i;
             return;
@@ -722,6 +1109,10 @@ static bool sd_mount_card(void) {
     return true;
 }
 
+static bool sd_is_mounted(void) {
+    return sd_mounted && sd_card != NULL;
+}
+
 static uint16_t add_folder_record(uint16_t record_index, const char *name) {
     if (record_index >= MAX_ROM_RECORDS) {
         return record_index;
@@ -895,9 +1286,6 @@ static void refresh_records_for_current_path(void) {
 
         uint16_t system_count = (uint16_t)(system_insert - folder_count);
         uint16_t non_system_count = (uint16_t)(record_index - system_insert);
-        if (system_count > 1) {
-            sort_records_range(folder_count, system_count);
-        }
         if (non_system_count > 1) {
             sort_records_range(system_insert, non_system_count);
         }
@@ -1048,9 +1436,6 @@ static bool refresh_records_chunked(void) {
             }
             uint16_t system_count = (uint16_t)(system_insert - refresh_folder_count);
             uint16_t non_system_count = (uint16_t)(refresh_record_index - system_insert);
-            if (system_count > 1) {
-                sort_records_range(refresh_folder_count, system_count);
-            }
             if (non_system_count > 1) {
                 sort_records_range(system_insert, non_system_count);
             }
@@ -1094,7 +1479,7 @@ static void process_detect_mapper_request(uint16_t filtered_index) {
     uint8_t flags = rec->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
 
     if (!(flags & SOURCE_SD_FLAG) || (flags & (FOLDER_FLAG | MP3_FLAG)) || sd_path_offsets[record_index] == 0xFFFF) {
-        ctrl_mapper_value = rec->Mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG | OVERRIDE_FLAG);
+        ctrl_mapper_value = mapper_code_from_record_byte(rec->Mapper);
         ctrl_cmd_state = 0;
         return;
     }
@@ -1197,7 +1582,13 @@ static void ensure_mp3_core1_started(void) {
 // (no PIO traffic from the MSX). Single-core ownership of the SD card
 // avoids FatFS reentrancy issues and removes the freeze observed when
 // folder navigation raced with MP3 work on Core 1.
+static void fh_save_background_work(void);
 static void core1_bg_work(void) {
+    if (fh_save_state == FH_SAVE_RUNNING) {
+        fh_save_background_work();
+        return;
+    }
+
     // Bridge MP3 commands queued by handle_menu_write_explorer() to the
     // mp3.c command queue. Lazy-launch Core 1 the first time an MP3
     // command actually arrives.
@@ -1501,6 +1892,11 @@ static void psram_mem_init(void)
 {
     psram_mgr.next_free = 0;
     memset(&sd_rom_region, 0, sizeof(sd_rom_region));
+    memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&fh_list_region, 0, sizeof(fh_list_region));
+    memset(&fh_download_region, 0, sizeof(fh_download_region));
+    fh_download_size = 0;
+    memset(fh_download_name, 0, sizeof(fh_download_name));
 }
 
 static bool psram_alloc(uint32_t size, psram_region_t *region)
@@ -1525,6 +1921,20 @@ static bool psram_bring_up_once(void)
     if (!psram_alloc(2u * 1024u * 1024u, &sd_rom_region)) return false;
     psram_mgr.initialised = true;
     return true;
+}
+
+static bool psram_prepare_mapper_region(void)
+{
+    if (!psram_bring_up_once()) return false;
+    if (mapper_region.size == MAPPER_SIZE) return true;
+    return psram_alloc(MAPPER_SIZE, &mapper_region);
+}
+
+static bool fh_prepare_list_region(void)
+{
+    if (!psram_bring_up_once()) return false;
+    if (fh_list_region.ptr && fh_list_region.size >= FH_HTTP_BUFFER_SIZE) return true;
+    return psram_alloc(FH_HTTP_BUFFER_SIZE, &fh_list_region);
 }
 
 static inline void __not_in_flash_func(prepare_rom_source)(
@@ -1555,7 +1965,22 @@ static inline void __not_in_flash_func(prepare_rom_source)(
         gpio_init(PIN_WAIT);
         gpio_set_dir(PIN_WAIT, GPIO_OUT);
         gpio_put(PIN_WAIT, 0);
-        memcpy(rom_sram, rom_base, bytes_to_cache);
+
+        // DMA bulk copy from flash XIP to SRAM (matches multirom). A
+        // CPU memcpy() can stall or get truncated for large transfers
+        // when this function runs in the PSRAM/QMI-active path.
+        int dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dma_cfg = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_8);
+        channel_config_set_read_increment(&dma_cfg, true);
+        channel_config_set_write_increment(&dma_cfg, true);
+        dma_channel_configure(dma_chan, &dma_cfg,
+            rom_sram,
+            rom_base,
+            bytes_to_cache,
+            true);
+        dma_channel_wait_for_finish_blocking(dma_chan);
+        dma_channel_unclaim(dma_chan);
         gpio_put(PIN_WAIT, 1);
 
         rom_cached_size = bytes_to_cache;
@@ -1574,10 +1999,53 @@ static inline void __not_in_flash_func(prepare_rom_source)(
     *available_length_out = available_length;
 }
 
+static inline void __not_in_flash_func(prepare_sunrise_mapper_rom_source)(
+    uint32_t offset,
+    bool cache_enable,
+    const uint8_t **rom_base_out,
+    uint32_t *available_length_out)
+{
+    const uint8_t *rom_base = rom_data + offset;
+    uint32_t available_length = active_rom_size;
+
+    if (cache_enable && available_length > 0u)
+    {
+        uint32_t bytes_to_cache = (available_length > CACHE_SIZE)
+                                  ? CACHE_SIZE
+                                  : available_length;
+
+        int dma_chan = dma_claim_unused_channel(true);
+        dma_channel_config dma_cfg = dma_channel_get_default_config(dma_chan);
+        channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_8);
+        channel_config_set_read_increment(&dma_cfg, true);
+        channel_config_set_write_increment(&dma_cfg, true);
+        dma_channel_configure(dma_chan, &dma_cfg,
+            rom_sram,
+            rom_base,
+            bytes_to_cache,
+            true);
+        dma_channel_wait_for_finish_blocking(dma_chan);
+        dma_channel_unclaim(dma_chan);
+
+        rom_cached_size = bytes_to_cache;
+        if (available_length <= CACHE_SIZE)
+        {
+            rom_base = rom_sram;
+        }
+    }
+    else
+    {
+        rom_cached_size = 0;
+    }
+
+    *rom_base_out = rom_base;
+    *available_length_out = available_length;
+}
+
 
 static void msx_pio_bus_init(void)
 {
-    msx_bus.pio = pio1;
+    msx_bus.pio = pio0;
     msx_bus.sm_read  = 0;
     msx_bus.sm_write = 1;
 
@@ -1629,6 +2097,50 @@ static void msx_pio_bus_init(void)
     pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, true);
 }
 
+static void msx_pio_io_bus_init(void)
+{
+    msx_io_bus.pio_read = pio1;
+    msx_io_bus.pio_write = pio1;
+    msx_io_bus.sm_io_read  = 0;
+    msx_io_bus.sm_io_write = 1;
+
+    if (!msx_io_bus_programs_loaded)
+    {
+        msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, &msx_io_read_responder_program);
+        msx_io_bus.offset_io_write = pio_add_program(msx_io_bus.pio_write, &msx_io_write_captor_program);
+        msx_io_bus_programs_loaded = true;
+    }
+
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, false);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, false);
+    pio_sm_clear_fifos(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_clear_fifos(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    pio_sm_restart(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_restart(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+
+    pio_sm_config cfg_io_read = msx_io_read_responder_program_get_default_config(msx_io_bus.offset_io_read);
+    sm_config_set_in_pins(&cfg_io_read, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_read, false, false, 16);
+    sm_config_set_out_pins(&cfg_io_read, PIN_D0, 8);
+    sm_config_set_out_shift(&cfg_io_read, true, false, 32);
+    sm_config_set_jmp_pin(&cfg_io_read, PIN_RD);
+    sm_config_set_clkdiv(&cfg_io_read, 1.0f);
+    pio_sm_init(msx_io_bus.pio_read, msx_io_bus.sm_io_read, msx_io_bus.offset_io_read, &cfg_io_read);
+
+    pio_sm_config cfg_io_write = msx_io_write_captor_program_get_default_config(msx_io_bus.offset_io_write);
+    sm_config_set_in_pins(&cfg_io_write, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_write, false, false, 32);
+    sm_config_set_fifo_join(&cfg_io_write, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg_io_write, PIN_WR);
+    sm_config_set_clkdiv(&cfg_io_write, 1.0f);
+    pio_sm_init(msx_io_bus.pio_write, msx_io_bus.sm_io_write, msx_io_bus.offset_io_write, &cfg_io_write);
+
+    pio_sm_set_consecutive_pindirs(msx_io_bus.pio_read, msx_io_bus.sm_io_read, PIN_D0, 8, false);
+
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, true);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, true);
+}
+
 static inline uint8_t __not_in_flash_func(read_rom_byte)(const uint8_t *rom_base, uint32_t rel)
 {
     return (rel < rom_cached_size) ? rom_sram[rel] : rom_base[rel];
@@ -1651,6 +2163,31 @@ static inline bool __not_in_flash_func(pio_try_get_write)(uint16_t *addr_out, ui
     return true;
 }
 
+static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out, uint8_t *data_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_io_bus.pio_write, msx_io_bus.sm_io_write))
+        return false;
+
+    uint32_t sample = pio_sm_get(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    *addr_out = (uint16_t)(sample & 0xFFFFu);
+    *data_out = (uint8_t)((sample >> 16) & 0xFFu);
+    return true;
+}
+
+static inline bool __not_in_flash_func(pio_try_get_io_read)(uint16_t *addr_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_io_bus.pio_read, msx_io_bus.sm_io_read))
+        return false;
+
+    *addr_out = (uint16_t)pio_sm_get(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    return true;
+}
+
+static inline uint8_t __not_in_flash_func(mapper_page_from_reg)(uint8_t reg)
+{
+    return (uint8_t)(reg % MAPPER_PAGES);
+}
+
 static inline void __not_in_flash_func(pio_drain_writes)(void (*handler)(uint16_t addr, uint8_t data, void *ctx), void *ctx)
 {
     uint16_t addr;
@@ -1658,6 +2195,38 @@ static inline void __not_in_flash_func(pio_drain_writes)(void (*handler)(uint16_
     while (pio_try_get_write(&addr, &data))
     {
         handler(addr, data, ctx);
+    }
+}
+
+static void __not_in_flash_func(mapper_fill_ff)(void)
+{
+    uint32_t *words = (uint32_t *)mapper_region.ptr;
+    for (uint32_t index = 0; index < (mapper_region.size / sizeof(uint32_t)); ++index)
+    {
+        words[index] = 0xFFFFFFFFu;
+    }
+}
+
+static inline void __not_in_flash_func(mapper_write_byte)(uint32_t offset, uint8_t data)
+{
+    mapper_region.ptr[offset] = data;
+}
+
+static inline uint8_t __not_in_flash_func(mapper_read_byte)(uint32_t offset)
+{
+    return mapper_region.ptr[offset];
+}
+
+typedef struct {
+    sunrise_ide_t *ide;
+} sunrise_ctx_t;
+
+static inline void __not_in_flash_func(handle_sunrise_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    sunrise_ctx_t *sctx = (sunrise_ctx_t *)ctx;
+    if (addr >= 0x4000u && addr <= 0x7FFFu)
+    {
+        sunrise_ide_handle_write(sctx->ide, addr, data);
     }
 }
 
@@ -1676,6 +2245,10 @@ static inline void __not_in_flash_func(handle_menu_write)(uint16_t addr, uint8_t
     
     if (addr == MONITOR_ADDR)
     {
+        if (data == ROM_SELECT_MENU) {
+            menu_ctx->rom_selected = false;
+            return;
+        }
         menu_ctx->rom_index = data;
         menu_ctx->rom_selected = true;
     }
@@ -1795,8 +2368,65 @@ static void __no_inline_not_in_flash_func(banked8_loop)(
 
 typedef struct {
     bool rom_selected;
-    uint8_t rom_index;
+    uint16_t rom_index;
 } explorer_menu_ctx_t;
+
+static void fh_copy_query_from_buffer(char *out, size_t out_size);
+static bool fh_fetch_catalog(const char *query);
+static void fh_set_catalog_message(const char *message);
+static void fh_build_page_buffer(void);
+static bool fh_download_selected(void);
+static void fh_update_wifi_status_text(void);
+static void fh_save_background_work(void);
+static bool fh_start_save_job(void);
+
+static void __not_in_flash_func(handle_menu_fh_command)(uint8_t data, explorer_menu_ctx_t *menu_ctx)
+{
+    fh_menu_window_active = true;
+    fh_service_menu_window = true;
+    fh_status = FH_STATUS_BUSY;
+
+    if (data == CMD_FH_LIST_PAGE || data == CMD_FH_SEARCH)
+    {
+        if (data == CMD_FH_SEARCH || !fh_catalog_loaded)
+        {
+            fh_copy_query_from_buffer(fh_active_query, sizeof(fh_active_query));
+            if (!fh_fetch_catalog(fh_active_query))
+                fh_set_catalog_message("Offline or File Hunter unavailable");
+            else if (fh_catalog_count == 0u)
+                fh_set_catalog_message("No File Hunter ROMs found");
+        }
+        fh_build_page_buffer();
+        fh_result = fh_catalog_count ? 1u : 0u;
+    }
+    else if (data == CMD_FH_DOWNLOAD)
+    {
+        fh_selected_index = (uint16_t)((uint8_t)fh_query[0]) |
+                            (uint16_t)(((uint8_t)fh_query[1]) << 8);
+        fh_progress_percent = 0;
+        fh_result = 0;
+        if (!fh_download_selected())
+            fh_result = 0u;
+    }
+    else if (data == CMD_FH_WIFI_STATUS)
+    {
+        fh_update_wifi_status_text();
+        fh_result = 1u;
+    }
+    else if (data == CMD_FH_WIFI_CONFIG)
+    {
+        wifi_f2_state = WIFI_F2_FORCE_SETUP;
+        fh_result = 1u;
+        if (menu_ctx)
+        {
+            menu_ctx->rom_index = ROM_SELECT_WIFI_CONFIG;
+            menu_ctx->rom_selected = true;
+        }
+    }
+
+    fh_status = FH_STATUS_READY;
+    fh_service_menu_window = false;
+}
 
 static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr, uint8_t data, void *ctx)
 {
@@ -1804,7 +2434,10 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
 
     if (addr >= CTRL_QUERY_BASE && addr < (CTRL_QUERY_BASE + CTRL_QUERY_SIZE))
     {
-        filter_query[addr - CTRL_QUERY_BASE] = (char)data;
+        uint16_t query_offset = addr - CTRL_QUERY_BASE;
+        filter_query[query_offset] = (char)data;
+        if (query_offset < FH_QUERY_SIZE)
+            fh_query[query_offset] = data;
         return;
     }
 
@@ -1852,7 +2485,7 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
              uint8_t mapper = (uint8_t)filter_query[2];
              
              ctrl_ack_value = 0;
-             if (index < total_record_count && mapper != 0 && mapper != MAPPER_SYSTEM && mapper < MAPPER_DESCRIPTION_COUNT) {
+             if (index < total_record_count && mapper != 0 && !is_system_mapper(mapper) && mapper < MAPPER_DESCRIPTION_COUNT) {
                  uint16_t record_index = filtered_indices[index];
                  if (record_index < full_record_count) {
                     ROMRecord *rec = &records[record_index];
@@ -1863,6 +2496,25 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
                     }
                  }
              }
+        }
+        else if (data == CMD_SET_SOURCE)
+        {
+            uint8_t mode = (uint8_t)filter_query[0];
+            if (mode > SOURCE_MODE_SD) {
+                mode = SOURCE_MODE_ALL;
+            }
+            fh_menu_window_active = false;
+            browse_source_mode = mode;
+            sd_current_path[0] = '/';
+            sd_current_path[1] = '\0';
+            memset(filter_query, 0, sizeof(filter_query));
+            refresh_requested = true;
+        }
+        else if (data == CMD_FH_LIST_PAGE || data == CMD_FH_SEARCH ||
+                 data == CMD_FH_DOWNLOAD || data == CMD_FH_WIFI_STATUS ||
+                 data == CMD_FH_WIFI_CONFIG)
+        {
+            handle_menu_fh_command(data, menu_ctx);
         }
         
         if (data != CMD_ENTER_DIR && data != CMD_DETECT_MAPPER) {
@@ -1904,8 +2556,15 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
         return;
     }
 
+    if (addr == CTRL_WIFI_SUPPORT) {
+        ctrl_wifi_support = data ? 1u : 0u;
+        return;
+    }
+
     if (addr == CTRL_PAGE) {
-        if (data != current_page) {
+        if (fh_menu_window_active) {
+            fh_page_index = data;
+        } else if (data != current_page) {
             current_page = data;
             build_page_buffer(current_page);
         }
@@ -1914,14 +2573,1497 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
 
     if (addr == MONITOR_ADDR) {
         uint8_t selected_index = data;
+        if (selected_index == ROM_SELECT_MENU) {
+            menu_ctx->rom_selected = false;
+            return;
+        }
         if (selected_index < total_record_count) {
             menu_ctx->rom_index = (uint8_t)filtered_indices[selected_index];
-        } else {
-            menu_ctx->rom_index = 0;
+            menu_ctx->rom_selected = true;
         }
-        menu_ctx->rom_selected = true;
         return;
     }
+}
+
+static uint16_t fh_read_le16(const uint8_t *ptr)
+{
+    return (uint16_t)ptr[0] | ((uint16_t)ptr[1] << 8);
+}
+
+static void fh_copy_status_prefix(const char *prefix);
+static void fh_set_offline_status(void);
+static bool fh_wifi_wait_byte(uint8_t *data_out, uint32_t deadline);
+static bool fh_wifi_wait_connected(uint32_t timeout_us);
+
+static uint8_t __not_in_flash_func(fh_read_window_byte)(uint16_t addr, bool *in_window)
+{
+    uint8_t data = 0xFFu;
+    *in_window = false;
+
+    if (addr >= 0x4000u && addr <= 0xBFFFu)
+    {
+        *in_window = true;
+        if (addr >= FH_CTRL_BASE && addr <= (FH_CTRL_BASE + 0x0Fu))
+        {
+            switch (addr)
+            {
+                case FH_COUNT_L: data = (uint8_t)(fh_catalog_count & 0xFFu); break;
+                case FH_COUNT_H: data = (uint8_t)((fh_catalog_count >> 8) & 0xFFu); break;
+                case FH_PAGE: data = fh_page_index; break;
+                case FH_STATUS: data = fh_status; break;
+                case FH_PROGRESS_L: data = (uint8_t)(fh_progress_percent & 0xFFu); break;
+                case FH_PROGRESS_H: data = (uint8_t)((fh_progress_percent >> 8) & 0xFFu); break;
+                case FH_RESULT: data = fh_result; break;
+            }
+        }
+        else if (addr >= FH_DATA_BASE && addr < (FH_DATA_BASE + (FH_RECORD_SIZE * FH_FILES_PER_PAGE)))
+        {
+            data = page_buffer[addr - FH_DATA_BASE];
+        }
+        else if (addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
+        {
+            data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
+        }
+    }
+
+    return data;
+}
+
+static uint8_t __not_in_flash_func(fh_read_menu_window_byte)(uint16_t addr, bool *in_window)
+{
+    uint8_t data = 0xFFu;
+    *in_window = false;
+
+    if (addr >= 0x4000u && addr <= 0xBFFFu)
+    {
+        *in_window = true;
+        if (addr >= FH_CTRL_BASE && addr <= (FH_CTRL_BASE + 0x0Fu))
+        {
+            switch (addr)
+            {
+                case FH_COUNT_L: data = (uint8_t)(fh_catalog_count & 0xFFu); break;
+                case FH_COUNT_H: data = (uint8_t)((fh_catalog_count >> 8) & 0xFFu); break;
+                case FH_PAGE: data = fh_page_index; break;
+                case FH_STATUS: data = fh_status; break;
+                case FH_CMD: data = ctrl_cmd_state; break;
+                case FH_PROGRESS_L: data = (uint8_t)(fh_progress_percent & 0xFFu); break;
+                case FH_PROGRESS_H: data = (uint8_t)((fh_progress_percent >> 8) & 0xFFu); break;
+                case FH_RESULT: data = fh_result; break;
+            }
+        }
+        else if (addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
+        {
+            data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
+        }
+        else if (addr >= FH_DATA_BASE && addr < (FH_DATA_BASE + (FH_RECORD_SIZE * FH_FILES_PER_PAGE)))
+        {
+            data = page_buffer[addr - FH_DATA_BASE];
+        }
+        else
+        {
+            uint32_t rel = addr - 0x4000u;
+            if (rel < MENU_ROM_SIZE)
+                data = rom_sram[rel];
+        }
+    }
+
+    return data;
+}
+
+static void __not_in_flash_func(fh_service_msx_reads)(void)
+{
+    while (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+    {
+        uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+        bool in_window;
+        uint8_t data = fh_service_menu_window ?
+            fh_read_menu_window_byte(addr, &in_window) :
+            fh_read_window_byte(addr, &in_window);
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+static uint32_t fh_read_le32(const uint8_t *ptr)
+{
+    return (uint32_t)ptr[0] |
+           ((uint32_t)ptr[1] << 8) |
+           ((uint32_t)ptr[2] << 16) |
+           ((uint32_t)ptr[3] << 24);
+}
+
+static void fh_set_catalog_message(const char *message)
+{
+    memset(fh_catalog, 0, sizeof(fh_catalog));
+    fh_catalog_loaded = false;
+    if (message && *message)
+    {
+        strncpy(fh_catalog[0].name, message, ROM_NAME_MAX);
+        fh_catalog[0].name[ROM_NAME_MAX] = '\0';
+        fh_catalog_count = 1;
+    }
+    else
+    {
+        fh_catalog_count = 0;
+    }
+}
+
+static bool fh_wifi_wait_response(uint8_t command, uint8_t *response, uint16_t response_cap,
+                                  uint16_t *response_len, uint32_t timeout_us)
+{
+    uint8_t data;
+    uint8_t rc;
+    uint8_t size_hi;
+    uint8_t size_lo;
+    uint16_t size;
+    uint16_t keep;
+    uint32_t deadline;
+
+    deadline = time_us_32() + timeout_us;
+    do {
+        if (!fh_wifi_wait_byte(&data, deadline)) return false;
+    } while (data != command);
+
+    if (!fh_wifi_wait_byte(&rc, deadline) || rc != 0u) return false;
+    if (!fh_wifi_wait_byte(&size_hi, deadline)) return false;
+    if (!fh_wifi_wait_byte(&size_lo, deadline)) return false;
+    size = (uint16_t)(((uint16_t)size_hi << 8) | size_lo);
+    keep = size;
+    if (keep > response_cap) keep = response_cap;
+    for (uint16_t i = 0; i < size; ++i)
+    {
+        if (!fh_wifi_wait_byte(&data, deadline)) return false;
+        if (i < keep && response) response[i] = data;
+    }
+    if (response_len) *response_len = keep;
+    return true;
+}
+
+static bool fh_wifi_command(uint8_t command, const uint8_t *payload, uint16_t payload_len,
+                            uint8_t *response, uint16_t response_cap, uint16_t *response_len,
+                            uint32_t timeout_us)
+{
+    wifi_uart_init_once();
+    wifi_hw_rx_drain();
+    wifi_reset_fifo();
+
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)command);
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)(payload_len >> 8));
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)(payload_len & 0xFFu));
+    for (uint16_t i = 0; i < payload_len; ++i)
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)payload[i]);
+    wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+
+    return fh_wifi_wait_response(command, response, response_cap, response_len, timeout_us);
+}
+
+static bool fh_wifi_dns(const char *host, uint8_t ip[4])
+{
+    uint8_t payload[1 + 64];
+    uint16_t host_len = (uint16_t)strlen(host);
+    uint16_t response_len = 0;
+
+    if (host_len > 63u) return false;
+    payload[0] = 0;
+    memcpy(&payload[1], host, host_len);
+    if (!fh_wifi_command(206u, payload, (uint16_t)(host_len + 1u), ip, 4, &response_len, 15000000u))
+        return false;
+    return response_len == 4u;
+}
+
+static bool fh_wifi_tcp_open_ex(const char *host, uint16_t port, bool tls, uint8_t *connection)
+{
+    uint8_t ip[4];
+    uint8_t params[11 + 64];
+    uint16_t params_len = 11u;
+    uint8_t response[1];
+    uint16_t response_len = 0;
+    size_t host_len = strlen(host);
+
+    if (host_len > 63u) return false;
+    if (!fh_wifi_dns(host, ip)) return false;
+    memset(params, 0, sizeof(params));
+    memcpy(params, ip, 4);
+    params[4] = (uint8_t)(port & 0xFFu);
+    params[5] = (uint8_t)(port >> 8);
+    params[6] = 0xFF;
+    params[7] = 0xFF;
+    params[8] = 120;
+    params[9] = 0;
+    params[10] = tls ? 0x04u : 0u;
+    if (tls)
+    {
+        memcpy(params + params_len, host, host_len);
+        params_len = (uint16_t)(params_len + host_len);
+    }
+
+    if (!fh_wifi_command(13u, params, params_len, response, sizeof(response), &response_len, 60000000u))
+        return false;
+    if (response_len != 1u) return false;
+    *connection = response[0];
+    return true;
+}
+
+static bool fh_wifi_tcp_open(const char *host, uint8_t *connection)
+{
+    return fh_wifi_tcp_open_ex(host, 80u, false, connection);
+}
+
+static bool fh_wifi_tcp_state(uint8_t connection, uint16_t *available, uint8_t *state)
+{
+    uint8_t response[16];
+    uint16_t response_len = 0;
+
+    if (!fh_wifi_command(16u, &connection, 1u, response, sizeof(response), &response_len, 2000000u))
+        return false;
+    if (response_len < 4u) return false;
+    if (state) *state = response[1];
+    if (available) *available = (uint16_t)response[2] | ((uint16_t)response[3] << 8);
+    return true;
+}
+
+static bool fh_wifi_tcp_send(uint8_t connection, const char *data, uint16_t len)
+{
+    uint8_t command = 17u;
+    uint16_t payload_len = (uint16_t)(len + 2u);
+    uint8_t response_dummy;
+    uint16_t response_len = 0;
+
+    wifi_uart_init_once();
+    wifi_hw_rx_drain();
+    wifi_reset_fifo();
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)command);
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)(payload_len >> 8));
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)(payload_len & 0xFFu));
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)connection);
+    uart_putc_raw(WIFI_UART_INSTANCE, 1);
+    for (uint16_t i = 0; i < len; ++i)
+        uart_putc_raw(WIFI_UART_INSTANCE, data[i]);
+    wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+
+    return fh_wifi_wait_response(command, &response_dummy, 0, &response_len, 10000000u);
+}
+
+static bool fh_wifi_tcp_receive(uint8_t connection, uint8_t *buffer, uint16_t cap, uint16_t *bytes_read)
+{
+    uint8_t command = 18u;
+    uint8_t payload[3];
+    uint8_t data;
+    uint8_t rc;
+    uint8_t size_hi;
+    uint8_t size_lo;
+    uint16_t response_size;
+    uint16_t response_len = 0;
+    uint16_t keep;
+    uint32_t deadline;
+
+    if (cap > FH_HTTP_CHUNK_SIZE) cap = FH_HTTP_CHUNK_SIZE;
+    fh_tcp_last_error = 0;
+    payload[0] = connection;
+    payload[1] = (uint8_t)(cap & 0xFFu);
+    payload[2] = (uint8_t)(cap >> 8);
+
+    wifi_uart_init_once();
+    wifi_hw_rx_drain();
+    wifi_reset_fifo();
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)command);
+    uart_putc_raw(WIFI_UART_INSTANCE, 0);
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)sizeof(payload));
+    for (uint16_t i = 0; i < sizeof(payload); ++i)
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)payload[i]);
+    wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+
+    deadline = time_us_32() + 20000000u;
+    do {
+        if (!fh_wifi_wait_byte(&data, deadline)) {
+            fh_tcp_last_error = 0xFEu;
+            *bytes_read = 0;
+            return false;
+        }
+    } while (data != command);
+
+    if (!fh_wifi_wait_byte(&rc, deadline))
+    {
+        fh_tcp_last_error = 0xFEu;
+        *bytes_read = 0;
+        return false;
+    }
+
+    if (rc == 3u)
+    {
+        *bytes_read = 0;
+        return true;
+    }
+    if (rc != 0u)
+    {
+        fh_tcp_last_error = rc;
+        *bytes_read = 0;
+        return false;
+    }
+
+    if (!fh_wifi_wait_byte(&size_hi, deadline) ||
+        !fh_wifi_wait_byte(&size_lo, deadline))
+    {
+        fh_tcp_last_error = 0xFEu;
+        *bytes_read = 0;
+        return false;
+    }
+
+    response_size = (uint16_t)(((uint16_t)size_hi << 8) | size_lo);
+    keep = response_size;
+    if (keep > cap + 2u)
+    {
+        fh_tcp_last_error = 0xFDu;
+        keep = 0u;
+    }
+    for (uint16_t i = 0; i < response_size; ++i)
+    {
+        if (!fh_wifi_wait_byte(&data, deadline)) {
+            fh_tcp_last_error = 0xFEu;
+            *bytes_read = 0;
+            return false;
+        }
+        if (i < keep) fh_tcp_buffer[i] = data;
+        if ((i & 0x1Fu) == 0x1Fu) fh_service_msx_reads();
+    }
+    if (fh_tcp_last_error == 0xFDu)
+    {
+        *bytes_read = 0;
+        return false;
+    }
+    response_len = keep;
+
+    if (response_len <= 2u)
+    {
+        uint16_t available = 0;
+        uint8_t state = 0;
+
+        *bytes_read = 0;
+        if (fh_wifi_tcp_state(connection, &available, &state) && available == 0u && state == 0u)
+            return false;
+        return true;
+    }
+    *bytes_read = (uint16_t)(response_len - 2u);
+    memcpy(buffer, &fh_tcp_buffer[2], *bytes_read);
+    return true;
+}
+
+static void fh_wifi_tcp_close(uint8_t connection)
+{
+    uint8_t payload = connection;
+    (void)fh_wifi_command(14u, &payload, 1, NULL, 0, NULL, 2000000u);
+}
+
+typedef bool (*fh_http_body_callback_t)(const uint8_t *data, uint16_t len, void *ctx);
+
+typedef struct {
+    bool chunked;
+    bool done;
+    bool has_content_length;
+    uint32_t content_remaining;
+    uint32_t remaining;
+    char size_line[12];
+    uint8_t size_len;
+    uint8_t crlf_to_skip;
+} fh_http_decoder_t;
+
+typedef struct {
+    char host[64];
+    char path[192];
+    uint16_t port;
+    bool tls;
+} fh_url_t;
+
+static bool fh_starts_with(const char *text, const char *prefix)
+{
+    while (*prefix)
+    {
+        if (*text++ != *prefix++) return false;
+    }
+    return true;
+}
+
+static bool fh_parse_url(const char *url, fh_url_t *out)
+{
+    const char *host_start;
+    const char *path_start;
+    const char *host_end;
+    const char *port_start = NULL;
+    size_t host_len;
+    size_t path_len;
+
+    memset(out, 0, sizeof(*out));
+    if (fh_starts_with(url, "https://"))
+    {
+        out->tls = true;
+        out->port = 443u;
+        host_start = url + 8;
+    }
+    else if (fh_starts_with(url, "http://"))
+    {
+        out->tls = false;
+        out->port = 80u;
+        host_start = url + 7;
+    }
+    else
+    {
+        out->tls = false;
+        out->port = 80u;
+        host_start = FH_HOST;
+        strncpy(out->host, FH_HOST, sizeof(out->host) - 1u);
+        strncpy(out->path, url && *url ? url : "/", sizeof(out->path) - 1u);
+        return true;
+    }
+
+    path_start = strchr(host_start, '/');
+    host_end = path_start ? path_start : (host_start + strlen(host_start));
+    for (const char *scan = host_start; scan < host_end; ++scan)
+    {
+        if (*scan == ':')
+        {
+            port_start = scan + 1;
+            host_end = scan;
+            break;
+        }
+    }
+
+    host_len = (size_t)(host_end - host_start);
+    if (host_len == 0u || host_len >= sizeof(out->host)) return false;
+    memcpy(out->host, host_start, host_len);
+    out->host[host_len] = '\0';
+
+    if (port_start)
+    {
+        unsigned long parsed_port = strtoul(port_start, NULL, 10);
+        if (parsed_port == 0u || parsed_port > 65535u) return false;
+        out->port = (uint16_t)parsed_port;
+    }
+
+    if (!path_start) path_start = "/";
+    path_len = strlen(path_start);
+    if (path_len >= sizeof(out->path)) return false;
+    memcpy(out->path, path_start, path_len + 1u);
+    return true;
+}
+
+static const char *fh_find_header_value(const char *headers, const char *name)
+{
+    size_t name_len = strlen(name);
+    const char *line = headers;
+
+    while (line && *line)
+    {
+        const char *line_end = strstr(line, "\r\n");
+        const char *value;
+        if (!line_end) line_end = line + strlen(line);
+        if ((size_t)(line_end - line) > name_len && line[name_len] == ':')
+        {
+            bool match = true;
+            for (size_t i = 0; i < name_len; ++i)
+            {
+                if (tolower((unsigned char)line[i]) != tolower((unsigned char)name[i]))
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+            {
+                value = line + name_len + 1u;
+                while (*value == ' ' || *value == '\t') value++;
+                return value;
+            }
+        }
+        if (*line_end == '\0') break;
+        line = line_end + 2;
+    }
+    return NULL;
+}
+
+static bool fh_header_value_is_chunked(const char *value)
+{
+    if (!value) return false;
+    while (*value && *value != '\r' && *value != '\n')
+    {
+        if (tolower((unsigned char)value[0]) == 'c' &&
+            tolower((unsigned char)value[1]) == 'h' &&
+            tolower((unsigned char)value[2]) == 'u' &&
+            tolower((unsigned char)value[3]) == 'n' &&
+            tolower((unsigned char)value[4]) == 'k' &&
+            tolower((unsigned char)value[5]) == 'e' &&
+            tolower((unsigned char)value[6]) == 'd')
+            return true;
+        value++;
+    }
+    return false;
+}
+
+static bool fh_parse_header_u32(const char *value, uint32_t *out)
+{
+    unsigned long parsed;
+
+    if (!value || !out) return false;
+    while (*value == ' ' || *value == '\t') value++;
+    if (!isdigit((unsigned char)*value)) return false;
+    parsed = strtoul(value, NULL, 10);
+    if (parsed > 0xFFFFFFFFul) return false;
+    *out = (uint32_t)parsed;
+    return true;
+}
+
+static void fh_service_msx_reads_for(uint32_t duration_us)
+{
+    uint32_t start = time_us_32();
+    while ((uint32_t)(time_us_32() - start) < duration_us)
+    {
+        fh_service_msx_reads();
+        tight_loop_contents();
+    }
+}
+
+static bool fh_deliver_http_body(const uint8_t *data, uint16_t len, fh_http_decoder_t *decoder,
+                                 fh_http_body_callback_t callback, void *ctx)
+{
+    if (!decoder->chunked)
+    {
+        uint16_t take = len;
+        if (decoder->has_content_length)
+        {
+            if (decoder->content_remaining == 0u)
+            {
+                decoder->done = true;
+                return true;
+            }
+            if ((uint32_t)take > decoder->content_remaining)
+                take = (uint16_t)decoder->content_remaining;
+        }
+        if (take != 0u && !callback(data, take, ctx))
+            return false;
+        if (decoder->has_content_length)
+        {
+            decoder->content_remaining -= take;
+            if (decoder->content_remaining == 0u)
+                decoder->done = true;
+        }
+        return true;
+    }
+
+    while (len > 0u && !decoder->done)
+    {
+        if (decoder->crlf_to_skip != 0u)
+        {
+            data++;
+            len--;
+            decoder->crlf_to_skip--;
+            continue;
+        }
+
+        if (decoder->remaining == 0u)
+        {
+            uint8_t ch = *data++;
+            len--;
+            if (ch == '\n')
+            {
+                decoder->size_line[decoder->size_len] = '\0';
+                decoder->remaining = (uint32_t)strtoul(decoder->size_line, NULL, 16);
+                decoder->size_len = 0;
+                if (decoder->remaining == 0u)
+                    decoder->done = true;
+            }
+            else if (ch != '\r' && ch != ';' && decoder->size_len + 1u < sizeof(decoder->size_line))
+            {
+                decoder->size_line[decoder->size_len++] = (char)ch;
+            }
+            else if (ch == ';')
+            {
+                while (len > 0u && *data != '\n')
+                {
+                    data++;
+                    len--;
+                }
+            }
+            continue;
+        }
+
+        uint16_t take = len;
+        if ((uint32_t)take > decoder->remaining)
+            take = (uint16_t)decoder->remaining;
+        if (take != 0u && !callback(data, take, ctx))
+            return false;
+        data += take;
+        len = (uint16_t)(len - take);
+        decoder->remaining -= take;
+        if (decoder->remaining == 0u)
+            decoder->crlf_to_skip = 2u;
+    }
+
+    return true;
+}
+
+static void fh_build_http_path(char *out, size_t out_size, const char *query, int download_index)
+{
+    size_t pos = 0;
+    const char *prefix = "/index4.php?base=1BA0&type=rom&msx=&char=";
+    const char *suffix = "&download=";
+
+    pos += snprintf(out + pos, out_size - pos, "%s", prefix);
+    if (!query || !*query) query = FH_DEFAULT_QUERY;
+    for (; *query && pos + 4u < out_size; ++query)
+    {
+        unsigned char ch = (unsigned char)*query;
+        if (isalnum(ch) || ch == '-' || ch == '_' || ch == '.')
+            out[pos++] = (char)ch;
+        else if (ch == ' ')
+            out[pos++] = '+';
+    }
+    pos += snprintf(out + pos, out_size - pos, "%s", suffix);
+    if (download_index >= 0)
+        snprintf(out + pos, out_size - pos, "%d", download_index);
+    else if (pos < out_size)
+        out[pos] = '\0';
+}
+
+static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, void *ctx,
+                            uint32_t idle_timeout_us, uint8_t redirect_depth)
+{
+    fh_url_t parsed;
+    uint8_t connection;
+    char request[384];
+    uint8_t chunk[FH_HTTP_CHUNK_SIZE];
+    char headers[768];
+    uint16_t header_len = 0;
+    uint16_t bytes_read;
+    uint32_t last_data;
+    uint8_t header_state = 0;
+    bool body_started = false;
+    bool got_body = false;
+    bool tcp_closed = false;
+    fh_http_decoder_t decoder;
+    int status_code = 0;
+
+    memset(&decoder, 0, sizeof(decoder));
+    if (!fh_parse_url(url, &parsed)) return false;
+
+    if (!fh_wifi_tcp_open_ex(parsed.host, parsed.port, parsed.tls, &connection)) return false;
+    int request_len = snprintf(request, sizeof(request),
+        "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: FHBrowser (MSX PicoVerse)\r\nConnection: close\r\n\r\n",
+        parsed.path, parsed.host);
+    if (request_len <= 0 || request_len >= (int)sizeof(request))
+    {
+        fh_wifi_tcp_close(connection);
+        return false;
+    }
+    if (!fh_wifi_tcp_send(connection, request, (uint16_t)request_len))
+    {
+        fh_wifi_tcp_close(connection);
+        return false;
+    }
+
+    last_data = time_us_32();
+    while ((uint32_t)(time_us_32() - last_data) < idle_timeout_us)
+    {
+        if (!fh_wifi_tcp_receive(connection, chunk, sizeof(chunk), &bytes_read))
+        {
+            tcp_closed = true;
+            if (got_body || body_started) break;
+            continue;
+        }
+        if (bytes_read == 0)
+        {
+            fh_service_msx_reads_for(10000u);
+            continue;
+        }
+        last_data = time_us_32();
+        if (body_started)
+        {
+            if (!fh_deliver_http_body(chunk, bytes_read, &decoder, callback, ctx))
+            {
+                fh_wifi_tcp_close(connection);
+                return false;
+            }
+            got_body = true;
+            if (decoder.done) break;
+            continue;
+        }
+        for (uint16_t i = 0; i < bytes_read; ++i)
+        {
+            uint8_t ch = chunk[i];
+            if (!body_started)
+            {
+                if (header_len + 1u < sizeof(headers))
+                    headers[header_len++] = (char)ch;
+                if ((header_state == 0 && ch == '\r') ||
+                    (header_state == 1 && ch == '\n') ||
+                    (header_state == 2 && ch == '\r') ||
+                    (header_state == 3 && ch == '\n'))
+                {
+                    header_state++;
+                    if (header_state == 4)
+                    {
+                        headers[header_len] = '\0';
+                        if (fh_starts_with(headers, "HTTP/"))
+                        {
+                            char *space = strchr(headers, ' ');
+                            if (space) status_code = atoi(space + 1);
+                        }
+                        if (status_code >= 300 && status_code < 400 && redirect_depth < 4u)
+                        {
+                            const char *location = fh_find_header_value(headers, "Location");
+                            if (location)
+                            {
+                                char redirect_url[256];
+                                uint16_t pos = 0;
+                                while (*location && *location != '\r' && *location != '\n' && pos + 1u < sizeof(redirect_url))
+                                    redirect_url[pos++] = *location++;
+                                redirect_url[pos] = '\0';
+                                fh_wifi_tcp_close(connection);
+                                if (redirect_url[0] == '/')
+                                {
+                                    char absolute_url[320];
+                                    snprintf(absolute_url, sizeof(absolute_url), "%s://%s%s",
+                                             parsed.tls ? "https" : "http", parsed.host, redirect_url);
+                                    return fh_http_get_url(absolute_url, callback, ctx, idle_timeout_us, (uint8_t)(redirect_depth + 1u));
+                                }
+                                return fh_http_get_url(redirect_url, callback, ctx, idle_timeout_us, (uint8_t)(redirect_depth + 1u));
+                            }
+                        }
+                        decoder.chunked = fh_header_value_is_chunked(fh_find_header_value(headers, "Transfer-Encoding"));
+                        if (!decoder.chunked && fh_parse_header_u32(fh_find_header_value(headers, "Content-Length"), &decoder.content_remaining))
+                            decoder.has_content_length = true;
+                        body_started = true;
+                        if (i + 1u < bytes_read)
+                        {
+                            uint16_t body_len = (uint16_t)(bytes_read - i - 1u);
+                            if (!fh_deliver_http_body(&chunk[i + 1u], body_len, &decoder, callback, ctx))
+                            {
+                                fh_wifi_tcp_close(connection);
+                                return false;
+                            }
+                            got_body = true;
+                        }
+                        break;
+                    }
+                }
+                else
+                {
+                    header_state = (ch == '\r') ? 1u : 0u;
+                }
+            }
+        }
+        if (body_started && !got_body)
+            got_body = true;
+        if (decoder.done) break;
+    }
+
+    fh_wifi_tcp_close(connection);
+    if (!body_started) return false;
+    if (decoder.chunked || decoder.has_content_length) return decoder.done;
+    return got_body && tcp_closed;
+}
+
+static bool fh_http_get(const char *path, fh_http_body_callback_t callback, void *ctx, uint32_t idle_timeout_us)
+{
+    char url[256];
+
+    if (!fh_wifi_wait_connected(FH_WIFI_CONNECT_WAIT_US))
+    {
+        fh_set_offline_status();
+        return false;
+    }
+
+    if (fh_starts_with(path, "http://") || fh_starts_with(path, "https://"))
+        return fh_http_get_url(path, callback, ctx, idle_timeout_us, 0);
+    snprintf(url, sizeof(url), "http://" FH_HOST "%s", path);
+    return fh_http_get_url(url, callback, ctx, idle_timeout_us, 0);
+}
+
+typedef struct {
+    uint8_t *data;
+    uint32_t len;
+    uint32_t cap;
+    bool overflowed;
+} fh_list_download_t;
+
+static bool fh_list_body_callback(const uint8_t *data, uint16_t len, void *ctx)
+{
+    fh_list_download_t *download = (fh_list_download_t *)ctx;
+    if (download->len + len > download->cap)
+    {
+        download->overflowed = true;
+        return false;
+    }
+    memcpy(download->data + download->len, data, len);
+    download->len += len;
+    return true;
+}
+
+static bool fh_parse_catalog(const uint8_t *data, uint32_t len)
+{
+    uint16_t raw_count = 0;
+    uint32_t pos = 0;
+    uint32_t base_ptr;
+    uint32_t string_start;
+
+    fh_catalog_count = 0;
+    if (len < 4u) return false;
+
+    while (pos + 4u <= len)
+    {
+        uint32_t name_ptr = fh_read_le32(data + pos);
+        if (name_ptr == 0u) break;
+        if (pos + 7u > len) return false;
+        raw_count++;
+        pos += 7u;
+    }
+    if (pos + 4u > len) return false;
+    if (raw_count == 0u)
+    {
+        fh_catalog_loaded = true;
+        return true;
+    }
+
+    base_ptr = fh_read_le32(data);
+    string_start = pos + 4u;
+    pos = 0;
+    for (uint16_t i = 0; i < raw_count && fh_catalog_count < FH_MAX_RESULTS; ++i, pos += 7u)
+    {
+        uint32_t name_ptr = fh_read_le32(data + pos);
+        uint32_t name_offset;
+        uint32_t source;
+        uint16_t out = 0;
+
+        if (name_ptr < base_ptr) continue;
+        name_offset = string_start + (name_ptr - base_ptr);
+        if (name_offset >= len) continue;
+
+        memset(&fh_catalog[fh_catalog_count], 0, sizeof(fh_catalog[fh_catalog_count]));
+        source = name_offset;
+        while (source < len && data[source] != 0u && out < ROM_NAME_MAX)
+            fh_catalog[fh_catalog_count].name[out++] = (char)data[source++];
+        fh_catalog[fh_catalog_count].name[out] = '\0';
+        fh_catalog[fh_catalog_count].size_kb = fh_read_le16(data + pos + 4u);
+        if (fh_catalog[fh_catalog_count].name[0] != '\0')
+            fh_catalog_count++;
+    }
+
+    fh_catalog_loaded = true;
+    return true;
+}
+
+static void fh_copy_query_from_buffer(char *out, size_t out_size)
+{
+    size_t i;
+    if (out_size == 0) return;
+    for (i = 0; i + 1u < out_size && i < FH_QUERY_SIZE; ++i)
+    {
+        char ch = (char)fh_query[i];
+        if (ch == '\0') break;
+        out[i] = ch;
+    }
+    out[i] = '\0';
+    if (out[0] == '\0')
+        strncpy(out, FH_DEFAULT_QUERY, out_size - 1u);
+    out[out_size - 1u] = '\0';
+}
+
+static bool fh_fetch_catalog(const char *query)
+{
+    char path[192];
+
+    if (!fh_prepare_list_region()) return false;
+
+    fh_list_download_t download = { fh_list_region.ptr, 0, fh_list_region.size, false };
+
+    fh_build_http_path(path, sizeof(path), query, -1);
+    if (!fh_http_get(path, fh_list_body_callback, &download, 3000000u))
+    {
+        if (download.overflowed)
+        {
+            fh_set_catalog_message("Too many results. Refine search");
+            return true;
+        }
+        return false;
+    }
+    return fh_parse_catalog(download.data, download.len);
+}
+
+typedef struct {
+    bool metadata_done;
+    char metadata_line[128];
+    uint8_t metadata_len;
+    uint32_t expected_size;
+    uint32_t written;
+    uint16_t fallback_size_kb;
+    bool failed;
+} fh_psram_download_t;
+
+static uint32_t fh_parse_download_size(const char *line, uint16_t fallback_size_kb)
+{
+    const char *ptr = strstr(line, "size:");
+    uint32_t fallback_size = (uint32_t)fallback_size_kb * 1024u;
+    uint32_t value = 0u;
+
+    if (ptr)
+    {
+        value = (uint32_t)strtoul(ptr + 5, NULL, 10);
+    }
+
+    if (value == 0u)
+    {
+        ptr = line;
+        while (*ptr == ' ' || *ptr == '\t') ptr++;
+        if (tolower((unsigned char)ptr[0]) == 's' &&
+            tolower((unsigned char)ptr[1]) == 'i' &&
+            tolower((unsigned char)ptr[2]) == 'z' &&
+            tolower((unsigned char)ptr[3]) == 'e' && ptr[4] == ':')
+        {
+            value = (uint32_t)strtoul(ptr + 5, NULL, 10);
+        }
+    }
+
+    if (value < fallback_size) value = fallback_size;
+    return value;
+}
+
+static bool fh_prepare_download_region(uint32_t size)
+{
+    if (size == 0u || size > PSRAM_TOTAL_SIZE) return false;
+    if (!psram_bring_up_once()) return false;
+
+    if (size <= sd_rom_region.size)
+    {
+        fh_download_region = sd_rom_region;
+        return true;
+    }
+
+    if (fh_download_region.ptr && fh_download_region.size >= size) return true;
+    return psram_alloc(size, &fh_download_region);
+}
+
+static bool fh_psram_download_body_callback(const uint8_t *data, uint16_t len, void *ctx)
+{
+    fh_psram_download_t *download = (fh_psram_download_t *)ctx;
+    const uint8_t *ptr = data;
+    uint16_t remaining = len;
+
+    while (!download->metadata_done && remaining > 0u)
+    {
+        uint8_t ch = *ptr++;
+        remaining--;
+        if (ch == '\n')
+        {
+            download->metadata_line[download->metadata_len] = '\0';
+            download->expected_size = fh_parse_download_size(download->metadata_line, download->fallback_size_kb);
+            if (!fh_prepare_download_region(download->expected_size))
+            {
+                download->failed = true;
+                return false;
+            }
+            download->metadata_done = true;
+            fh_progress_percent = 0;
+            break;
+        }
+        if (ch != '\r' && download->metadata_len + 1u < sizeof(download->metadata_line))
+            download->metadata_line[download->metadata_len++] = (char)ch;
+    }
+
+    if (!download->metadata_done)
+        return true;
+
+    if (remaining > 0u)
+    {
+        uint32_t to_copy = remaining;
+
+        if (!fh_download_region.ptr || download->written > fh_download_region.size ||
+            to_copy > (fh_download_region.size - download->written))
+        {
+            download->failed = true;
+            return false;
+        }
+
+        memcpy(fh_download_region.ptr + download->written, ptr, to_copy);
+        download->written += to_copy;
+    }
+
+    if (download->expected_size != 0u)
+    {
+        uint32_t percent = (download->written * 100u) / download->expected_size;
+        if (percent > 100u) percent = 100u;
+        fh_progress_percent = (uint16_t)percent;
+    }
+
+    fh_service_msx_reads();
+    return true;
+}
+
+static bool fh_filename_has_rom_extension(const char *filename)
+{
+    size_t len = strlen(filename);
+    const char *ext;
+    if (len < 4u) return false;
+    ext = filename + len - 4u;
+    return ext[0] == '.' &&
+           tolower((unsigned char)ext[1]) == 'r' &&
+           tolower((unsigned char)ext[2]) == 'o' &&
+           tolower((unsigned char)ext[3]) == 'm';
+}
+
+static bool fh_build_download_path(const char *name, char *path, size_t path_size)
+{
+    char filename[ROM_NAME_MAX + 5u];
+    size_t out = 0;
+
+    if (!path || path_size == 0u) return false;
+    if (!name || *name == '\0') name = "FILEHUNT";
+
+    for (size_t i = 0; name[i] != '\0' && out + 1u < sizeof(filename); ++i)
+    {
+        unsigned char ch = (unsigned char)name[i];
+        if (ch < 32u || ch == '/' || ch == '\\' || ch == ':' || ch == '*' ||
+            ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|')
+        {
+            ch = '_';
+        }
+        filename[out++] = (char)ch;
+    }
+
+    while (out > 0u && (filename[out - 1u] == ' ' || filename[out - 1u] == '.'))
+        --out;
+
+    if (out == 0u)
+    {
+        memcpy(filename, "FILEHUNT", 8u);
+        out = 8u;
+    }
+
+    filename[out] = '\0';
+    if (!fh_filename_has_rom_extension(filename) && out + 4u < sizeof(filename))
+    {
+        memcpy(filename + out, ".ROM", 5u);
+    }
+
+    return snprintf(path, path_size, "%s", filename) < (int)path_size;
+}
+
+static void fh_save_fail(const char *message)
+{
+    if (message)
+        fh_copy_status_prefix(message);
+    if (fh_save_file_open)
+    {
+        f_close(&fh_save_file);
+        fh_save_file_open = false;
+    }
+    fh_save_close_pending = false;
+    fh_result = 0u;
+    fh_save_state = FH_SAVE_FAILED;
+}
+
+static void fh_save_background_work(void)
+{
+    FRESULT fr;
+
+    if (fh_save_state != FH_SAVE_RUNNING) return;
+
+    if (!fh_save_file_open && !fh_save_close_pending)
+    {
+        char path[SD_PATH_MAX];
+
+        if (!fh_download_region.ptr || fh_download_size == 0u || fh_download_size > fh_download_region.size)
+        {
+            fh_save_fail("Save failed: buffer");
+            return;
+        }
+        if (!sd_is_mounted())
+        {
+            fh_save_fail("Use F2 microSD first");
+            return;
+        }
+        if (!fh_build_download_path(fh_download_name, path, sizeof(path)))
+        {
+            fh_save_fail("Save failed: path");
+            return;
+        }
+        fr = f_open(&fh_save_file, path, FA_CREATE_ALWAYS | FA_WRITE);
+        if (fr != FR_OK)
+        {
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: open %u", (unsigned int)fr);
+            fh_save_fail(NULL);
+            return;
+        }
+        fh_save_file_open = true;
+        return;
+    }
+
+    if (fh_save_close_pending)
+    {
+        fr = f_close(&fh_save_file);
+        fh_save_file_open = false;
+        fh_save_close_pending = false;
+        if (fr != FR_OK)
+        {
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: close %u", (unsigned int)fr);
+            fh_result = 0u;
+            fh_save_state = FH_SAVE_FAILED;
+            return;
+        }
+        fh_copy_status_prefix("Saved to microSD");
+        fh_result = 1u;
+        fh_save_state = FH_SAVE_DONE;
+        set_root_path();
+        refresh_requested = true;
+        return;
+    }
+
+    if (fh_save_offset < fh_download_size)
+    {
+        UINT to_write = (UINT)((fh_download_size - fh_save_offset) > 512u ? 512u : (fh_download_size - fh_save_offset));
+        UINT written = 0;
+
+        memcpy(fh_sd_save_chunk, fh_download_region.ptr + fh_save_offset, to_write);
+        fr = f_write(&fh_save_file, fh_sd_save_chunk, to_write, &written);
+        if (fr != FR_OK || written != to_write)
+        {
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: write %u", (unsigned int)fr);
+            fh_save_fail(NULL);
+            return;
+        }
+        fh_save_offset += written;
+        if (fh_save_offset >= fh_download_size)
+            fh_save_close_pending = true;
+    }
+}
+
+static bool fh_start_save_job(void)
+{
+    if (fh_save_state == FH_SAVE_RUNNING) return false;
+    if (mp3_core1_started)
+    {
+        fh_copy_status_prefix("Save failed: audio busy");
+        fh_save_state = FH_SAVE_FAILED;
+        fh_result = 0u;
+        return false;
+    }
+
+    fh_save_offset = 0;
+    fh_save_file_open = false;
+    fh_save_close_pending = false;
+    fh_result = FH_RESULT_SAVING;
+    fh_save_state = FH_SAVE_RUNNING;
+    return true;
+}
+
+static bool fh_download_selected(void)
+{
+    char path[192];
+    fh_psram_download_t download;
+    bool http_ok;
+    bool ok;
+
+    if (fh_selected_index >= fh_catalog_count) return false;
+
+    fh_build_http_path(path, sizeof(path), fh_active_query, (int)fh_selected_index);
+
+    memset(&download, 0, sizeof(download));
+    download.fallback_size_kb = fh_catalog[fh_selected_index].size_kb;
+    fh_progress_percent = 0;
+    http_ok = fh_http_get(path, fh_psram_download_body_callback, &download, 20000000u);
+    ok = http_ok &&
+         download.metadata_done && !download.failed &&
+            download.written != 0u &&
+            (download.expected_size == 0u || download.written >= download.expected_size);
+    if (ok)
+    {
+        fh_progress_percent = 100u;
+        fh_download_size = download.written;
+        strncpy(fh_download_name, fh_catalog[fh_selected_index].name, sizeof(fh_download_name) - 1u);
+        fh_download_name[sizeof(fh_download_name) - 1u] = '\0';
+        fh_result = FH_RESULT_SAVING;
+        fh_copy_status_prefix("Saving to microSD card...");
+        fh_service_msx_reads_for(250000u);
+        ok = fh_start_save_job();
+    }
+    else
+    {
+        uint32_t percent = 0;
+        if (download.expected_size != 0u)
+        {
+            percent = (download.written * 100u) / download.expected_size;
+            if (percent > 100u) percent = 100u;
+        }
+        if (!http_ok)
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Download failed: TCP %u %lu%%", (unsigned int)fh_tcp_last_error, (unsigned long)percent);
+        else if (!download.metadata_done)
+            fh_copy_status_prefix("Download failed: no size");
+        else if (download.failed)
+            fh_copy_status_prefix("Download failed: data");
+        else
+            snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Download failed: %lu%%", (unsigned long)percent);
+    }
+    return ok;
+}
+
+static void __not_in_flash_func(fh_build_page_buffer)(void)
+{
+    memset(page_buffer, 0, FH_RECORD_SIZE * FH_FILES_PER_PAGE);
+    uint16_t start = (uint16_t)fh_page_index * FH_FILES_PER_PAGE;
+    for (uint16_t row = 0; row < FH_FILES_PER_PAGE; row++)
+    {
+        uint16_t idx = start + row;
+        if (idx >= fh_catalog_count)
+            break;
+        uint8_t *dst = &page_buffer[row * FH_RECORD_SIZE];
+        strncpy((char *)dst, fh_catalog[idx].name, ROM_NAME_MAX);
+        dst[60] = 0;
+        uint16_t size_kb = fh_catalog[idx].size_kb;
+        dst[61] = (uint8_t)(size_kb & 0xFFu);
+        dst[62] = (uint8_t)((size_kb >> 8) & 0xFFu);
+        dst[63] = 0;
+    }
+}
+
+static void __not_in_flash_func(fh_copy_status_prefix)(const char *prefix)
+{
+    uint16_t i = 0;
+    while (i + 1u < FH_STATUS_TEXT_SIZE && prefix[i] != '\0')
+    {
+        fh_wifi_status_text[i] = prefix[i];
+        ++i;
+    }
+    fh_wifi_status_text[i] = '\0';
+}
+
+static void __not_in_flash_func(fh_set_offline_status)(void)
+{
+    fh_copy_status_prefix("Offline");
+}
+
+static bool __not_in_flash_func(fh_wifi_wait_byte)(uint8_t *data_out, uint32_t deadline)
+{
+    while ((int32_t)(time_us_32() - deadline) < 0)
+    {
+        wifi_service_rx();
+        fh_service_msx_reads();
+        if (wifi_pop_rx_byte(data_out)) return true;
+    }
+    return false;
+}
+
+static bool __not_in_flash_func(fh_wifi_query_ap_status)(uint8_t *payload, uint16_t *payload_len)
+{
+    uint8_t data;
+    uint8_t size_hi;
+    uint8_t size_lo;
+    uint16_t size;
+    uint16_t keep;
+    uint32_t deadline;
+
+    wifi_uart_init_once();
+    wifi_hw_rx_drain();
+    wifi_reset_fifo();
+
+    uart_putc_raw(WIFI_UART_INSTANCE, 'g');
+    wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+    deadline = time_us_32() + 1000000u;
+
+    do {
+        if (!fh_wifi_wait_byte(&data, deadline)) return false;
+    } while (data != 'g');
+
+    if (!fh_wifi_wait_byte(&data, deadline) || data != 0u) return false;
+    if (!fh_wifi_wait_byte(&size_hi, deadline)) return false;
+    if (!fh_wifi_wait_byte(&size_lo, deadline)) return false;
+
+    size = (uint16_t)(((uint16_t)size_hi << 8) | size_lo);
+    if (size == 0u) return false;
+
+    keep = size;
+    if (keep > 33u) keep = 33u;
+    for (uint16_t i = 0; i < size; ++i)
+    {
+        if (!fh_wifi_wait_byte(&data, deadline)) return false;
+        if (i < keep) payload[i] = data;
+    }
+
+    *payload_len = keep;
+    return true;
+}
+
+static bool __not_in_flash_func(fh_wifi_ap_connected)(void)
+{
+    uint8_t payload[33];
+    uint16_t payload_len = 0;
+
+    return fh_wifi_query_ap_status(payload, &payload_len) &&
+           payload_len >= 2u && payload[0] == 5u && payload[1] != 0u;
+}
+
+static bool __not_in_flash_func(fh_wifi_wait_connected)(uint32_t timeout_us)
+{
+    uint32_t deadline = time_us_32() + timeout_us;
+
+    while ((int32_t)(time_us_32() - deadline) < 0)
+    {
+        if (fh_wifi_ap_connected()) return true;
+        fh_copy_status_prefix("Waiting for Wi-Fi...");
+        fh_service_msx_reads_for(250000u);
+    }
+
+    return fh_wifi_ap_connected();
+}
+
+static void __not_in_flash_func(fh_update_wifi_status_text)(void)
+{
+    uint8_t payload[33];
+    uint16_t payload_len = 0;
+    uint16_t out = 0;
+    const char *prefix = "Connected to ";
+
+    fh_set_offline_status();
+    if (!fh_wifi_query_ap_status(payload, &payload_len)) return;
+    if (payload_len < 2u || payload[0] != 5u || payload[1] == 0u) return;
+
+    while (out + 1u < FH_STATUS_TEXT_SIZE && prefix[out] != '\0')
+    {
+        fh_wifi_status_text[out] = prefix[out];
+        ++out;
+    }
+
+    for (uint16_t i = 1; i < payload_len && out + 1u < FH_STATUS_TEXT_SIZE; ++i)
+    {
+        uint8_t ch = payload[i];
+        if (ch == 0u) break;
+        fh_wifi_status_text[out++] = (char)ch;
+    }
+    fh_wifi_status_text[out] = '\0';
+}
+
+static inline void __not_in_flash_func(handle_fh_write)(uint16_t addr, uint8_t data, void *ctx)
+{
+    bool *exit_requested = (bool *)ctx;
+
+    if (addr == MONITOR_ADDR && data == ROM_SELECT_MENU)
+    {
+        *exit_requested = true;
+        fh_result = 1;
+        fh_status = FH_STATUS_READY;
+        return;
+    }
+
+    if (addr >= FH_QUERY_BASE && addr < (FH_QUERY_BASE + FH_QUERY_SIZE))
+    {
+        fh_query[addr - FH_QUERY_BASE] = data;
+        return;
+    }
+
+    if (addr == FH_PAGE)
+    {
+        fh_page_index = data;
+        return;
+    }
+    if (addr == FH_SELECT_L)
+    {
+        fh_selected_index = (uint16_t)((fh_selected_index & 0xFF00u) | data);
+        return;
+    }
+    if (addr == FH_SELECT_H)
+    {
+        fh_selected_index = (uint16_t)((fh_selected_index & 0x00FFu) | ((uint16_t)data << 8));
+        return;
+    }
+    if (addr == FH_CMD)
+    {
+        fh_status = FH_STATUS_BUSY;
+        if (data == FH_CMD_LIST_PAGE || data == FH_CMD_SEARCH)
+        {
+            if (data == FH_CMD_SEARCH || !fh_catalog_loaded)
+            {
+                fh_copy_query_from_buffer(fh_active_query, sizeof(fh_active_query));
+                if (!fh_fetch_catalog(fh_active_query))
+                    fh_set_catalog_message("Offline or File Hunter unavailable");
+                else if (fh_catalog_count == 0u)
+                    fh_set_catalog_message("No File Hunter ROMs found");
+            }
+            fh_build_page_buffer();
+            fh_result = fh_catalog_count ? 1u : 0u;
+        }
+        else if (data == FH_CMD_DOWNLOAD)
+        {
+            fh_progress_percent = 0;
+            fh_result = 0;
+            if (!fh_download_selected())
+                fh_result = 0u;
+        }
+        else if (data == FH_CMD_EXIT)
+        {
+            *exit_requested = true;
+            fh_result = 1;
+        }
+        else if (data == FH_CMD_WIFI_STATUS)
+        {
+            fh_update_wifi_status_text();
+            fh_result = 1;
+        }
+        fh_status = FH_STATUS_READY;
+        return;
+    }
+}
+
+static int __no_inline_not_in_flash_func(loadrom_filehunter)(void)
+{
+    msx_pio_bus_init();
+
+    bool exit_requested = false;
+    fh_page_index = 0;
+    fh_result = 0;
+    fh_status = FH_STATUS_READY;
+    memset(fh_query, 0, sizeof(fh_query));
+    strncpy((char *)fh_query, FH_DEFAULT_QUERY, sizeof(fh_query) - 1u);
+    strncpy(fh_active_query, FH_DEFAULT_QUERY, sizeof(fh_active_query) - 1u);
+    fh_catalog_count = 0;
+    fh_catalog_loaded = false;
+    fh_set_catalog_message("Retrieving File Hunter ROMs...");
+    fh_set_offline_status();
+    wifi_uart_init_once();
+
+    while (true)
+    {
+        wifi_service_rx();
+
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            handle_fh_write(waddr, wdata, &exit_requested);
+        }
+
+        if (pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            if (exit_requested &&
+                !gpio_get(PIN_RD) &&
+                ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+            {
+                return ROM_SELECT_MENU;
+            }
+            tight_loop_contents();
+            continue;
+        }
+
+        uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+        bool in_window = false;
+        uint8_t data = 0xFFu;
+
+        if (exit_requested && addr == 0x0000u)
+        {
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+            return ROM_SELECT_MENU;
+        }
+
+        data = fh_read_window_byte(addr, &in_window);
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+
+    return ROM_SELECT_MENU;
 }
 
 //load the MSX Menu ROM into the MSX
@@ -1934,8 +4076,6 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
     memset(rom_sram, 0, MENU_ROM_SIZE); // Clear the SRAM buffer
     memcpy(rom_sram, flash_rom + offset, MENU_ROM_SIZE); // Load full 32KB menu ROM
     gpio_put(PIN_WAIT, 1); // Lets go!
-
-    mp3_set_external_buffer(rom_sram + MENU_ROM_SIZE, sizeof(rom_sram) - MENU_ROM_SIZE);
 
     int record_count = 0; // Record count
     const uint8_t *record_ptr = flash_rom + offset + MENU_ROM_SIZE; // Pointer to the ROM records
@@ -1970,7 +4110,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
     // SELECT+PLAY (issued ~10 ms apart by the menu) both fit while
     // mp3_init() is still running on Core 1.
 
-    uint8_t rom_index = 0;
+    uint16_t rom_index = 0;
     gpio_set_dir_in_masked(0xFF << 16); // Set data bus to input mode
     bool rom_selected = false; // ROM selected flag
     rom_cached_size = MENU_ROM_SIZE;
@@ -2021,7 +4161,24 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
 
             if (addr >= CTRL_BASE_ADDR && addr <= (CTRL_BASE_ADDR + 0x0F))
             {
-                switch (addr)
+                if (fh_menu_window_active)
+                {
+                    switch (addr)
+                    {
+                        case CTRL_COUNT_L: data = (uint8_t)(fh_catalog_count & 0xFFu); break;
+                        case CTRL_COUNT_H: data = (uint8_t)((fh_catalog_count >> 8) & 0xFFu); break;
+                        case CTRL_PAGE:    data = fh_page_index; break;
+                        case CTRL_STATUS:  data = fh_status; break;
+                        case CTRL_CMD:     data = ctrl_cmd_state; break;
+                        case CTRL_MATCH_L: data = (uint8_t)(fh_selected_index & 0xFFu); break;
+                        case CTRL_MATCH_H: data = (uint8_t)((fh_selected_index >> 8) & 0xFFu); break;
+                        case CTRL_MAPPER:  data = (uint8_t)(fh_progress_percent & 0xFFu); break;
+                        case CTRL_ACK:     data = (uint8_t)((fh_progress_percent >> 8) & 0xFFu); break;
+                        case CTRL_AUDIO:   data = fh_result; break;
+                        case CTRL_WIFI_SUPPORT: data = 0; break;
+                    }
+                }
+                else switch (addr)
                 {
                     case CTRL_COUNT_L: data = (uint8_t)(total_record_count & 0xFFu); break;
                     case CTRL_COUNT_H: data = (uint8_t)((total_record_count >> 8) & 0xFFu); break;
@@ -2033,6 +4190,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                     case CTRL_MAPPER:  data = ctrl_mapper_value; break;
                     case CTRL_ACK:     data = ctrl_ack_value; break;
                     case CTRL_AUDIO:   data = ctrl_audio_selection; break;
+                    case CTRL_WIFI_SUPPORT: data = ctrl_wifi_support; break;
                 }
             }
             else if (addr >= MP3_NOW_PLAYING_BASE && addr < (MP3_NOW_PLAYING_BASE + MP3_NOW_PLAYING_SIZE))
@@ -2054,6 +4212,10 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                     case MP3_CTRL_INDEX_H:   data = (uint8_t)((mp3_selected_index >> 8) & 0xFFu); break;
                     case MP3_CTRL_MODE:      data = mp3_play_mode; break;
                 }
+            }
+            else if (fh_menu_window_active && addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
+            {
+                data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
             }
             else if (addr >= DATA_BASE_ADDR && addr < (DATA_BASE_ADDR + DATA_BUFFER_SIZE))
             {
@@ -2138,7 +4300,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                         uint8_t mapper = (uint8_t)filter_query[2];
                         ctrl_ack_value = 0;
 
-                        if (index < total_record_count && mapper != 0 && mapper != MAPPER_SYSTEM && mapper < MAPPER_DESCRIPTION_COUNT) {
+                        if (index < total_record_count && mapper != 0 && !is_system_mapper(mapper) && mapper < MAPPER_DESCRIPTION_COUNT) {
                             uint16_t record_index = filtered_indices[index];
                             if (record_index < full_record_count) {
                                 ROMRecord *rec = &records[record_index];
@@ -2149,6 +4311,19 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                                 }
                             }
                         }
+                        ctrl_cmd_state = 0;
+                    }
+                    else if (cmd == CMD_SET_SOURCE)
+                    {
+                        uint8_t mode = (uint8_t)filter_query[0];
+                        if (mode > SOURCE_MODE_SD) {
+                            mode = SOURCE_MODE_ALL;
+                        }
+                        browse_source_mode = mode;
+                        sd_current_path[0] = '/';
+                        sd_current_path[1] = '\0';
+                        memset(filter_query, 0, sizeof(filter_query));
+                        refresh_requested = true;
                         ctrl_cmd_state = 0;
                     }
                     if (cmd != CMD_ENTER_DIR && cmd != CMD_DETECT_MAPPER) {
@@ -2221,7 +4396,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
             {   
                     uint8_t selected_index = (gpio_get_all() >> 16) & 0xFF;
                     if (selected_index < total_record_count) {
-                        rom_index = (uint8_t)filtered_indices[selected_index];
+                        rom_index = filtered_indices[selected_index];
                     } else {
                         rom_index = 0;
                     }
@@ -2479,7 +4654,10 @@ static void i2s_audio_init_scc(void)
         .data_pin = I2S_DATA_PIN,
         .clock_pin_base = I2S_BCLK_PIN,
         .dma_channel = 0,
-        .pio_sm = 0,
+        // Audio I2S lives on PIO1 SM2 so it never collides with the MSX
+        // memory bus PIO programs (pio0 SM0/SM1) or the I/O bus
+        // responder (pio1 SM0/SM1). Matches multirom's layout.
+        .pio_sm = 2,
     };
     scc_i2s_config.dma_channel = (uint)scc_dma_channel;
 
@@ -2658,55 +4836,6 @@ void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_
 }
 
 
-void __no_inline_not_in_flash_func(loadrom_nextor_sd_io)(uint32_t offset)
-{
-    //runs the IO code in the second core
-    multicore_launch_core1(nextor_sd_io);    // Launch core 1
-
-    //Test copying to RAM to check performance gains
-    gpio_init(PIN_WAIT); // Init wait signal pin
-    gpio_set_dir(PIN_WAIT, GPIO_OUT); // Set the WAIT signal as output
-    gpio_put(PIN_WAIT, 0); // Wait until we are ready to read the ROM
-    if (!rom_data_in_ram) {
-        memset(rom_sram, 0, 131072); // Clear the SRAM buffer
-        memcpy(rom_sram, rom_data + offset, 131072); //for 32KB ROMs we start at 0x4000
-    }
-    gpio_put(PIN_WAIT, 1); // Lets go!
-
-    // Using PIO
-    rom_cached_size = 131072; // Full Nextor ROM cached
-    msx_pio_bus_init();
-
-    uint8_t bank_registers[2] = {0, 1}; // Initial banks 0 and 1 mapped
-    bank8_ctx_t ctx = { .bank_regs = bank_registers };
-
-    while (true)
-    {
-        pio_drain_writes(handle_ascii16_write, &ctx);
-
-        if (pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read)) {
-             tight_loop_contents();
-             continue;
-        }
-
-        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
-
-        pio_drain_writes(handle_ascii16_write, &ctx);
-
-        bool in_window = (addr >= 0x4000u) && (addr <= 0xBFFFu);
-        uint8_t data = 0xFFu;
-
-        if (in_window)
-        {
-            uint8_t bank = (addr >> 15) & 1;
-            uint32_t rel = ((uint32_t)bank_registers[bank] << 14) + (addr & 0x3FFFu);
-            data = rom_sram[rel]; // Direct read since we know it's cached
-        }
-
-        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
-    }
-}
-
 // loadrom_neo8 - Load an NEO8 ROM into the MSX directly from the pico flash
 // The NEO8 ROM is divided into 8KB segments, managed by a memory mapper that allows dynamic switching of these segments into the MSX's address space
 // Size of a segment: 8 KB
@@ -2802,6 +4931,691 @@ void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset)
 
         pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
     }
+}
+
+void __not_in_flash_func(service_scc_audio)(void)
+{
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_usb_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_usb_task);
+
+    msx_pio_bus_init();
+
+    sunrise_ctx_t ctx = { .ide = &ide };
+
+    while (true)
+    {
+        uint16_t addr;
+        while (true)
+        {
+            pio_drain_writes(handle_sunrise_write, &ctx);
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        pio_drain_writes(handle_sunrise_write, &ctx);
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0x7FFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t ide_data;
+            if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+            {
+                data = ide_data;
+            }
+            else
+            {
+                uint8_t seg = ide.segment;
+                uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                if (available_length == 0u || rel < available_length)
+                    data = read_rom_byte(rom_base, rel);
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable)
+{
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42, 0x0A, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xF3, 0xDB, 0xF4, 0xF6, 0x80, 0xD3, 0xF4, 0xC7
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+        {
+            restart_detected = true;
+        }
+    }
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, false);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_usb_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_usb_task);
+
+    if (!psram_prepare_mapper_region())
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    mapper_fill_ff();
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr == 0xFFFFu)
+                subslot_reg = wdata;
+            else
+            {
+                uint8_t page = (waddr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                        sunrise_ide_handle_write(&ide, waddr, wdata);
+                }
+                else if (active_subslot == 1)
+                {
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                    mapper_write_byte(mapper_offset, wdata);
+                }
+            }
+        }
+
+        uint16_t io_addr;
+        uint8_t io_data;
+        while (pio_try_get_io_write(&io_addr, &io_data))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            if (port >= 0xFCu && port <= 0xFFu)
+                mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+        }
+
+        while (pio_try_get_io_read(&io_addr))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            bool in_window = false;
+            uint8_t data = 0xFFu;
+            if (port >= 0xFCu && port <= 0xFFu)
+            {
+                in_window = true;
+                data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+            }
+            pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cache_enable)
+{
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_rom_source(offset, cache_enable, 0u, &rom_base, &available_length);
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_sd_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_sd_task);
+
+    msx_pio_bus_init();
+
+    sunrise_ctx_t ctx = { .ide = &ide };
+
+    while (true)
+    {
+        uint16_t addr;
+        while (true)
+        {
+            pio_drain_writes(handle_sunrise_write, &ctx);
+            if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+            {
+                addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+                break;
+            }
+        }
+
+        pio_drain_writes(handle_sunrise_write, &ctx);
+
+        bool in_window = (addr >= 0x4000u) && (addr <= 0x7FFFu);
+        uint8_t data = 0xFFu;
+
+        if (in_window)
+        {
+            uint8_t ide_data;
+            if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+            {
+                data = ide_data;
+            }
+            else
+            {
+                uint8_t seg = ide.segment;
+                uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                if (available_length == 0u || rel < available_length)
+                    data = read_rom_byte(rom_base, rel);
+            }
+        }
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, bool cache_enable)
+{
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42, 0x0A, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xF3, 0xDB, 0xF4, 0xF6, 0x80, 0xD3, 0xF4, 0xC7
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+        {
+            restart_detected = true;
+        }
+    }
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, false);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+
+    // Bring up PSRAM and pre-fill the 1MB mapper region BEFORE launching
+    // Core 1. psram_init() runs an interrupts-disabled QMI direct-mode
+    // sequence and the subsequent 1MB fill saturates QMI/XIP traffic; if
+    // Core 1's SD initialisation runs concurrently from XIP, SPI timing
+    // is disrupted and `disk_initialize` fails ("Master device: not
+    // found").
+    if (!psram_prepare_mapper_region())
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
+    mapper_fill_ff();
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    sunrise_sd_set_ide_ctx(&ide);
+    multicore_launch_core1(sunrise_sd_task);
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10;
+
+    msx_pio_io_bus_init();
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr == 0xFFFFu)
+                subslot_reg = wdata;
+            else
+            {
+                uint8_t page = (waddr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                        sunrise_ide_handle_write(&ide, waddr, wdata);
+                }
+                else if (active_subslot == 1)
+                {
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                    mapper_write_byte(mapper_offset, wdata);
+                }
+            }
+        }
+
+        uint16_t io_addr;
+        uint8_t io_data;
+        while (pio_try_get_io_write(&io_addr, &io_data))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            if (port >= 0xFCu && port <= 0xFFu)
+                mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+        }
+
+        while (pio_try_get_io_read(&io_addr))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            bool in_window = false;
+            uint8_t data = 0xFFu;
+            if (port >= 0xFCu && port <= 0xFFu)
+            {
+                in_window = true;
+                data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+            }
+            pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+typedef void (*sunrise_backend_task_fn_t)(void);
+typedef void (*sunrise_backend_attach_fn_t)(sunrise_ide_t *ide);
+
+static void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_common)(
+    uint32_t offset,
+    bool cache_enable,
+    sunrise_backend_task_fn_t core1_task,
+    sunrise_backend_attach_fn_t attach_ctx,
+    bool mapper_enable)
+{
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42, 0x0A, 0x40, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xF3, 0xDB, 0xF4, 0xF6, 0x80, 0xD3,
+        0xF4, 0xC7
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata)) { }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+        {
+            restart_detected = true;
+        }
+    }
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, false);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+    const uint8_t *wifi_rom_base = rom_data + WIFI_BIOS_FLASH_OFFSET;
+
+    if (mapper_enable)
+    {
+        if (!psram_prepare_mapper_region())
+        {
+            while (true) { tight_loop_contents(); }
+        }
+        mapper_fill_ff();
+    }
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    attach_ctx(&ide);
+    multicore_launch_core1(core1_task);
+    wifi_uart_init_once();
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = mapper_enable ? 0x20u : 0x00u;
+
+    if (mapper_enable)
+    {
+        msx_pio_io_bus_init();
+    }
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        wifi_service_rx();
+
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr == 0xFFFFu)
+            {
+                subslot_reg = wdata;
+                continue;
+            }
+
+            uint8_t page = (waddr >> 14) & 0x03u;
+            uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+            if (active_subslot == 0)
+            {
+                (void)wifi_handle_mem_write(waddr, wdata);
+            }
+            else if (active_subslot == 1)
+            {
+                if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+                    sunrise_ide_handle_write(&ide, waddr, wdata);
+            }
+            else if (mapper_enable && active_subslot == 2)
+            {
+                uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+                mapper_write_byte(mapper_offset, wdata);
+            }
+        }
+
+        if (mapper_enable)
+        {
+            uint16_t io_addr;
+            uint8_t io_data;
+            while (pio_try_get_io_write(&io_addr, &io_data))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                    mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+            }
+
+            while (pio_try_get_io_read(&io_addr))
+            {
+                uint8_t port = io_addr & 0xFFu;
+                bool in_window = false;
+                uint8_t data = 0xFFu;
+                if (port >= 0xFCu && port <= 0xFFu)
+                {
+                    in_window = true;
+                    data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+                }
+                pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+            }
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                if (active_subslot == 0)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        data = wifi_handle_mem_read(wifi_rom_base, WIFI_BIOS_ROM_SIZE, addr);
+                    }
+                }
+                else if (active_subslot == 1)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                        {
+                            data = ide_data;
+                        }
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (mapper_enable && active_subslot == 2)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+static void __no_inline_not_in_flash_func(loadrom_sunrise_wifi)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx, false);
+}
+
+static void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_sd)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_sd_task, sunrise_sd_set_ide_ctx, false);
+}
+
+static void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_wifi)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx, true);
+}
+
+static void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_wifi_sd)(uint32_t offset, bool cache_enable)
+{
+    loadrom_sunrise_wifi_common(offset, cache_enable, sunrise_sd_task, sunrise_sd_set_ide_ctx, true);
 }
 
 // -----------------------------------------------------------------------
@@ -3456,6 +6270,71 @@ void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool ca
     }
 }
 
+void __no_inline_not_in_flash_func(loadrom_wifi_config_setup)(uint32_t offset)
+{
+    const uint8_t *wifi_rom_base = flash_rom + offset;
+    bool return_requested = false;
+
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    wifi_uart_init_once();
+    wifi_f2_state = WIFI_F2_FORCE_SETUP;
+    msx_pio_bus_init();
+
+    gpio_put(PIN_WAIT, 1);
+
+    while (true)
+    {
+        wifi_service_rx();
+
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            (void)wifi_handle_mem_write(waddr, wdata);
+        }
+
+        if (wifi_f2_state == WIFI_CONFIG_RETURN_MENU)
+            return_requested = true;
+
+        if (pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            if (return_requested &&
+                !gpio_get(PIN_RD) &&
+                ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+            {
+                return;
+            }
+            tight_loop_contents();
+            continue;
+        }
+
+        uint16_t addr = (uint16_t)pio_sm_get_blocking(msx_bus.pio, msx_bus.sm_read);
+
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            (void)wifi_handle_mem_write(waddr, wdata);
+        }
+
+        if (wifi_f2_state == WIFI_CONFIG_RETURN_MENU)
+            return_requested = true;
+
+        if (return_requested && addr == 0x0000u)
+        {
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+            return;
+        }
+
+        bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu) ||
+                         (addr >= WIFI_MEM_F2_ADDR && addr <= WIFI_MEM_DATA_ADDR);
+        uint8_t data = wifi_handle_mem_read(wifi_rom_base, WIFI_CONFIG_ROM_SIZE, addr);
+
+        pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+    }
+}
+
 
 // Main function running on core 0
 int __no_inline_not_in_flash_func(main)()
@@ -3466,11 +6345,16 @@ int __no_inline_not_in_flash_func(main)()
     stdio_init_all();     // Initialize stdio
     setup_gpio();     // Initialize GPIO
 
+    while (true) {
     int rom_index = loadrom_msx_menu(0x0000); //load the first 32KB ROM into the MSX (The MSX PICOVERSE MENU)
 
-    mp3_stop_core1();       // Signal Core 1 MP3 loop to exit
-    multicore_reset_core1();
-    mp3_deinit();           // Release I2S/DMA/PIO resources claimed by MP3 player
+    if ((uint16_t)rom_index == ROM_SELECT_WIFI_CONFIG) {
+        active_rom_size = WIFI_CONFIG_ROM_SIZE;
+        rom_data = flash_rom;
+        rom_data_in_ram = false;
+        loadrom_wifi_config_setup(WIFI_CONFIG_FLASH_OFFSET);
+        continue;
+    }
 
     ROMRecord const *selected = &records[rom_index];
     active_rom_size = selected->Size;
@@ -3494,8 +6378,9 @@ int __no_inline_not_in_flash_func(main)()
     // ROMs (SD ROMs are staged to PSRAM, so caching them into SRAM mirrors the
     // flash path and keeps the mapper hot loop fast).
     bool cache_enable = true;
-    uint8_t mapper = (uint8_t)(selected->Mapper & ~(SOURCE_SD_FLAG | OVERRIDE_FLAG | FOLDER_FLAG | MP3_FLAG));
+    uint8_t mapper = mapper_code_from_record_byte(selected->Mapper);
     uint8_t audio_sel = ctrl_audio_selection;
+    bool wifi_support = (ctrl_wifi_support != 0u) && is_system_mapper(mapper);
 
     // Load the selected ROM into the MSX according to the mapper
     switch (mapper) {
@@ -3528,8 +6413,29 @@ int __no_inline_not_in_flash_func(main)()
         case 9:
             loadrom_neo16(rom_offset); 
             break;
-        case 10:
-            loadrom_nextor_sd_io(rom_offset);
+        case MAPPER_SUNRISE_USB:
+            if (wifi_support)
+                loadrom_sunrise_wifi(rom_offset, cache_enable);
+            else
+                loadrom_sunrise(rom_offset, cache_enable);
+            break;
+        case MAPPER_SUNRISE_MAPPER_USB:
+            if (wifi_support)
+                loadrom_sunrise_mapper_wifi(rom_offset, cache_enable);
+            else
+                loadrom_sunrise_mapper(rom_offset, cache_enable);
+            break;
+        case MAPPER_SUNRISE_SD:
+            if (wifi_support)
+                loadrom_sunrise_wifi_sd(rom_offset, cache_enable);
+            else
+                loadrom_sunrise_sd(rom_offset, cache_enable);
+            break;
+        case MAPPER_SUNRISE_MAPPER_SD:
+            if (wifi_support)
+                loadrom_sunrise_mapper_wifi_sd(rom_offset, cache_enable);
+            else
+                loadrom_sunrise_mapper_sd(rom_offset, cache_enable);
             break;
         case 12:
             loadrom_ascii16x(rom_offset, cache_enable);
@@ -3546,6 +6452,7 @@ int __no_inline_not_in_flash_func(main)()
         default:
                 printf("Debug: Unsupported ROM mapper: %d\n", mapper);
             break;
+    }
     }
     
 }

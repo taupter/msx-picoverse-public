@@ -207,7 +207,7 @@ The UF2 writer sets `UF2_FLAG_FAMILYID_PRESENT` and uses the RP2350 family ID (`
 - `-w` requires an ESP-01 module and compatible ESP-side firmware; the PicoVerse firmware provides the ROM mapping and serial transport, not the ESP application layer itself.
 - The `-m1` and `-m2` options provide 1MB mapper RAM (64 × 16KB pages) backed by external PSRAM on GPIO47 / QMI CS1.
 - The `-c1` and `-c2` options reuse that same 1MB PSRAM-backed mapper RAM and expose it through Carnivore2-compatible RAM-mode behavior intended for `SROM.COM /D15`.
-- WiFi support is not currently exposed in MultiROM, Explorer, or the `-c1`/`-c2` Carnivore2 loader modes.
+- The `-w` Sunrise IDE WiFi system-ROM option is not currently exposed in Explorer or the `-c1`/`-c2` Carnivore2 loader modes. MultiROM supports `-w` for `-s1`, `-m1`, `-s2`, and `-m2` Nextor entries. Explorer has its own built-in ESP-01 path for File Hunter browsing and WiFi setup.
 - The `-c1` and `-c2` modes are loader modes, not direct ROM-embedding modes. They boot Nextor first; the ROM is uploaded later from DOS into PSRAM.
 - SCC/SCC+ audio for `SROM.COM /D15` uploads is enabled by building the loader UF2 with `-c1/-c2` plus `-scc` or `-sccplus` before flashing the cartridge.
 - Linux/macOS binaries are not provided (use Windows or build from source).

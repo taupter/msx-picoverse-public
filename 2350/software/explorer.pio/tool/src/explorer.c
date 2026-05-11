@@ -24,6 +24,8 @@
 #include "explorer.h"
 #include "menu.h"
 #include "nextor.h"
+#include "wifibios.h"
+#include "esp8266p_rom.h"
 #include "mapper_detect.h"
 
 #ifndef APP_VERSION
@@ -34,6 +36,8 @@
 #define MENU_COPY_SIZE          (32 * 1024)     // Full menu ROM copied verbatim before config payload
 #define CONFIG_AREA_SIZE        (16 * 1024)     // Size of the configuration area stored after the menu ROM
 #define TARGET_FILE_SIZE        (MENU_COPY_SIZE + CONFIG_AREA_SIZE) // Size of menu ROM + configuration area
+#define WIFI_CONFIG_ROM_SIZE    (8 * 1024)      // Hidden WiFi configuration ROM payload stored after config area
+#define WIFI_BIOS_ROM_SIZE      (16 * 1024)     // Hidden ESP8266P UNAPI BIOS payload used by Sunrise WiFi support
 #define MAX_FILE_NAME_LENGTH    60              // Maximum length of a ROM name
 #define FLASH_START             0x10000000      // Start of the flash memory on the Raspberry Pi Pico
 #define MAX_ROM_FILES           128             // Maximum number of ROM files
@@ -43,6 +47,11 @@
 #define MAX_ANALYSIS_SIZE       131072          // 128KB for the mapper analysis
 #define CONFIG_RECORD_SIZE      (MAX_FILE_NAME_LENGTH + 1 + sizeof(uint32_t) + sizeof(uint32_t))
 #define MAX_UF2_FILENAME_LENGTH 512
+
+#define ROM_TYPE_SUNRISE           10
+#define ROM_TYPE_SUNRISE_MAPPER    11
+#define ROM_TYPE_SUNRISE_SD        15
+#define ROM_TYPE_SUNRISE_MAPPER_SD 16
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
@@ -111,6 +120,16 @@ uint32_t file_size(const char *filename) {
 
 // Return a textual description of the mapper type given its number.
 const char* mapper_description(int number) {
+    switch (number) {
+        case ROM_TYPE_SUNRISE:
+        case ROM_TYPE_SUNRISE_MAPPER:
+        case ROM_TYPE_SUNRISE_SD:
+        case ROM_TYPE_SUNRISE_MAPPER_SD:
+            return "SYSTEM";
+        default:
+            break;
+    }
+
     if (number <= 0 || (size_t)number > MAPPER_DESCRIPTION_COUNT) {
         return "Unknown";
     }
@@ -155,11 +174,15 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 // Print usage information
 static void print_usage(const char *prog_name) {
 
-    printf("Usage: %s [-h|-n|-o <filename>]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-o <filename>]\n", prog_name);
     printf("  without options, the tool scans the current directory for .ROM files to include in the Explorer image\n");
     printf("Options:\n");
     printf("  -h   Show this help message\n");
-    printf("  -n, --nextor  Include embedded Nextor ROM in the Explorer image (experimental, only MSX2)\n");
+    printf("  -s1, --sunrise-sd  Include Sunrise IDE Nextor ROM (microSD card)\n");
+    printf("  -m1, --mapper-sd   Include Sunrise IDE Nextor ROM + 1MB mapper (microSD card)\n");
+    printf("  -s2, --sunrise-usb Include Sunrise IDE Nextor ROM (USB pendrive)\n");
+    printf("  -m2, --mapper-usb  Include Sunrise IDE Nextor ROM + 1MB mapper (USB pendrive)\n");
+    printf("  Options -s1, -m1, -s2, -m2 can be combined to add multiple Nextor entries\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
@@ -251,10 +274,12 @@ int main(int argc, char *argv[])
     printf("MSX PICOVERSE 2350 Explorer UF2 Creator %s\n", APP_VERSION);
     printf("(c) 2025 The Retro Hacker\n\n");
 
-    bool include_nextor = false;
     bool show_help = false;
+    bool use_sunrise_sd = false;
+    bool use_mapper_sd = false;
+    bool use_sunrise_usb = false;
+    bool use_mapper_usb = false;
     const char *bad_option = NULL;
-    BuildMode build_mode = BUILD_MODE_STANDARD;
     const char *missing_output_option = NULL;
     char uf2_output_filename[MAX_UF2_FILENAME_LENGTH];
 
@@ -263,10 +288,16 @@ int main(int argc, char *argv[])
 
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
-        if ((strcmp(argv[i], "-n") == 0) || (strcmp(argv[i], "--nextor") == 0)) {
-            include_nextor = true;
-        } else if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
+        if ((strcmp(argv[i], "-h") == 0) || (strcmp(argv[i], "--help") == 0)) {
             show_help = true;
+        } else if ((strcmp(argv[i], "-s1") == 0) || (strcmp(argv[i], "--sunrise-sd") == 0)) {
+            use_sunrise_sd = true;
+        } else if ((strcmp(argv[i], "-m1") == 0) || (strcmp(argv[i], "--mapper-sd") == 0)) {
+            use_mapper_sd = true;
+        } else if ((strcmp(argv[i], "-s2") == 0) || (strcmp(argv[i], "--sunrise-usb") == 0)) {
+            use_sunrise_usb = true;
+        } else if ((strcmp(argv[i], "-m2") == 0) || (strcmp(argv[i], "--mapper-usb") == 0)) {
+            use_mapper_usb = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
             if (i + 1 >= argc) {
                 missing_output_option = argv[i];
@@ -300,6 +331,18 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    bool include_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb;
+    struct {
+        bool enabled;
+        uint8_t mapper;
+        const char *name;
+    } nextor_entries[] = {
+        { use_sunrise_sd,  ROM_TYPE_SUNRISE_SD,        "Nextor Sunrise IDE (SD)" },
+        { use_mapper_sd,   ROM_TYPE_SUNRISE_MAPPER_SD, "Nextor Sunrise + 1MB Mapper (SD)" },
+        { use_sunrise_usb, ROM_TYPE_SUNRISE,           "Nextor Sunrise IDE (USB)" },
+        { use_mapper_usb,  ROM_TYPE_SUNRISE_MAPPER,    "Nextor Sunrise + 1MB Mapper (USB)" },
+    };
+
     // Standard Explorer build mode
     printf("Scanning current directory for .ROM files...\n\n");
     DIR *dir;
@@ -307,7 +350,7 @@ int main(int argc, char *argv[])
     FileInfo files[MAX_ROM_FILES]; // Array to track discovered ROM files
     int file_count = 0;
     int file_index = 1;
-    uint32_t base_offset = TARGET_FILE_SIZE; // Start appending ROMs after the MENU + config area
+    uint32_t base_offset = TARGET_FILE_SIZE + WIFI_CONFIG_ROM_SIZE + WIFI_BIOS_ROM_SIZE; // Visible ROMs start after hidden WiFi payloads
     size_t total_rom_size = 0;
     size_t config_offset = 0;
     uint8_t *config_buffer = (uint8_t *)malloc(CONFIG_AREA_SIZE); // Configuration area buffer
@@ -317,30 +360,47 @@ int main(int argc, char *argv[])
     }
     memset(config_buffer, 0xFF, CONFIG_AREA_SIZE); // Initialize config area to 0xFF
 
-    // Include embedded Nextor ROM if requested
+    // Include embedded Nextor ROM entries, one per selected option.
     if (include_nextor) {
-        char nextor_rom_name[MAX_FILE_NAME_LENGTH] = {0};
-        strncpy(nextor_rom_name, "Nextor SD (IO)", MAX_FILE_NAME_LENGTH);
-        memcpy(config_buffer + config_offset, nextor_rom_name, MAX_FILE_NAME_LENGTH);
-        config_offset += MAX_FILE_NAME_LENGTH;
-        config_buffer[config_offset++] = 10;
-        uint32_t nextor_size = sizeof(___nextor_sd_dist_nextor_rom);
-        memcpy(config_buffer + config_offset, &nextor_size, sizeof(nextor_size));
-        config_offset += sizeof(nextor_size);
-        uint32_t nextor_offset = base_offset;
-        memcpy(config_buffer + config_offset, &nextor_offset, sizeof(nextor_offset));
-        config_offset += sizeof(nextor_offset);
-        printf("File %02d: Name = %-60s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
-               file_index, "Nextor SD (IO)", nextor_size, nextor_offset, mapper_description(10));
-        total_rom_size += nextor_size;
-        if (total_rom_size > MAX_TOTAL_ROM_SIZE) {
-            printf("Total ROM data exceeds maximum supported size of %u bytes.\n", (unsigned)MAX_TOTAL_ROM_SIZE);
-            free(config_buffer);
-            return 1;
-        }
+        uint32_t nextor_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
+        for (int ne = 0; ne < (int)(sizeof(nextor_entries) / sizeof(nextor_entries[0])); ++ne) {
+            char nextor_rom_name[MAX_FILE_NAME_LENGTH] = {0};
+            uint32_t nextor_offset;
 
-        file_index++;
-        base_offset += nextor_size;
+            if (!nextor_entries[ne].enabled) {
+                continue;
+            }
+
+            if (config_offset + CONFIG_RECORD_SIZE > CONFIG_AREA_SIZE) {
+                printf("Configuration area capacity exceeded\n");
+                free(config_buffer);
+                return 1;
+            }
+
+            strncpy(nextor_rom_name, nextor_entries[ne].name, MAX_FILE_NAME_LENGTH);
+            memcpy(config_buffer + config_offset, nextor_rom_name, MAX_FILE_NAME_LENGTH);
+            config_offset += MAX_FILE_NAME_LENGTH;
+            config_buffer[config_offset++] = nextor_entries[ne].mapper;
+            memcpy(config_buffer + config_offset, &nextor_size, sizeof(nextor_size));
+            config_offset += sizeof(nextor_size);
+            nextor_offset = base_offset;
+            memcpy(config_buffer + config_offset, &nextor_offset, sizeof(nextor_offset));
+            config_offset += sizeof(nextor_offset);
+
+            printf("File %02d: Name = %-60s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
+                   file_index, nextor_entries[ne].name, nextor_size, nextor_offset,
+                   mapper_description(nextor_entries[ne].mapper));
+
+            total_rom_size += nextor_size;
+            if (total_rom_size > MAX_TOTAL_ROM_SIZE) {
+                printf("Total ROM data exceeds maximum supported size of %u bytes.\n", (unsigned)MAX_TOTAL_ROM_SIZE);
+                free(config_buffer);
+                return 1;
+            }
+
+            file_index++;
+            base_offset += nextor_size;
+        }
     }
 
     // Scan the current directory for .ROM files
@@ -483,7 +543,7 @@ int main(int argc, char *argv[])
     // Handle case of no ROM files found
     if (file_count == 0) {
         if (include_nextor) {
-            printf("No external ROM files found; generating image with embedded Nextor only.\n");
+            printf("No external ROM files found; generating image with embedded Nextor entries only.\n");
         } else {
             printf("No ROM files found in the current directory.\n\n");
             print_usage(argv[0] ? argv[0] : "explorer");
@@ -509,21 +569,38 @@ int main(int argc, char *argv[])
     }
 
     // Sanity check embedded Nextor ROM size
-    const size_t nextor_rom_size = sizeof(___nextor_sd_dist_nextor_rom);
+    const size_t nextor_rom_size = sizeof(___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM);
     if (include_nextor && nextor_rom_size == 0) {
         printf("Embedded Nextor ROM payload is empty\n");
         free(config_buffer);
         return 1;
     }
 
-    // Final flash image layout: [firmware][menu ROM][config area][Nextor ROM + scanned ROM payloads]
-    const size_t total_size = firmware_size + MENU_COPY_SIZE + CONFIG_AREA_SIZE + total_rom_size;
+    const size_t wifi_config_rom_size = sizeof(______wifi_config_ESP8266_config_rom);
+    if (wifi_config_rom_size > WIFI_CONFIG_ROM_SIZE) {
+        printf("Embedded WiFi configuration ROM must fit in %u bytes (found %zu)\n",
+               (unsigned)WIFI_CONFIG_ROM_SIZE, wifi_config_rom_size);
+        free(config_buffer);
+        return 1;
+    }
+
+    const size_t wifi_bios_rom_size = sizeof(______wifi_bios_ESP8266P_rom);
+    if (wifi_bios_rom_size != WIFI_BIOS_ROM_SIZE) {
+        printf("Embedded ESP8266P WiFi BIOS must be %u bytes (found %zu)\n",
+               (unsigned)WIFI_BIOS_ROM_SIZE, wifi_bios_rom_size);
+        free(config_buffer);
+        return 1;
+    }
+
+    // Final flash image layout: [firmware][menu ROM][config area][WiFi config ROM][ESP8266P BIOS][Nextor ROM + scanned ROM payloads]
+    const size_t total_size = firmware_size + MENU_COPY_SIZE + CONFIG_AREA_SIZE + WIFI_CONFIG_ROM_SIZE + WIFI_BIOS_ROM_SIZE + total_rom_size;
     uint8_t *combined_buffer = (uint8_t *)malloc(total_size);
     if (!combined_buffer) {
         printf("Failed to allocate combined buffer\n");
         free(config_buffer);
         return 1;
     }
+    memset(combined_buffer, 0xFF, total_size);
 
     size_t offset = 0;
     // Copy the embedded Pico firmware blob.
@@ -537,6 +614,14 @@ int main(int argc, char *argv[])
     // Drop in the generated configuration block (ROM metadata + offsets) after the menu ROM.
     memcpy(combined_buffer + offset, config_buffer, CONFIG_AREA_SIZE);
     offset += CONFIG_AREA_SIZE;
+
+    // Hidden WiFi configuration payload used by File Hunter F4 setup.
+    memcpy(combined_buffer + offset, ______wifi_config_ESP8266_config_rom, wifi_config_rom_size);
+    offset += WIFI_CONFIG_ROM_SIZE;
+
+    // Hidden ESP8266P UNAPI BIOS exposed when Sunrise WiFi Support is enabled.
+    memcpy(combined_buffer + offset, ______wifi_bios_ESP8266P_rom, wifi_bios_rom_size);
+    offset += WIFI_BIOS_ROM_SIZE;
 
 #ifdef DEBUG
     {
@@ -560,8 +645,13 @@ int main(int argc, char *argv[])
 #endif
 
     if (include_nextor) {
-        memcpy(combined_buffer + offset, ___nextor_sd_dist_nextor_rom, nextor_rom_size);
-        offset += nextor_rom_size;
+        for (int ne = 0; ne < (int)(sizeof(nextor_entries) / sizeof(nextor_entries[0])); ++ne) {
+            if (!nextor_entries[ne].enabled) {
+                continue;
+            }
+            memcpy(combined_buffer + offset, ___nextor_kernel_Nextor_2_1_4_SunriseIDE_MasterOnly_ROM, nextor_rom_size);
+            offset += nextor_rom_size;
+        }
     }
 
     uint8_t io_buffer[4096];

@@ -1,6 +1,6 @@
 # MSX PicoVerse 2350 — Sunrise IDE Emulation for Nextor
 
-This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, or combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`. The four non-Carnivore2 Sunrise modes can also optionally expose ESP-01 WiFi support when built with `-w` in either `loadrom.exe` or `multirom.exe`.
+This document describes the implementation of the Sunrise IDE interface emulation modes in the MSX PicoVerse 2350 firmware. The 2350 variant supports two distinct storage backends — microSD card and USB mass storage — each available standalone, combined with a 1MB PSRAM-backed memory mapper, or combined with that mapper plus Carnivore2-compatible RAM-mode loading for `SROM.COM /D15`. The four non-Carnivore2 Sunrise modes can also optionally expose ESP-01 WiFi support when built with `-w` in either `loadrom.exe` or `multirom.exe`, or when enabled from the Explorer ROM details screen.
 
 ## 1. Overview
 
@@ -264,6 +264,8 @@ Subslot layout with WiFi enabled:
 The ESP8266P BIOS is placed in sub-slot 0 so its `INIT` runs before Nextor's during the MSX BIOS expanded-slot scan. This ordering is required for FPGA-based MSX cores and is functionally equivalent on real MSX hardware.
 
 The WiFi implementation is intentionally not enabled for `-c1` and `-c2` in the current firmware.
+
+In Explorer builds the ESP8266P BIOS is stored once as a hidden fixed payload. Sunrise Nextor entries show **Wifi: No** by default on the ROM details screen; changing it to **Yes** makes the firmware expose the same WiFi subslot layout used by `-w`, then run the selected Sunrise Nextor ROM. Mapper variants keep their 1MB PSRAM mapper in subslot 2.
 
 ## 8. ATA IDENTIFY DEVICE Response
 

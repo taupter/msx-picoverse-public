@@ -8,6 +8,13 @@ __at (BIOS_HWVER) unsigned char msx_version;
 __at (BIOS_LINL40) unsigned char text_columns;
 __at (BIOS_RG4SAV) unsigned char vdp_reg4;
 
+#define MENU_UI_HLINE_SOURCE_CHAR 0x17
+#define MENU_UI_HLINE_PRINT_CHAR  0x7E
+
+static unsigned char menu_ui_render_shortcuts(unsigned char content_width);
+static unsigned char menu_ui_shortcuts_length(void);
+static void menu_ui_wait_key_with_blinking_status(const char *text);
+
 static void clear_rows_vram(unsigned char start_row, unsigned char end_row, unsigned char width) __naked
 {
     (void)start_row;
@@ -66,11 +73,22 @@ int menu_ui_supports_80_column_mode(void) {
     return msx_version >= 1;
 }
 
+static void menu_ui_copy_char_pattern(unsigned char source_char, unsigned char target_char)
+{
+    unsigned int base = ((unsigned int)vdp_reg4) << 11;
+    unsigned int source_address = base + ((unsigned int)source_char * 8);
+    unsigned int target_address = base + ((unsigned int)target_char * 8);
+
+    for (unsigned char i = 0; i < 8; i++) {
+        Vpoke(target_address + i, Vpeek(source_address + i));
+    }
+}
+
 void menu_ui_set_text_mode(int enable_80) {
     if (enable_80) {
         text_columns = 80;
         use_80_columns = 1;
-        name_col_width = MAX_FILE_NAME_LENGTH;
+        name_col_width = NAME_COL_WIDTH_80;
     } else {
         text_columns = 40;
         use_80_columns = 0;
@@ -83,6 +101,8 @@ void menu_ui_set_text_mode(int enable_80) {
     call   BIOS_CALSLT
     pop    ix
     __endasm;
+
+    menu_ui_copy_char_pattern(MENU_UI_HLINE_SOURCE_CHAR, MENU_UI_HLINE_PRINT_CHAR);
 }
 
 void menu_ui_init_text_mode(void) {
@@ -115,14 +135,12 @@ int menu_ui_try_toggle_columns(void) {
     int target_80 = !use_80_columns;
     if (target_80) {
         if (MENU_FORCE_40_COLUMNS) {
-            menu_ui_print_last_line_text("80-column mode disabled. Press key.");
-            (void)bios_chget();
+            menu_ui_wait_key_with_blinking_status("80-col off");
             menu_ui_clear_last_line();
             return 0;
         }
         if (!menu_ui_supports_80_column_mode()) {
-            menu_ui_print_last_line_text("MSX lacks 80-column mode. Press key.");
-            (void)bios_chget();
+            menu_ui_wait_key_with_blinking_status("No 80-column");
             menu_ui_clear_last_line();
             return 0;
         }
@@ -159,15 +177,144 @@ void menu_ui_print_title_line(void) {
 void menu_ui_print_delimiter_line(void) {
     unsigned char width = use_80_columns ? 78 : 38;
     for (unsigned char i = 0; i < width; i++) {
-        PrintChar('-');
+        PrintChar(MENU_UI_HLINE_PRINT_CHAR);
     }
 }
 
 void menu_ui_print_footer_line(void) {
+    unsigned char width = menu_ui_row_width();
+    unsigned char content_width = (unsigned char)(width - 2);
+    unsigned char footer_len = menu_ui_shortcuts_length();
+    unsigned char col;
+
     if (use_80_columns) {
-        printf("Page: %02d/%02d%35s[/ - Find] [H - Help] [ESC - UP]", currentPage, totalPages, "");
+        printf("Page: %02d/%02d", currentPage, totalPages);
     } else {
-        printf("Page: %02d/%02d%1s[/-Find] [H-Help] [ESC-UP]", currentPage, totalPages, "");
+        printf("Page: %02d/%02d", currentPage, totalPages);
+    }
+
+    col = 11;
+    while (col < content_width && (unsigned char)(content_width - col) > footer_len) {
+        PrintChar(' ');
+        col++;
+    }
+
+    col = (unsigned char)(col + menu_ui_render_shortcuts((unsigned char)(content_width - col)));
+
+    while (col < content_width) {
+        PrintChar(' ');
+        col++;
+    }
+}
+
+static unsigned char menu_ui_print_shortcut_token(const char *token, int selected) {
+    unsigned char len = (unsigned char)strlen(token);
+
+    for (unsigned char i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)token[i];
+        if (selected) {
+            ch = (unsigned char)(ch + 96);
+        }
+        PrintChar(ch);
+    }
+
+    return len;
+}
+
+static unsigned char menu_ui_shortcuts_length(void) {
+    const char *tokens_80[] = {
+        "[F1 - Flash]",
+        "[F2 - MicroSD]",
+        "[F3 - File Hunter]"
+    };
+    const char *tokens_40[] = {
+        "[F1-FL]",
+        "[F2-SD]",
+        "[F3-FH]"
+    };
+    const char **tokens = use_80_columns ? tokens_80 : tokens_40;
+    unsigned char total_len = 0;
+
+    for (unsigned char i = 0; i < 3; i++) {
+        total_len = (unsigned char)(total_len + (unsigned char)strlen(tokens[i]));
+    }
+
+    return (unsigned char)(total_len + 2);
+}
+
+static unsigned char menu_ui_render_shortcuts(unsigned char content_width) {
+    const char *tokens_80[] = {
+        "[F1 - Flash]",
+        "[F2 - MicroSD]",
+        "[F3 - File Hunter]"
+    };
+    const char *tokens_40[] = {
+        "[F1-FL]",
+        "[F2-SD]",
+        "[F3-FH]"
+    };
+    const char **tokens = use_80_columns ? tokens_80 : tokens_40;
+    unsigned char total_len = 0;
+    unsigned char col = 0;
+
+    total_len = menu_ui_shortcuts_length();
+
+    if (total_len > content_width) {
+        total_len = content_width;
+    }
+
+    for (unsigned char i = 0; i < 3 && col < content_width; i++) {
+        unsigned char token_len = menu_ui_print_shortcut_token(tokens[i], menu_shortcut_selection == (unsigned char)(i + 1));
+        col = (unsigned char)(col + token_len);
+        if (i < 2 && col < content_width) {
+            PrintChar(' ');
+            col++;
+        }
+    }
+
+    return total_len;
+}
+
+static void menu_ui_render_last_line(const char *left_text) {
+    unsigned char width = menu_ui_row_width();
+    unsigned char content_width = (unsigned char)(width - 2);
+    const char *actions;
+    unsigned char right_len;
+    unsigned char right_start = 0;
+    unsigned char col = 0;
+
+ 
+    actions = use_80_columns ?
+            "[/ - Search] [  H - Help  ] [F4 - WiFi Config]" :
+            "[/-Fnd] [H-Hlp] [F4-WF]";
+    
+
+    right_len = (unsigned char)strlen(actions);
+
+    Locate(0, 23);
+
+    if (right_len < content_width) {
+        right_start = (unsigned char)(content_width - right_len);
+    }
+
+    while (left_text && *left_text && col < right_start) {
+        PrintChar((unsigned char)*left_text++);
+        col++;
+    }
+
+    while (col < right_start) {
+        PrintChar(' ');
+        col++;
+    }
+
+    while (*actions && col < content_width) {
+        PrintChar((unsigned char)*actions++);
+        col++;
+    }
+
+    while (col < content_width) {
+        PrintChar(' ');
+        col++;
     }
 }
 
@@ -180,6 +327,7 @@ void menu_ui_render_menu_frame(void) {
     menu_ui_print_delimiter_line();
     Locate(0, 22);
     menu_ui_print_footer_line();
+    menu_ui_render_last_line(0);
     frame_rendered = 1;
 }
 
@@ -189,22 +337,31 @@ void menu_ui_update_footer_page(void) {
 }
 
 void menu_ui_clear_last_line(void) {
-    Locate(0, 23);
-    unsigned char width = menu_ui_row_width();
-    for (unsigned char i = 0; i < (unsigned char)(width - 1); i++) {
-        PrintChar(' ');
-    }
-    Locate(0, 23);
+    menu_ui_render_last_line(0);
 }
 
 void menu_ui_print_last_line_text(const char *text) {
-    Locate(0, 23);
-    unsigned char col = 0;
-    unsigned char width = menu_ui_row_width();
-    while (*text && col < (unsigned char)(width - 1)) {
-        PrintChar((unsigned char)*text++);
-        col++;
+    menu_ui_render_last_line(text);
+}
+
+static void menu_ui_wait_key_with_blinking_status(const char *text) {
+    unsigned char visible = 1;
+    unsigned char tick = 0;
+
+    menu_ui_print_last_line_text(text);
+    while (!bios_chsns()) {
+        delay_ms(20);
+        if (++tick >= 8) {
+            tick = 0;
+            visible = !visible;
+            if (visible) {
+                menu_ui_print_last_line_text(text);
+            } else {
+                menu_ui_clear_last_line();
+            }
+        }
     }
+    (void)bios_chget();
 }
 
 void menu_ui_print_str_inverted_width(const char *str, unsigned char width)

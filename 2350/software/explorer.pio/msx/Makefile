@@ -33,7 +33,7 @@ endif
 VERSION ?= v1.00
 CCDEFS = -DEXPLORER_VERSION=\"$(VERSION)\"
 
-SOURCES = menu.c menu_state.c menu_ui.c menu_input.c screen_rom.c screen_mp3.c
+SOURCES = menu.c menu_state.c menu_ui.c menu_input.c screen_rom.c explorer_fh.c
 SRCS = $(addprefix $(SRCDIR)/,$(SOURCES))
 RELS = $(SOURCES:%.c=$(BINDIR)/%.rel)
 OUTFILE = menu.rom

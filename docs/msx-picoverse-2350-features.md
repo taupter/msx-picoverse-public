@@ -4,7 +4,7 @@ The MSX PicoVerse 2350 is a Raspberry Pi Pico 2350-based MSX-compatible cartridg
 
 - **Multi-ROM Support**: The cartridge can store and run multiple MSX ROMs, allowing users to run different games and applications from a single cartridge.
 - **Built-in Menu System**: A user-friendly menu system allows users to select and launch ROMs easily.
-- **Explorer Firmware**: Unified menu that merges ROMs from flash and microSD in a single list.
+- **Explorer Firmware**: Unified menu that merges ROMs from flash and microSD in a single list, with File Hunter browsing over ESP-01 WiFi.
 - **Source Labels (FL/SD)**: Each ROM entry shows whether it comes from flash or microSD.
 - **High Compatibility**: Supports a wide range of MSX ROMs, including games and applications for MSX1, MSX2, and MSX2+ systems.
 - **Nextor DOS Support**: Compatible with Nextor DOS, enabling advanced file management and storage options. Currently supports Nextor OS 2.1.4 on the SD card. You can run DSK files using Nextor.
@@ -17,11 +17,14 @@ The MSX PicoVerse 2350 is a Raspberry Pi Pico 2350-based MSX-compatible cartridg
 - **Sunrise IDE + 1MB PSRAM Memory Mapper (USB)**: The `-m2` option combines Sunrise IDE emulation via USB with a 1MB memory mapper (64 × 16KB pages) in an expanded sub-slot architecture. The mapper RAM is backed by external PSRAM on GPIO47 / QMI CS1. Sub-slot 0 serves the Nextor ROM, sub-slot 1 provides the mapper RAM across all four 16KB pages, and mapper page registers (I/O ports FC–FF) are intercepted via PIO1.
 - **Sunrise IDE + 1MB PSRAM Memory Mapper (microSD)**: The `-m1` option provides the same mapper architecture as `-m2` but uses the on-board microSD card for storage instead of USB.
 - **ESP-01 WiFi Support For Sunrise IDE Modes**: Both the LoadROM and MultiROM tools accept `-w` together with `-s1`, `-m1`, `-s2`, or `-m2`, adding an embedded ESP8266P system ROM and a memory-mapped UART backend for the PicoVerse 2350 ESP-01 header. In MultiROM `-w` is applied to every selected Sunrise IDE entry and is not added to `-c1`/`-c2` Carnivore2 entries. Detailed behaviour is documented in the WiFi guide.
+- **Explorer File Hunter Browser**: Press `F3` in Explorer to browse File Hunter through the ESP-01 WiFi module, search online results from the MSX, download ROMs into PSRAM, and save them as `.ROM` files directly in the microSD root.
+- **Explorer WiFi Configuration**: Press `F4` in Explorer to enter the WiFi setup flow used by the ESP8266P-compatible WiFi firmware.
 - **ROM Loading to PSRAM Mapper via `SROM.COM` (USB)**: The `-c2` option (LoadROM and MultiROM) exposes the cartridge as a Carnivore2-compatible RAM target on top of the 1MB PSRAM mapper, allowing `SROM.COM /D15` to upload ROM files into PSRAM and execute them from RAM while using USB mass storage as the Nextor backend. When combined with `-scc` / `-sccplus`, SROM-uploaded Konami SCC / SCC+ ROMs play through the cartridge's I2S audio path.
 - **ROM Loading to PSRAM Mapper via `SROM.COM` (microSD)**: The `-c1` option (LoadROM and MultiROM) provides the same Carnivore2-compatible PSRAM loading workflow as `-c2`, but uses the on-board microSD card as the Nextor backend. SCC / SCC+ emulation is also supported via `-scc` / `-sccplus`.
 - **Support for up to 1024 entries (Explorer)**: Per folder view, including ROMs and MP3s; the root view can also include flash entries.
 - **Paged ROM List**: The menu loads pages on demand to keep the ROM list responsive with large libraries.
 - **Search by Name (Explorer)**: Press `/`, type a query, and press Enter to jump to the first match.
+- **Search File Hunter (Explorer)**: Press `/` inside File Hunter to run an online File Hunter query and reload the result list.
 - **On-device 40/80 Column Toggle**: Press `C` to switch between compact 40-column and wide 80-column menu layouts (when supported by the MSX model).
 - **MP3 Player**: MP3 files on microSD appear in the menu and open a player screen with play/stop, mute, and visualizer controls.
 - **ROM Detail Screen**: ROM entries open a details screen with mapper detection/override and audio profile selection before running.

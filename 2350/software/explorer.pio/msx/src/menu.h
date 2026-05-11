@@ -21,15 +21,16 @@
 #define MAX_FILE_NAME_LENGTH 60     // Maximum size of the ROM name
 #define ROM_RECORD_SIZE (MAX_FILE_NAME_LENGTH + 1 + sizeof(unsigned long) + sizeof(unsigned long))  // Size of the ROM record in bytes
 #define MAX_ROM_RECORDS 65535 // Maximum ROM files supported (counter limit)
-#define MEMORY_START 0xA000 // Start of the memory area to read the ROM records
-#define ROM_SELECT_REGISTER 0xBB01 // Memory-mapped register that selects the ROM to load
+#define MEMORY_START 0xB900 // Start of the memory area to read the ROM records
+#define ROM_SELECT_REGISTER 0xBF7F // Memory-mapped register that selects the ROM to load
 #define JIFFY 0xFC9E
 #define SOURCE_SD_FLAG 0x80
 #define FOLDER_FLAG 0x40
-#define MP3_FLAG 0x20
 #define OVERRIDE_FLAG 0x10
 #define NAME_COL_WIDTH 22
+#define NAME_COL_WIDTH_80 60
 #define MENU_FORCE_40_COLUMNS 0
+#define MENU_KEY_F4_CONFIG 0x04
 #define CTRL_BASE_ADDR 0xBFF0
 #define CTRL_COUNT_L (CTRL_BASE_ADDR + 0)
 #define CTRL_COUNT_H (CTRL_BASE_ADDR + 1)
@@ -41,16 +42,34 @@
 #define CTRL_MAPPER  (CTRL_BASE_ADDR + 7)
 #define CTRL_ACK     (CTRL_BASE_ADDR + 8)
 #define CTRL_AUDIO   (CTRL_BASE_ADDR + 9)
+#define CTRL_WIFI_SUPPORT (CTRL_BASE_ADDR + 10)
 #define CTRL_MAGIC   0xA5
 #define CTRL_QUERY_BASE 0xBFC0
 #define CTRL_QUERY_SIZE 32
-#define DATA_BUFFER_END CTRL_QUERY_BASE
+#define DATA_BUFFER_END CTRL_FH_STATUS_TEXT_BASE
 #define DATA_BUFFER_SIZE (DATA_BUFFER_END - MEMORY_START)
 #define CMD_APPLY_FILTER 0x01
 #define CMD_FIND_FIRST  0x02
 #define CMD_ENTER_DIR   0x03
 #define CMD_DETECT_MAPPER 0x04
 #define CMD_SET_MAPPER 0x05
+#define CMD_SET_SOURCE  0x06
+#define CMD_FH_LIST_PAGE 0x40
+#define CMD_FH_DOWNLOAD  0x41
+#define CMD_FH_SEARCH    0x42
+#define CMD_FH_WIFI_STATUS 0x43
+#define CMD_FH_WIFI_CONFIG 0x44
+#define CTRL_FH_PROGRESS_L CTRL_MAPPER
+#define CTRL_FH_PROGRESS_H CTRL_ACK
+#define CTRL_FH_RESULT CTRL_AUDIO
+#define CTRL_FH_STATUS_TEXT_BASE 0xBF80
+#define CTRL_FH_STATUS_TEXT_SIZE 64
+#define CTRL_FH_RECORD_SIZE 64
+
+#define SOURCE_MODE_ALL   0x00
+#define SOURCE_MODE_FLASH 0x01
+#define SOURCE_MODE_SD    0x02
+#define SOURCE_MODE_FILEHUNTER 0x03
 
 #define DATA_MAGIC_0 'P'
 #define DATA_MAGIC_1 'V'
@@ -75,42 +94,8 @@
 #define TLV_MAPPER 0x02
 #define TLV_SIZE 0x03
 
-#define MP3_CTRL_BASE      0xBFE0
-#define MP3_CTRL_CMD       (MP3_CTRL_BASE + 0)
-#define MP3_CTRL_STATUS    (MP3_CTRL_BASE + 1)
-#define MP3_CTRL_INDEX_L   (MP3_CTRL_BASE + 2)
-#define MP3_CTRL_INDEX_H   (MP3_CTRL_BASE + 3)
-#define MP3_CTRL_ELAPSED_L (MP3_CTRL_BASE + 4)
-#define MP3_CTRL_ELAPSED_H (MP3_CTRL_BASE + 5)
-#define MP3_CTRL_TOTAL_L   (MP3_CTRL_BASE + 6)
-#define MP3_CTRL_TOTAL_H   (MP3_CTRL_BASE + 7)
-#define MP3_CTRL_MODE      (MP3_CTRL_BASE + 8)
-
-#define MP3_CMD_SELECT      0x01
-#define MP3_CMD_PLAY        0x02
-#define MP3_CMD_STOP        0x03
-#define MP3_CMD_TOGGLE_MUTE 0x04
-
-#define MP3_PLAY_MODE_SINGLE 0
-#define MP3_PLAY_MODE_ALL    1
-#define MP3_PLAY_MODE_RANDOM 2
-
-#define MP3_NOW_PLAYING_BASE 0xBFA0
-#define MP3_NOW_PLAYING_NAME_LEN 60
-#define MP3_NOW_PLAYING_SIZE_OFFSET 60
-
-#define MP3_STATUS_PLAYING  0x01
-#define MP3_STATUS_MUTED    0x02
-#define MP3_STATUS_ERROR    0x04
-#define MP3_STATUS_EOF      0x08
-#define MP3_STATUS_BUSY     0x10
-#define MP3_STATUS_READING  0x20
-
-// Folders to exclude from SD listing (keep in sync with pico/explorer.c)
-#define EXCLUDED_SD_FOLDER_COUNT 1
-static const char *EXCLUDED_SD_FOLDERS[EXCLUDED_SD_FOLDER_COUNT] = {
-    "System Volume Information"
-};
+#define MENU_ROW_FORMAT_80 " %-61.61s %6s %-2s %-5s"
+#define MENU_ROW_FORMAT_40 " %-21.21s %6s %-2s %-5s"
 
 // Structure to represent a ROM record
 // The ROM record will contain the name of the ROM, the mapper code, the size of the ROM and the offset in the flash memory
@@ -140,20 +125,18 @@ int isEndOfData(const unsigned char *memory);
 void readROMData(ROMRecord *records, unsigned int *recordCount, unsigned long *sizeTotal);
 int putchar (int character);
 void invert_chars(unsigned char startChar, unsigned char endChar);
-void print_str_normal(const char *str);
-void print_str_inverted(const char *str);
-void print_str_inverted_padded(const char *str, unsigned char width);
 char* mapper_description(int number);
+unsigned char record_mapper_code(unsigned char mapper);
+int record_mapper_is_override(unsigned char mapper);
 int record_is_folder(const ROMRecord *record);
-int record_is_mp3(const ROMRecord *record);
 void trim_name_to_buffer(const char *src, char *dst, int max_len);
 int build_sliding_name_window(const char *str, int startPos, char *out, unsigned char width);
-void charMap(); //debug
 void displayMenu();
 void navigateMenu();
-void configMenu();
 void helpMenu();
 void loadGame(int index);
+void launch_wifi_config(void);
+void execute_rst00();
 void main();
 void delay_ms(uint16_t milliseconds);
 

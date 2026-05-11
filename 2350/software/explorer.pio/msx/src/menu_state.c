@@ -1,7 +1,8 @@
 #include "menu.h"
 #include "menu_state.h"
 
-int paging_enabled = 0;
-int use_80_columns = 0;
-unsigned char name_col_width = NAME_COL_WIDTH;
-int frame_rendered = 0;
+int paging_enabled;
+int use_80_columns;
+unsigned char name_col_width;
+int frame_rendered;
+unsigned char menu_shortcut_selection;

@@ -46,11 +46,16 @@
 #define PIN_SLTSL  27   // Slot Select for this cartridge slot
 #define PIN_WAIT    28  // WAIT line to MSX 
 #define PIN_BUSSDIR 37  // Bus direction line 
+#define PIN_ESP_UART_TX 38 // ESP-01 UART TX
+#define PIN_ESP_UART_RX 39 // ESP-01 UART RX
 #define PIN_PSRAM   47  // PSRAM select line
 
 // External PSRAM (8MB on QMI CS1)
 #define PSRAM_BASE_ADDR  0x11000000u // Cached CS1 QMI window for external PSRAM (write-through)
 #define PSRAM_TOTAL_SIZE 0x800000u   // 8 MB total external PSRAM
+#define MAPPER_SIZE      1048576u    // 1 MB memory mapper RAM in external PSRAM
+#define MAPPER_PAGES     64u         // 1 MB / 16 KB = 64 pages
+#define MAPPER_PAGE_SIZE 16384u      // 16 KB per mapper page
 
 typedef struct {
     uint32_t offset;    // Offset within PSRAM
@@ -80,9 +85,13 @@ void __no_inline_not_in_flash_func(loadrom_konamiscc_scc)(uint32_t offset, bool 
 void __no_inline_not_in_flash_func(loadrom_konami)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_ascii8)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_planar64)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type);
+void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, bool cache_enable);

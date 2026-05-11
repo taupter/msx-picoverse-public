@@ -40,8 +40,10 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 add_executable(explorer 
+    ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c
         hw_config.c
-        nextor.c 
+    sunrise_ide.c
+    sunrise_sd.c
     explorer.c 
     mp3.c
     emu2212.c
@@ -67,6 +69,10 @@ target_link_libraries(explorer
         pico_multicore
     pico_audio_i2s
     picomp3lib
+    hardware_dma
+    hardware_pio
+    tinyusb_board
+    tinyusb_host
         )
 
 target_compile_definitions(explorer PRIVATE
