@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct audio_buffer_pool;
+
 #define MP3_STATUS_PLAYING  0x01
 #define MP3_STATUS_MUTED    0x02
 #define MP3_STATUS_ERROR    0x04
@@ -18,10 +20,14 @@ typedef void (*mp3_bg_callback_t)(void);
 // Core 1 dedicated loop — call from multicore_launch_core1()
 void mp3_core1_loop(void);
 void mp3_stop_core1(void);
+void mp3_request_shutdown(void);
 void mp3_set_bg_callback(mp3_bg_callback_t cb);
 
 // True once Core 1 has finished mp3_init() and entered its command loop.
 bool mp3_core1_is_ready(void);
+bool mp3_core1_has_stopped(void);
+struct audio_buffer_pool *mp3_take_i2s_audio_pool(void);
+struct audio_buffer_pool *mp3_force_i2s_handoff_from_core0(void);
 
 void mp3_deinit(void);
 

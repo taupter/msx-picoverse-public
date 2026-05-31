@@ -73,6 +73,10 @@ int menu_ui_supports_80_column_mode(void) {
     return msx_version >= 1;
 }
 
+const char *menu_ui_status_text(const char *text_40, const char *text_80) {
+    return use_80_columns ? text_80 : text_40;
+}
+
 static void menu_ui_copy_char_pattern(unsigned char source_char, unsigned char target_char)
 {
     unsigned int base = ((unsigned int)vdp_reg4) << 11;
@@ -152,11 +156,6 @@ int menu_ui_try_toggle_columns(void) {
 
 unsigned char menu_ui_row_width(void) {
     return (unsigned char)(use_80_columns ? 80 : SCREEN_WIDTH);
-}
-
-unsigned char menu_ui_highlight_width(void) {
-    unsigned char row_width = menu_ui_row_width();
-    return (unsigned char)(row_width > 2 ? row_width - 2 : row_width);
 }
 
 void menu_ui_clear_rows(unsigned char start_row, unsigned char end_row) {
@@ -344,6 +343,18 @@ void menu_ui_print_last_line_text(const char *text) {
     menu_ui_render_last_line(text);
 }
 
+void menu_ui_blink_last_line(const char *text, unsigned char *visible, unsigned char *tick, unsigned char period) {
+    if (++(*tick) >= period) {
+        *tick = 0;
+        *visible = !(*visible);
+        if (*visible) {
+            menu_ui_print_last_line_text(text);
+        } else {
+            menu_ui_clear_last_line();
+        }
+    }
+}
+
 static void menu_ui_wait_key_with_blinking_status(const char *text) {
     unsigned char visible = 1;
     unsigned char tick = 0;
@@ -351,15 +362,7 @@ static void menu_ui_wait_key_with_blinking_status(const char *text) {
     menu_ui_print_last_line_text(text);
     while (!bios_chsns()) {
         delay_ms(20);
-        if (++tick >= 8) {
-            tick = 0;
-            visible = !visible;
-            if (visible) {
-                menu_ui_print_last_line_text(text);
-            } else {
-                menu_ui_clear_last_line();
-            }
-        }
+        menu_ui_blink_last_line(text, &visible, &tick, 8);
     }
     (void)bios_chget();
 }
@@ -370,26 +373,16 @@ void menu_ui_print_str_inverted_width(const char *str, unsigned char width)
         return;
     }
     unsigned char capped_width = width > 80 ? 80 : width;
-    char buffer[81];
-    size_t len = strlen(str);
+    unsigned char i = 0;
 
-    if (len > capped_width) {
-        len = capped_width;
+    while (i < capped_width && str[i]) {
+        PrintChar((unsigned char)(str[i] + 96));
+        i++;
     }
-
-    memcpy(buffer, str, len);
-
-    for (size_t i = len; i < capped_width; i++) {
-        buffer[i] = ' ';
+    while (i < capped_width) {
+        PrintChar((unsigned char)(' ' + 96));
+        i++;
     }
-
-    buffer[capped_width] = '\0';
-
-    for (size_t i = 0; i < capped_width; i++) {
-        int modifiedChar = buffer[i] + 96;
-        PrintChar((unsigned char)modifiedChar);
-    }
-
 }
 
 void menu_ui_render_selectable_line(unsigned char row, const char *text, int selected) {

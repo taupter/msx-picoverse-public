@@ -18,7 +18,7 @@
 
 // Define maximum files per page and screen properties
 #define FILES_PER_PAGE 19   // Maximum files per page on the menu
-#define MAX_FILE_NAME_LENGTH 60     // Maximum size of the ROM name
+#define MAX_FILE_NAME_LENGTH 71     // Maximum size of the ROM name on the 80-column detail screen
 #define ROM_RECORD_SIZE (MAX_FILE_NAME_LENGTH + 1 + sizeof(unsigned long) + sizeof(unsigned long))  // Size of the ROM record in bytes
 #define MAX_ROM_RECORDS 65535 // Maximum ROM files supported (counter limit)
 #define SD_ROM_MAX_SIZE_KB 4096 // 4 MB PSRAM region capacity for microSD-loaded ROMs
@@ -47,6 +47,7 @@
 #define CTRL_WIFI_SUPPORT (CTRL_BASE_ADDR + 10)
 #define CTRL_PSG_EMULATION (CTRL_BASE_ADDR + 11)
 #define CTRL_MAGIC   0xA5
+#define CTRL_STATUS_SD_MISSING 0x5D
 #define CTRL_QUERY_BASE 0xBFC0
 #define CTRL_QUERY_SIZE 32
 #define AUDIO_PROFILE_NONE 0
@@ -80,6 +81,8 @@
 #define CMD_DETECT_MAPPER 0x04
 #define CMD_SET_MAPPER 0x05
 #define CMD_SET_SOURCE  0x06
+#define CMD_LOAD_OPTIONS 0x07
+#define CMD_SAVE_OPTIONS 0x08
 #define CMD_FH_LIST_PAGE 0x40
 #define CMD_FH_DOWNLOAD  0x41
 #define CMD_FH_SEARCH    0x42
@@ -90,7 +93,9 @@
 #define CTRL_FH_RESULT CTRL_AUDIO
 #define CTRL_FH_STATUS_TEXT_BASE 0xBF80
 #define CTRL_FH_STATUS_TEXT_SIZE 64
-#define CTRL_FH_RECORD_SIZE 64
+#define CTRL_FH_FLAG_OFFSET MAX_FILE_NAME_LENGTH
+#define CTRL_FH_SIZE_OFFSET (CTRL_FH_FLAG_OFFSET + 1)
+#define CTRL_FH_RECORD_SIZE (MAX_FILE_NAME_LENGTH + 3)
 
 #define SOURCE_MODE_ALL   0x00
 #define SOURCE_MODE_FLASH 0x01

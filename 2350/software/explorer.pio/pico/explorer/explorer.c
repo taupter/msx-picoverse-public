@@ -11,6 +11,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include "ff.h"
 #include "diskio.h"
 #include "pico/stdlib.h"
@@ -38,7 +39,7 @@
 #include "sunrise_sd.h"
 
 // config area and buffer for the ROM data
-#define ROM_NAME_MAX    60          // Maximum size of the ROM name
+#define ROM_NAME_MAX    71          // Maximum size of the ROM name on the 80-column detail screen
 #define MAX_ROM_RECORDS 1024        // Maximum ROM files supported (flash + SD)
 #define MAX_FLASH_RECORDS 128       // Maximum ROM files stored in flash
 #define ROM_RECORD_SIZE (ROM_NAME_MAX + 1 + (sizeof(uint32_t) * 2)) // Name + mapper + size + offset
@@ -75,6 +76,7 @@
 #define CTRL_MAPPER     (CTRL_BASE_ADDR + 7) // Control: mapper value
 #define CTRL_ACK        (CTRL_BASE_ADDR + 8) // Control: command ack
 #define CTRL_MAGIC      0xA5 // Control: magic value to indicate valid command
+#define CTRL_STATUS_SD_MISSING 0x5D // Control: selected source is microSD but no card is available
 #define CTRL_QUERY_BASE 0xBFC0 // Control: query string base address
 #define CTRL_QUERY_SIZE 32 // Control: query string size
 #define CMD_APPLY_FILTER 0x01 // Command: apply filter
@@ -83,6 +85,8 @@
 #define CMD_DETECT_MAPPER 0x04 // Command: detect mapper on demand
 #define CMD_SET_MAPPER    0x05 // Command: set mapper override
 #define CMD_SET_SOURCE    0x06 // Command: switch visible source set
+#define CMD_LOAD_OPTIONS  0x07 // Command: load ROM options from microSD .PVC file
+#define CMD_SAVE_OPTIONS  0x08 // Command: save ROM options to microSD .PVC file
 #define CMD_FH_LIST_PAGE   0x40 // Command: File Hunter list page from menu ROM
 #define CMD_FH_DOWNLOAD    0x41 // Command: File Hunter download/save from menu ROM
 #define CMD_FH_SEARCH      0x42 // Command: File Hunter search from menu ROM
@@ -105,17 +109,21 @@
 #define FH_STATUS_TEXT_BASE 0xBF80
 #define FH_STATUS_TEXT_SIZE 64
 #define FH_DATA_BASE    0xB900
-#define FH_RECORD_SIZE  64
+#define FH_RECORD_FLAG_OFFSET ROM_NAME_MAX
+#define FH_RECORD_SIZE_OFFSET (FH_RECORD_FLAG_OFFSET + 1u)
+#define FH_RECORD_SIZE  (ROM_NAME_MAX + 3u)
 #define FH_FILES_PER_PAGE 19
 #define FH_MAX_RESULTS 384
 #define FH_HTTP_BUFFER_SIZE (256u * 1024u)
 #define FH_HTTP_CHUNK_SIZE 2048u
-#define FH_HOST "api.file-hunter.com"
+#define FH_HOST "msxpico.file-hunter.com"
+#define FH_ENDPOINT "/picoverse.php"
 #define FH_DEFAULT_QUERY "1"
 #define FH_WIFI_CONNECT_WAIT_US 30000000u
 #define FH_STATUS_READY 0xA5
 #define FH_STATUS_BUSY  0x5A
 #define FH_RESULT_SAVING 0x02
+#define FH_RECORD_FLAG_MESSAGE 0x80u
 #define FH_CMD_LIST_PAGE 0x01
 #define FH_CMD_DOWNLOAD  0x02
 #define FH_CMD_EXIT      0x03
@@ -181,6 +189,13 @@
 #define TLV_NAME_OFFSET  0x01 // Type-Length-Value: Name offset
 #define TLV_MAPPER       0x02 // Type-Length-Value: Mapper
 #define TLV_SIZE         0x03 // Type-Length-Value: Size
+
+#define PVC_OPTIONS_MAGIC_0 'P'
+#define PVC_OPTIONS_MAGIC_1 'V'
+#define PVC_OPTIONS_MAGIC_2 'C'
+#define PVC_OPTIONS_MAGIC_3 '1'
+#define PVC_OPTIONS_LEGACY_SIZE 6u
+#define PVC_OPTIONS_SIZE 7u
 
 
 // MP3 control registers
@@ -269,6 +284,20 @@ static bool wifi_uart_ready = false;
 static uint32_t wifi_uart_baud = WIFI_UART_DEFAULT_BAUD;
 static uint32_t wifi_tx_busy_deadline_us = 0u;
 static bool wifi_rx_underrun = false;
+
+static void debug_trace(const char *fmt, ...)
+{
+#if EXPLORER_USB_STDIO_DEBUG
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\r\n");
+    fflush(stdout);
+#else
+    (void)fmt;
+#endif
+}
 
 static inline void __not_in_flash_func(wifi_reset_fifo)(void)
 {
@@ -481,9 +510,11 @@ static inline uint8_t __not_in_flash_func(wifi_handle_mem_read)(const uint8_t *w
 static psram_region_t sd_rom_region;
 static psram_region_t rom_cache_region;
 static psram_region_t mapper_region;
+static psram_region_t mp3_buffer_region;
 static psram_region_t fh_list_region;
 static psram_region_t fh_download_region;
 static bool psram_bring_up_once(void);
+static bool psram_prepare_mp3_buffer(void);
 
 uint8_t ctr_val = 0xFF;    
 BYTE const pdrv = 0;  // Physical drive number
@@ -509,6 +540,7 @@ ROMRecord records[MAX_ROM_RECORDS]; // Array to store the ROM records
 #define MIN_ROM_SIZE       8192
 #define MAX_ROM_SIZE       (15u * 1024u * 1024u)
 #define SD_ROM_MAX_SIZE    (4u * 1024u * 1024u) // PSRAM region capacity for SD-loaded ROMs
+#define MP3_PSRAM_BUFFER_SIZE 65536u
 #define MAPPER_SUNRISE_USB        10
 #define MAPPER_SUNRISE_MAPPER_USB 11
 #define MAPPER_SYSTEM             MAPPER_SUNRISE_USB
@@ -542,6 +574,7 @@ static ROMRecord flash_records[MAX_FLASH_RECORDS];
 static uint16_t flash_record_count = 0;
 static char sd_current_path[SD_PATH_MAX] = "/";
 static uint8_t browse_source_mode = SOURCE_MODE_FLASH;
+static uint8_t ctrl_status_value = CTRL_MAGIC;
 static volatile bool refresh_requested = false;
 static volatile bool refresh_in_progress = false;
 static bool refresh_worker_started = false;
@@ -606,6 +639,7 @@ typedef struct {
 static fh_catalog_record_t fh_catalog[FH_MAX_RESULTS];
 static uint16_t fh_catalog_count = 0;
 static bool fh_catalog_loaded = false;
+static bool fh_catalog_message = false;
 static uint8_t fh_tcp_buffer[FH_HTTP_CHUNK_SIZE + 2u];
 static char fh_active_query[FH_QUERY_SIZE];
 
@@ -614,6 +648,7 @@ static char fh_active_query[FH_QUERY_SIZE];
 #define SCC_AUDIO_BUFFER_SAMPLES 256
 static SCC scc_instance;
 static struct audio_buffer_pool *scc_audio_pool;
+static struct audio_buffer_pool *rom_audio_handoff_pool;
 
 static PSG psg_instance;
 static struct audio_buffer_pool *dual_psg_audio_pool;
@@ -630,6 +665,21 @@ static spin_lock_t *msx_music_lock = NULL;
 static struct audio_buffer_pool *msx_music_audio_pool;
 static bool msx_music_ready = false;
 static bool msx_music_audio_started = false;
+
+static struct audio_buffer_pool *claim_rom_audio_handoff_pool(void)
+{
+    struct audio_buffer_pool *pool = rom_audio_handoff_pool;
+    rom_audio_handoff_pool = NULL;
+    debug_trace("DBG claim_pool pool=%p", (void *)pool);
+    if (pool)
+    {
+        debug_trace("DBG claim_pool i2s off/on");
+        audio_i2s_set_enabled(false);
+        audio_i2s_set_enabled(true);
+        gpio_put(I2S_MUTE_PIN, 0);
+    }
+    return pool;
+}
 
 typedef enum {
     AUDIO_MODE_NONE = 0,
@@ -648,6 +698,7 @@ static void write_u32_le(uint8_t *ptr, uint32_t value);
 static void write_u16_le(uint8_t *ptr, uint16_t value);
 static void build_page_buffer(uint8_t page_index);
 static void refresh_records_for_current_path(void);
+static bool sd_mount_card(void);
 
 static bool is_system_mapper(uint8_t mapper) {
     return mapper == MAPPER_SUNRISE_USB ||
@@ -877,11 +928,16 @@ static void build_page_buffer(uint8_t page_index) {
 
     uint16_t name_offsets[FILES_PER_PAGE];
     uint16_t string_cursor = 0;
+    uint16_t max_name_bytes = record_count ? (uint16_t)(max_string_pool / record_count) : 0;
     for (uint16_t i = 0; i < record_count; i++) {
         uint16_t filtered_index = (uint16_t)(start_index + i);
         uint16_t record_index = filtered_indices[filtered_index];
         char name_buf[ROM_NAME_MAX + 1];
         size_t name_len = trim_name_copy(name_buf, records[record_index].Name);
+        if (max_name_bytes != 0u && name_len + 1u > max_name_bytes) {
+            name_len = max_name_bytes - 1u;
+            name_buf[name_len] = '\0';
+        }
         if (name_len + 1 <= (size_t)(max_string_pool - string_cursor)) {
             name_offsets[i] = string_cursor;
             memcpy(buffer + string_pool_offset + string_cursor, name_buf, name_len);
@@ -1111,6 +1167,127 @@ static bool has_mp3_extension(const char *filename) {
         return false;
     }
     return equals_ignore_case(dot + 1, "MP3");
+}
+
+static bool build_pvc_options_path(uint16_t record_index, char *out, size_t out_size) {
+    if (!out || out_size == 0 || record_index >= full_record_count) {
+        return false;
+    }
+    ROMRecord *rec = &records[record_index];
+    if ((rec->Mapper & (FOLDER_FLAG | MP3_FLAG)) != 0) {
+        return false;
+    }
+
+    if ((rec->Mapper & SOURCE_SD_FLAG) != 0) {
+        if (sd_path_offsets[record_index] == 0xFFFF) {
+            return false;
+        }
+        const char *rom_path = sd_path_buffer + sd_path_offsets[record_index];
+        size_t len = strlen(rom_path);
+        if (len + 1 > out_size) {
+            return false;
+        }
+        memcpy(out, rom_path, len + 1);
+        char *slash = strrchr(out, '/');
+        char *dot = strrchr(out, '.');
+        if (!dot || (slash && dot < slash)) {
+            dot = out + len;
+        }
+        if ((size_t)(dot - out) + 5u > out_size) {
+            return false;
+        }
+        memcpy(dot, ".PVC", 5u);
+        return true;
+    }
+
+    int written = snprintf(out, out_size, "/%s.flash.PVC", rec->Name);
+    return written > 0 && (size_t)written < out_size;
+}
+
+static uint16_t query_filtered_index(void) {
+    return (uint16_t)((uint8_t)filter_query[0]) |
+           (uint16_t)(((uint8_t)filter_query[1]) << 8);
+}
+
+static void process_load_options_request(void) {
+    ctrl_ack_value = 0;
+    ctrl_mapper_value = 0;
+    if (!sd_mount_card()) {
+        return;
+    }
+
+    uint16_t index = query_filtered_index();
+    if (index >= total_record_count) {
+        return;
+    }
+    uint16_t record_index = filtered_indices[index];
+    char path[SD_PATH_MAX];
+    if (!build_pvc_options_path(record_index, path, sizeof(path))) {
+        return;
+    }
+
+    FIL fil;
+    if (f_open(&fil, path, FA_READ) != FR_OK) {
+        return;
+    }
+    uint8_t data[PVC_OPTIONS_SIZE];
+    UINT br = 0;
+    FRESULT fr = f_read(&fil, data, sizeof(data), &br);
+    f_close(&fil);
+    if (fr != FR_OK || br < PVC_OPTIONS_LEGACY_SIZE) {
+        return;
+    }
+    if (data[0] != PVC_OPTIONS_MAGIC_0 || data[1] != PVC_OPTIONS_MAGIC_1 ||
+        data[2] != PVC_OPTIONS_MAGIC_2 || data[3] != PVC_OPTIONS_MAGIC_3) {
+        return;
+    }
+
+    ctrl_audio_selection = data[4];
+    ctrl_psg_emulation = data[5] ? 1u : 0u;
+    if (br >= PVC_OPTIONS_SIZE && data[6] != 0 && !is_system_mapper(data[6]) && data[6] < MAPPER_DESCRIPTION_COUNT) {
+        ROMRecord *rec = &records[record_index];
+        uint8_t flags = rec->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
+        if ((flags & (FOLDER_FLAG | MP3_FLAG)) == 0) {
+            rec->Mapper = (uint8_t)(flags | OVERRIDE_FLAG | data[6]);
+            ctrl_mapper_value = data[6];
+        }
+    }
+    ctrl_ack_value = 1;
+}
+
+static void process_save_options_request(void) {
+    ctrl_ack_value = 0;
+    if (!sd_mount_card()) {
+        return;
+    }
+
+    uint16_t index = query_filtered_index();
+    if (index >= total_record_count) {
+        return;
+    }
+    uint16_t record_index = filtered_indices[index];
+    char path[SD_PATH_MAX];
+    if (!build_pvc_options_path(record_index, path, sizeof(path))) {
+        return;
+    }
+
+    FIL fil;
+    if (f_open(&fil, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) {
+        return;
+    }
+    uint8_t data[PVC_OPTIONS_SIZE] = {
+        PVC_OPTIONS_MAGIC_0, PVC_OPTIONS_MAGIC_1, PVC_OPTIONS_MAGIC_2, PVC_OPTIONS_MAGIC_3,
+        (uint8_t)filter_query[2], (uint8_t)(filter_query[3] ? 1u : 0u), (uint8_t)filter_query[4]
+    };
+    UINT written = 0;
+    FRESULT fr = f_write(&fil, data, sizeof(data), &written);
+    FRESULT close_fr = f_close(&fil);
+    if (fr == FR_OK && close_fr == FR_OK && written == sizeof(data)) {
+        ctrl_audio_selection = data[4];
+        ctrl_psg_emulation = data[5];
+        ctrl_mapper_value = data[6];
+        ctrl_ack_value = 1;
+    }
 }
 
 // FatFS-backed reader callback for the shared streaming detector.
@@ -1399,12 +1576,19 @@ static bool refresh_records_chunked(void) {
             refresh_record_index = add_folder_record(refresh_record_index, "..");
         }
         refresh_folder_count = refresh_record_index;
+        ctrl_status_value = CTRL_MAGIC;
         if (!sd_mount_card()) {
+            if (browse_source_mode == SOURCE_MODE_SD) {
+                ctrl_status_value = CTRL_STATUS_SD_MISSING;
+            }
             refresh_state = REFRESH_FINALIZE;
             return false;
         }
         fr = f_opendir(&refresh_dir, sd_current_path);
         if (fr != FR_OK) {
+            if (browse_source_mode == SOURCE_MODE_SD) {
+                ctrl_status_value = CTRL_STATUS_SD_MISSING;
+            }
             refresh_state = REFRESH_FINALIZE;
             return false;
         }
@@ -1629,6 +1813,12 @@ static uint16_t find_next_mp3_filtered_index(uint16_t current, uint8_t mode) {
 // small ring buffer so SELECT and PLAY (issued ~10 ms apart) both
 // fit while Core 1 is still initialising.
 static bool mp3_core1_started = false;
+static void hold_msx_wait(void) {
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+}
+
 static void ensure_mp3_core1_started(void) {
 #if EXPLORER_MP3_DISABLED
     // MP3 player disabled: never launch Core 1 from the menu, so the
@@ -1637,8 +1827,59 @@ static void ensure_mp3_core1_started(void) {
     return;
 #else
     if (mp3_core1_started) return;
+    // Keep MP3 stream buffering out of SRAM so MSX-MUSIC can allocate its OPLL state later.
+    psram_prepare_mp3_buffer();
     mp3_core1_started = true;
     multicore_launch_core1(mp3_core1_loop);
+#endif
+}
+
+static void shutdown_mp3_core1_before_rom_launch(void) {
+#if EXPLORER_MP3_DISABLED
+    return;
+#else
+    debug_trace("DBG shutdown_mp3 enter started=%u", mp3_core1_started ? 1u : 0u);
+    if (!mp3_core1_started) {
+        return;
+    }
+
+    debug_trace("DBG shutdown_mp3 request");
+    mp3_request_shutdown();
+    uint32_t deadline = time_us_32() + 2000000u;
+    while (!mp3_core1_has_stopped() && (int32_t)(deadline - time_us_32()) > 0) {
+        sleep_us(200);
+    }
+
+    debug_trace("DBG shutdown_mp3 stopped=%u", mp3_core1_has_stopped() ? 1u : 0u);
+    if (!mp3_core1_has_stopped()) {
+        debug_trace("DBG shutdown_mp3 reset/deinit");
+        multicore_reset_core1();
+        mp3_deinit();
+    } else {
+        debug_trace("DBG shutdown_mp3 take pool");
+        rom_audio_handoff_pool = mp3_take_i2s_audio_pool();
+        multicore_reset_core1();
+    }
+    mp3_core1_started = false;
+    debug_trace("DBG shutdown_mp3 done pool=%p", (void *)rom_audio_handoff_pool);
+#endif
+}
+
+static void force_mp3_core1_handoff_before_rom_launch(void) {
+#if EXPLORER_MP3_DISABLED
+    return;
+#else
+    debug_trace("DBG force_mp3 enter started=%u", mp3_core1_started ? 1u : 0u);
+    if (!mp3_core1_started) {
+        return;
+    }
+
+    debug_trace("DBG force_mp3 reset core1");
+    multicore_reset_core1();
+    debug_trace("DBG force_mp3 take pool");
+    rom_audio_handoff_pool = mp3_force_i2s_handoff_from_core0();
+    mp3_core1_started = false;
+    debug_trace("DBG force_mp3 done pool=%p", (void *)rom_audio_handoff_pool);
 #endif
 }
 
@@ -1963,6 +2204,7 @@ static void psram_mem_init(void)
     memset(&rom_cache_region, 0, sizeof(rom_cache_region));
     rom_sram = NULL;
     memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&mp3_buffer_region, 0, sizeof(mp3_buffer_region));
     memset(&fh_list_region, 0, sizeof(fh_list_region));
     memset(&fh_download_region, 0, sizeof(fh_download_region));
     fh_download_size = 0;
@@ -1998,6 +2240,15 @@ static bool psram_prepare_mapper_region(void)
     if (!psram_bring_up_once()) return false;
     if (mapper_region.size == MAPPER_SIZE) return true;
     return psram_alloc(MAPPER_SIZE, &mapper_region);
+}
+
+static bool psram_prepare_mp3_buffer(void)
+{
+    if (!psram_bring_up_once()) return false;
+    if (mp3_buffer_region.ptr && mp3_buffer_region.size >= MP3_PSRAM_BUFFER_SIZE) return true;
+    if (!psram_alloc(MP3_PSRAM_BUFFER_SIZE, &mp3_buffer_region)) return false;
+    mp3_set_external_buffer(mp3_buffer_region.ptr, mp3_buffer_region.size);
+    return true;
 }
 
 static bool psram_prepare_rom_cache(void)
@@ -2182,8 +2433,8 @@ static void msx_pio_bus_init(void)
 
 static void msx_pio_io_bus_init(void)
 {
-    msx_io_bus.pio_read = pio1;
-    msx_io_bus.pio_write = pio1;
+    msx_io_bus.pio_read = pio2;
+    msx_io_bus.pio_write = pio2;
     msx_io_bus.sm_io_read  = 0;
     msx_io_bus.sm_io_write = 1;
 
@@ -2407,6 +2658,14 @@ static void dual_psg_audio_init(void)
     gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
     gpio_put(I2S_MUTE_PIN, 1);
 
+    struct audio_buffer_pool *handoff_pool = claim_rom_audio_handoff_pool();
+    if (handoff_pool)
+    {
+        dual_psg_audio_pool = handoff_pool;
+        dual_psg_audio_started = true;
+        return;
+    }
+
     static audio_format_t dual_psg_audio_format = {
         .sample_freq = PSG_SAMPLE_RATE,
         .format = AUDIO_BUFFER_FORMAT_PCM_S16,
@@ -2491,6 +2750,14 @@ static void main_psg_audio_init(void)
     gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
     gpio_put(I2S_MUTE_PIN, 1);
 
+    struct audio_buffer_pool *handoff_pool = claim_rom_audio_handoff_pool();
+    if (handoff_pool)
+    {
+        main_psg_audio_pool = handoff_pool;
+        main_psg_audio_started = true;
+        return;
+    }
+
     static audio_format_t main_psg_audio_format = {
         .sample_freq = PSG_SAMPLE_RATE,
         .format = AUDIO_BUFFER_FORMAT_PCM_S16,
@@ -2541,21 +2808,33 @@ static void start_main_psg_audio(void)
 
 static void __not_in_flash_func(msx_music_init)(void)
 {
+    debug_trace("DBG music_init enter ready=%u opll=%p lock=%p", msx_music_ready ? 1u : 0u,
+                (void *)msx_music_instance, (void *)msx_music_lock);
     if (msx_music_ready)
         return;
 
-    msx_music_instance = OPLL_new(MSX_MUSIC_CLOCK, MSX_MUSIC_SAMPLE_RATE);
+    if (!msx_music_instance) {
+        debug_trace("DBG music_init alloc");
+        msx_music_instance = OPLL_new(MSX_MUSIC_CLOCK, MSX_MUSIC_SAMPLE_RATE);
+    }
+    debug_trace("DBG music_init allocated=%p", (void *)msx_music_instance);
     if (!msx_music_instance)
         return;
 
-    if (!msx_music_lock)
+    if (!msx_music_lock) {
+        debug_trace("DBG music_init lock claim");
         msx_music_lock = spin_lock_instance(spin_lock_claim_unused(true));
+    }
+    debug_trace("DBG music_init lock=%p", (void *)msx_music_lock);
 
+    debug_trace("DBG music_init reset");
     OPLL_reset(msx_music_instance);
     OPLL_setChipType(msx_music_instance, OPLL_2413_TONE);
     OPLL_resetPatch(msx_music_instance, OPLL_2413_TONE);
+    debug_trace("DBG music_init pio");
     msx_pio_io_bus_init();
     msx_music_ready = true;
+    debug_trace("DBG music_init done");
 }
 
 static inline int16_t __not_in_flash_func(msx_music_calc_sample)(void)
@@ -2631,12 +2910,22 @@ static void __no_inline_not_in_flash_func(core1_msx_music_audio)(void)
 
 static void msx_music_audio_init(void)
 {
+    debug_trace("DBG music_audio_init started=%u", msx_music_audio_started ? 1u : 0u);
     if (msx_music_audio_started)
         return;
 
     gpio_init(I2S_MUTE_PIN);
     gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
     gpio_put(I2S_MUTE_PIN, 1);
+
+    struct audio_buffer_pool *handoff_pool = claim_rom_audio_handoff_pool();
+    if (handoff_pool)
+    {
+        debug_trace("DBG music_audio_init handoff pool");
+        msx_music_audio_pool = handoff_pool;
+        msx_music_audio_started = true;
+        return;
+    }
 
     static audio_format_t msx_music_audio_format = {
         .sample_freq = MSX_MUSIC_SAMPLE_RATE,
@@ -2659,6 +2948,7 @@ static void msx_music_audio_init(void)
         }
     }
     if (dma_channel < 0) {
+        debug_trace("DBG music_audio_init no dma");
         msx_music_audio_pool = NULL;
         return;
     }
@@ -2671,6 +2961,7 @@ static void msx_music_audio_init(void)
     };
     msx_music_i2s_config.dma_channel = (uint)dma_channel;
 
+    debug_trace("DBG music_audio_init setup dma=%d", dma_channel);
     audio_i2s_setup(&msx_music_audio_format, &msx_music_i2s_config);
     audio_i2s_connect(msx_music_audio_pool);
     audio_i2s_set_enabled(true);
@@ -2680,10 +2971,20 @@ static void msx_music_audio_init(void)
 
 static void start_msx_music_audio(void)
 {
+    debug_trace("DBG start_music init");
     msx_music_init();
+    debug_trace("DBG start_music ready=%u", msx_music_ready ? 1u : 0u);
+}
+
+static void start_msx_music_audio_output(void)
+{
+    debug_trace("DBG start_music_output init");
     msx_music_audio_init();
-    if (msx_music_audio_pool)
+    debug_trace("DBG start_music_output pool=%p", (void *)msx_music_audio_pool);
+    if (msx_music_audio_pool) {
+        debug_trace("DBG start_music_output launch core1");
         multicore_launch_core1(core1_msx_music_audio);
+    }
 }
 
 static inline uint8_t __not_in_flash_func(mapper_page_from_reg)(uint8_t reg)
@@ -2937,6 +3238,7 @@ static bool fh_download_selected(void);
 static void fh_update_wifi_status_text(void);
 static void fh_save_background_work(void);
 static bool fh_start_save_job(void);
+static void nexus_tracker_checkin_once(void);
 
 static void __not_in_flash_func(handle_menu_fh_command)(uint8_t data, explorer_menu_ctx_t *menu_ctx)
 {
@@ -2946,13 +3248,38 @@ static void __not_in_flash_func(handle_menu_fh_command)(uint8_t data, explorer_m
 
     if (data == CMD_FH_LIST_PAGE || data == CMD_FH_SEARCH)
     {
+        printf("[nexus] menu File Hunter command 0x%02X received, catalog_loaded=%u\n", data, fh_catalog_loaded ? 1u : 0u);
+        fflush(stdout);
         if (data == CMD_FH_SEARCH || !fh_catalog_loaded)
         {
             fh_copy_query_from_buffer(fh_active_query, sizeof(fh_active_query));
+            printf("[nexus] menu fetching File Hunter catalog, query='%s'\n", fh_active_query);
+            fflush(stdout);
             if (!fh_fetch_catalog(fh_active_query))
+            {
+                printf("[nexus] menu File Hunter catalog fetch failed\n");
+                fflush(stdout);
                 fh_set_catalog_message("Offline or File Hunter unavailable");
+            }
             else if (fh_catalog_count == 0u)
+            {
+                printf("[nexus] menu File Hunter catalog fetched, count=0\n");
+                fflush(stdout);
+                nexus_tracker_checkin_once();
                 fh_set_catalog_message("No File Hunter ROMs found");
+            }
+            else
+            {
+                printf("[nexus] menu File Hunter catalog fetched, count=%u\n", fh_catalog_count);
+                fflush(stdout);
+                nexus_tracker_checkin_once();
+            }
+        }
+        else
+        {
+            printf("[nexus] menu using cached File Hunter catalog, count=%u\n", fh_catalog_count);
+            fflush(stdout);
+            nexus_tracker_checkin_once();
         }
         fh_build_page_buffer();
         fh_result = fh_catalog_count ? 1u : 0u;
@@ -3068,6 +3395,14 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
             memset(filter_query, 0, sizeof(filter_query));
             refresh_requested = true;
         }
+        else if (data == CMD_LOAD_OPTIONS)
+        {
+            process_load_options_request();
+        }
+        else if (data == CMD_SAVE_OPTIONS)
+        {
+            process_save_options_request();
+        }
         else if (data == CMD_FH_LIST_PAGE || data == CMD_FH_SEARCH ||
                  data == CMD_FH_DOWNLOAD || data == CMD_FH_WIFI_STATUS ||
                  data == CMD_FH_WIFI_CONFIG)
@@ -3158,6 +3493,7 @@ static uint16_t fh_read_le16(const uint8_t *ptr)
 static void fh_copy_status_prefix(const char *prefix);
 static void fh_set_offline_status(void);
 static bool fh_wifi_wait_byte(uint8_t *data_out, uint32_t deadline);
+static bool fh_wifi_get_ap_connected(bool *connected);
 static bool fh_wifi_wait_connected(uint32_t timeout_us);
 
 static uint8_t __not_in_flash_func(fh_read_window_byte)(uint16_t addr, bool *in_window)
@@ -3260,6 +3596,7 @@ static void fh_set_catalog_message(const char *message)
 {
     memset(fh_catalog, 0, sizeof(fh_catalog));
     fh_catalog_loaded = false;
+    fh_catalog_message = message && *message;
     if (message && *message)
     {
         strncpy(fh_catalog[0].name, message, ROM_NAME_MAX);
@@ -3321,18 +3658,133 @@ static bool fh_wifi_command(uint8_t command, const uint8_t *payload, uint16_t pa
     return fh_wifi_wait_response(command, response, response_cap, response_len, timeout_us);
 }
 
+static bool fh_wifi_command_report_error(uint8_t command, const uint8_t *payload, uint16_t payload_len,
+                                         uint8_t *response, uint16_t response_cap, uint16_t *response_len,
+                                         uint8_t *error_code, uint32_t timeout_us)
+{
+    uint8_t data;
+    uint8_t rc;
+    uint8_t size_hi;
+    uint8_t size_lo;
+    uint16_t size;
+    uint16_t keep;
+    uint32_t deadline;
+
+    wifi_uart_init_once();
+    wifi_hw_rx_drain();
+    wifi_reset_fifo();
+
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)command);
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)(payload_len >> 8));
+    uart_putc_raw(WIFI_UART_INSTANCE, (char)(payload_len & 0xFFu));
+    for (uint16_t i = 0; i < payload_len; ++i)
+        uart_putc_raw(WIFI_UART_INSTANCE, (char)payload[i]);
+    wifi_tx_busy_deadline_us = time_us_32() + wifi_uart_frame_time_us();
+
+    deadline = time_us_32() + timeout_us;
+    do {
+        if (!fh_wifi_wait_byte(&data, deadline)) return false;
+    } while (data != command);
+
+    if (!fh_wifi_wait_byte(&rc, deadline)) return false;
+    if (error_code) *error_code = rc;
+    if (!fh_wifi_wait_byte(&size_hi, deadline))
+    {
+        if (response_len) *response_len = 0;
+        return rc == 0u;
+    }
+    if (!fh_wifi_wait_byte(&size_lo, deadline))
+    {
+        if (response_len) *response_len = 0;
+        return rc == 0u;
+    }
+    size = (uint16_t)(((uint16_t)size_hi << 8) | size_lo);
+    keep = size;
+    if (keep > response_cap) keep = response_cap;
+    for (uint16_t i = 0; i < size; ++i)
+    {
+        if (!fh_wifi_wait_byte(&data, deadline)) return false;
+        if (i < keep && response) response[i] = data;
+    }
+    if (response_len) *response_len = keep;
+    return rc == 0u;
+}
+
+static bool fh_parse_ipv4_literal(const char *host, uint8_t ip[4])
+{
+    const char *cursor = host;
+
+    for (uint8_t part = 0; part < 4u; ++part)
+    {
+        unsigned long value;
+        char *end;
+
+        if (!isdigit((unsigned char)*cursor)) return false;
+        value = strtoul(cursor, &end, 10);
+        if (value > 255u) return false;
+        ip[part] = (uint8_t)value;
+        if (part == 3u)
+            return *end == '\0';
+        if (*end != '.') return false;
+        cursor = end + 1;
+    }
+
+    return false;
+}
+
 static bool fh_wifi_dns(const char *host, uint8_t ip[4])
 {
     uint8_t payload[1 + 64];
     uint16_t host_len = (uint16_t)strlen(host);
     uint16_t response_len = 0;
 
-    if (host_len > 63u) return false;
+    if (fh_parse_ipv4_literal(host, ip))
+    {
+        printf("[fh] using IPv4 literal %s -> %u.%u.%u.%u\n", host, ip[0], ip[1], ip[2], ip[3]);
+        fflush(stdout);
+        return true;
+    }
+    if (host_len > 63u)
+    {
+        printf("[fh] DNS skipped: host too long '%s'\n", host);
+        fflush(stdout);
+        return false;
+    }
     payload[0] = 0;
     memcpy(&payload[1], host, host_len);
     if (!fh_wifi_command(206u, payload, (uint16_t)(host_len + 1u), ip, 4, &response_len, 15000000u))
+    {
+        printf("[fh] DNS failed for '%s'\n", host);
+        fflush(stdout);
+        return false;
+    }
+    printf("[fh] DNS %s -> %u.%u.%u.%u, len=%u\n", host, ip[0], ip[1], ip[2], ip[3], response_len);
+    fflush(stdout);
+    return response_len == 4u;
+}
+
+static bool fh_wifi_get_ipinfo(uint8_t index, uint8_t ip[4])
+{
+    uint16_t response_len = 0;
+
+    if (!fh_wifi_command(2u, &index, 1u, ip, 4u, &response_len, 2000000u))
         return false;
     return response_len == 4u;
+}
+
+static void fh_wifi_print_ipinfo(void)
+{
+    static const char *labels[] = { "", "local", "peer", "subnet", "gateway", "dns1", "dns2" };
+    uint8_t ip[4];
+
+    for (uint8_t index = 1u; index <= 6u; ++index)
+    {
+        if (fh_wifi_get_ipinfo(index, ip))
+            printf("[fh] IPINFO %s=%u.%u.%u.%u\n", labels[index], ip[0], ip[1], ip[2], ip[3]);
+        else
+            printf("[fh] IPINFO %s=failed\n", labels[index]);
+        fflush(stdout);
+    }
 }
 
 static bool fh_wifi_tcp_open_ex(const char *host, uint16_t port, bool tls, uint8_t *connection)
@@ -3344,8 +3796,20 @@ static bool fh_wifi_tcp_open_ex(const char *host, uint16_t port, bool tls, uint8
     uint16_t response_len = 0;
     size_t host_len = strlen(host);
 
-    if (host_len > 63u) return false;
-    if (!fh_wifi_dns(host, ip)) return false;
+    printf("[fh] TCP open request host=%s port=%u tls=%u\n", host, port, tls ? 1u : 0u);
+    fflush(stdout);
+    if (host_len > 63u)
+    {
+        printf("[fh] TCP open failed: host too long\n");
+        fflush(stdout);
+        return false;
+    }
+    if (!fh_wifi_dns(host, ip))
+    {
+        printf("[fh] TCP open failed: DNS/IP step\n");
+        fflush(stdout);
+        return false;
+    }
     memset(params, 0, sizeof(params));
     memcpy(params, ip, 4);
     params[4] = (uint8_t)(port & 0xFFu);
@@ -3361,10 +3825,25 @@ static bool fh_wifi_tcp_open_ex(const char *host, uint16_t port, bool tls, uint8
         params_len = (uint16_t)(params_len + host_len);
     }
 
-    if (!fh_wifi_command(13u, params, params_len, response, sizeof(response), &response_len, 60000000u))
+    uint8_t error_code = 0xFFu;
+    if (!fh_wifi_command_report_error(13u, params, params_len, response, sizeof(response), &response_len, &error_code, 60000000u))
+    {
+        printf("[fh] TCP open command failed host=%s port=%u err=%u len=%u", host, port, error_code, response_len);
+        if (response_len >= 1u)
+            printf(" close_reason=%u", response[0]);
+        printf("\n");
+        fflush(stdout);
         return false;
-    if (response_len != 1u) return false;
+    }
+    if (response_len != 1u)
+    {
+        printf("[fh] TCP open bad response len=%u\n", response_len);
+        fflush(stdout);
+        return false;
+    }
     *connection = response[0];
+    printf("[fh] TCP open ok connection=%u\n", *connection);
+    fflush(stdout);
     return true;
 }
 
@@ -3767,7 +4246,7 @@ static bool fh_deliver_http_body(const uint8_t *data, uint16_t len, fh_http_deco
 static void fh_build_http_path(char *out, size_t out_size, const char *query, int download_index)
 {
     size_t pos = 0;
-    const char *prefix = "/index4.php?base=1BA0&type=rom&msx=&char=";
+    const char *prefix = FH_ENDPOINT "?base=1BA0&type=rom&msx=&char=";
     const char *suffix = "&download=";
 
     pos += snprintf(out + pos, out_size - pos, "%s", prefix);
@@ -3806,9 +4285,22 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
     int status_code = 0;
 
     memset(&decoder, 0, sizeof(decoder));
-    if (!fh_parse_url(url, &parsed)) return false;
+    if (!fh_parse_url(url, &parsed))
+    {
+        printf("[fh] HTTP parse failed: %s\n", url);
+        fflush(stdout);
+        return false;
+    }
 
-    if (!fh_wifi_tcp_open_ex(parsed.host, parsed.port, parsed.tls, &connection)) return false;
+    printf("[fh] HTTP GET host=%s port=%u tls=%u path=%s\n", parsed.host, parsed.port, parsed.tls ? 1u : 0u, parsed.path);
+    fflush(stdout);
+
+    if (!fh_wifi_tcp_open_ex(parsed.host, parsed.port, parsed.tls, &connection))
+    {
+        printf("[fh] HTTP failed before send: TCP open\n");
+        fflush(stdout);
+        return false;
+    }
     int request_len = snprintf(request, sizeof(request),
         "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: FHBrowser (MSX PicoVerse)\r\nConnection: close\r\n\r\n",
         parsed.path, parsed.host);
@@ -3819,9 +4311,13 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
     }
     if (!fh_wifi_tcp_send(connection, request, (uint16_t)request_len))
     {
+        printf("[fh] HTTP send failed connection=%u\n", connection);
+        fflush(stdout);
         fh_wifi_tcp_close(connection);
         return false;
     }
+    printf("[fh] HTTP request sent, bytes=%d\n", request_len);
+    fflush(stdout);
 
     last_data = time_us_32();
     while ((uint32_t)(time_us_32() - last_data) < idle_timeout_us)
@@ -3870,6 +4366,8 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
                             char *space = strchr(headers, ' ');
                             if (space) status_code = atoi(space + 1);
                         }
+                        printf("[fh] HTTP status=%d\n", status_code);
+                        fflush(stdout);
                         if (status_code >= 300 && status_code < 400 && redirect_depth < 4u)
                         {
                             const char *location = fh_find_header_value(headers, "Location");
@@ -3920,8 +4418,27 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
     }
 
     fh_wifi_tcp_close(connection);
-    if (!body_started) return false;
-    if (decoder.chunked || decoder.has_content_length) return decoder.done;
+    if (!body_started)
+    {
+        printf("[fh] HTTP failed: no headers/body_started\n");
+        fflush(stdout);
+        return false;
+    }
+    if (decoder.chunked || decoder.has_content_length)
+    {
+        printf("[fh] HTTP done=%u chunked=%u content_length=%u remaining=%lu\n",
+               decoder.done ? 1u : 0u,
+               decoder.chunked ? 1u : 0u,
+               decoder.has_content_length ? 1u : 0u,
+               (unsigned long)decoder.content_remaining);
+        fflush(stdout);
+        return decoder.done;
+    }
+    printf("[fh] HTTP done=%u got_body=%u tcp_closed=%u no_length=1\n",
+           (got_body && tcp_closed) ? 1u : 0u,
+           got_body ? 1u : 0u,
+           tcp_closed ? 1u : 0u);
+    fflush(stdout);
     return got_body && tcp_closed;
 }
 
@@ -3940,6 +4457,12 @@ static bool fh_http_get(const char *path, fh_http_body_callback_t callback, void
     snprintf(url, sizeof(url), "http://" FH_HOST "%s", path);
     return fh_http_get_url(url, callback, ctx, idle_timeout_us, 0);
 }
+
+#if __has_include("../../../nexus/pico/nexus_tracker.inc")
+#include "../../../nexus/pico/nexus_tracker.inc"
+#else
+static inline void nexus_tracker_checkin_once(void) { }
+#endif
 
 typedef struct {
     uint8_t *data;
@@ -3969,6 +4492,7 @@ static bool fh_parse_catalog(const uint8_t *data, uint32_t len)
     uint32_t string_start;
 
     fh_catalog_count = 0;
+    fh_catalog_message = false;
     if (len < 4u) return false;
 
     while (pos + 4u <= len)
@@ -4384,11 +4908,10 @@ static void __not_in_flash_func(fh_build_page_buffer)(void)
             break;
         uint8_t *dst = &page_buffer[row * FH_RECORD_SIZE];
         strncpy((char *)dst, fh_catalog[idx].name, ROM_NAME_MAX);
-        dst[60] = 0;
+        dst[FH_RECORD_FLAG_OFFSET] = fh_catalog_message ? FH_RECORD_FLAG_MESSAGE : 0u;
         uint16_t size_kb = fh_catalog[idx].size_kb;
-        dst[61] = (uint8_t)(size_kb & 0xFFu);
-        dst[62] = (uint8_t)((size_kb >> 8) & 0xFFu);
-        dst[63] = 0;
+        dst[FH_RECORD_SIZE_OFFSET] = (uint8_t)(size_kb & 0xFFu);
+        dst[FH_RECORD_SIZE_OFFSET + 1u] = (uint8_t)((size_kb >> 8) & 0xFFu);
     }
 }
 
@@ -4461,25 +4984,36 @@ static bool __not_in_flash_func(fh_wifi_query_ap_status)(uint8_t *payload, uint1
 
 static bool __not_in_flash_func(fh_wifi_ap_connected)(void)
 {
+    bool connected = false;
+
+    return fh_wifi_get_ap_connected(&connected) && connected;
+}
+
+static bool __not_in_flash_func(fh_wifi_get_ap_connected)(bool *connected)
+{
     uint8_t payload[33];
     uint16_t payload_len = 0;
 
-    return fh_wifi_query_ap_status(payload, &payload_len) &&
-           payload_len >= 2u && payload[0] == 5u && payload[1] != 0u;
+    *connected = false;
+    if (!fh_wifi_query_ap_status(payload, &payload_len)) return false;
+    *connected = payload_len >= 2u && payload[0] == 5u && payload[1] != 0u;
+    return true;
 }
 
 static bool __not_in_flash_func(fh_wifi_wait_connected)(uint32_t timeout_us)
 {
     uint32_t deadline = time_us_32() + timeout_us;
+    bool connected = false;
 
     while ((int32_t)(time_us_32() - deadline) < 0)
     {
-        if (fh_wifi_ap_connected()) return true;
+        if (!fh_wifi_get_ap_connected(&connected)) return false;
+        if (connected) return true;
         fh_copy_status_prefix("Waiting for Wi-Fi...");
         fh_service_msx_reads_for(250000u);
     }
 
-    return fh_wifi_ap_connected();
+    return fh_wifi_get_ap_connected(&connected) && connected;
 }
 
 static void __not_in_flash_func(fh_update_wifi_status_text)(void)
@@ -4551,8 +5085,16 @@ static inline void __not_in_flash_func(handle_fh_write)(uint16_t addr, uint8_t d
                 fh_copy_query_from_buffer(fh_active_query, sizeof(fh_active_query));
                 if (!fh_fetch_catalog(fh_active_query))
                     fh_set_catalog_message("Offline or File Hunter unavailable");
-                else if (fh_catalog_count == 0u)
-                    fh_set_catalog_message("No File Hunter ROMs found");
+                else
+                {
+                    printf("[nexus] File Hunter catalog loaded, invoking tracker\n");
+                    fflush(stdout);
+                    nexus_tracker_checkin_once();
+                    printf("[nexus] tracker call returned\n");
+                    fflush(stdout);
+                    if (fh_catalog_count == 0u)
+                        fh_set_catalog_message("No File Hunter ROMs found");
+                }
             }
             fh_build_page_buffer();
             fh_result = fh_catalog_count ? 1u : 0u;
@@ -4760,7 +5302,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                     case CTRL_COUNT_L: data = (uint8_t)(total_record_count & 0xFFu); break;
                     case CTRL_COUNT_H: data = (uint8_t)((total_record_count >> 8) & 0xFFu); break;
                     case CTRL_PAGE:    data = current_page; break;
-                    case CTRL_STATUS:  data = CTRL_MAGIC; break;
+                    case CTRL_STATUS:  data = ctrl_status_value; break;
                     case CTRL_CMD:     data = ctrl_cmd_state; break;
                     case CTRL_MATCH_L: data = (uint8_t)(match_index & 0xFFu); break;
                     case CTRL_MATCH_H: data = (uint8_t)((match_index >> 8) & 0xFFu); break;
@@ -5000,7 +5542,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                                 ctrl_value = current_page;
                                 break;
                             case CTRL_STATUS:
-                                ctrl_value = CTRL_MAGIC;
+                                ctrl_value = ctrl_status_value;
                                 break;
                             case CTRL_CMD:
                                 ctrl_value = ctrl_cmd_state;
@@ -5207,6 +5749,13 @@ static void i2s_audio_init_scc(void)
     gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
     gpio_put(I2S_MUTE_PIN, 1);
 
+    struct audio_buffer_pool *handoff_pool = claim_rom_audio_handoff_pool();
+    if (handoff_pool)
+    {
+        scc_audio_pool = handoff_pool;
+        return;
+    }
+
     static audio_format_t scc_audio_format = {
         .sample_freq = SCC_SAMPLE_RATE,
         .format = AUDIO_BUFFER_FORMAT_PCM_S16,
@@ -5238,7 +5787,7 @@ static void i2s_audio_init_scc(void)
         .dma_channel = 0,
         // Audio I2S lives on PIO1 SM2 so it never collides with the MSX
         // memory bus PIO programs (pio0 SM0/SM1) or the I/O bus
-        // responder (pio1 SM0/SM1). Matches multirom's layout.
+        // responder (pio2 SM0/SM1).
         .pio_sm = 2,
     };
     scc_i2s_config.dma_channel = (uint)scc_dma_channel;
@@ -6730,7 +7279,9 @@ static void __not_in_flash_func(fmpac_wait_for_expanded_bootstrap)(void)
 
 void __no_inline_not_in_flash_func(loadrom_fmpac)(uint32_t offset, bool cache_enable, uint8_t mapper)
 {
+    debug_trace("DBG fmpac enter");
     fmpac_wait_for_expanded_bootstrap();
+    debug_trace("DBG fmpac bootstrap done");
 
     uint8_t bank8_regs[4] = {0, 1, 2, 3};
     uint8_t ascii16_regs[2] = {0, 1};
@@ -6753,7 +7304,11 @@ void __no_inline_not_in_flash_func(loadrom_fmpac)(uint32_t offset, bool cache_en
     bank16_ctx_t neo8_ctx = { .bank_regs = neo8_regs };
     bank16_ctx_t neo16_ctx = { .bank_regs = neo16_regs };
 
+    debug_trace("DBG fmpac bus init");
     msx_pio_bus_init();
+    debug_trace("DBG fmpac start audio out");
+    start_msx_music_audio_output();
+    debug_trace("DBG fmpac loop start");
 
     while (true)
     {
@@ -7129,6 +7684,8 @@ int __no_inline_not_in_flash_func(main)()
     set_sys_clock_khz(210000, true);     // Set system clock to 210Mhz
 
     stdio_init_all();     // Initialize stdio
+    printf("[nexus] Explorer USB CDC debug ready, version %s\n", EXPLORER_VERSION);
+    fflush(stdout);
     setup_gpio();     // Initialize GPIO
 
     while (true) {
@@ -7145,12 +7702,24 @@ int __no_inline_not_in_flash_func(main)()
     ROMRecord const *selected = &records[rom_index];
     active_rom_size = selected->Size;
 
+    uint8_t mapper = mapper_code_from_record_byte(selected->Mapper);
+    audio_mode_t audio_mode = resolve_audio_mode(mapper, ctrl_audio_selection);
+    debug_trace("DBG launch rom=%d mapper=%u audio=%u mp3_started=%u", rom_index, mapper, (unsigned)audio_mode, mp3_core1_started ? 1u : 0u);
+    if (audio_mode == AUDIO_MODE_MSX_MUSIC) {
+        force_mp3_core1_handoff_before_rom_launch();
+    } else {
+        shutdown_mp3_core1_before_rom_launch();
+    }
+    debug_trace("DBG launch hold wait");
+    hold_msx_wait();
+
     uint32_t rom_offset = selected->Offset;
     rom_data = flash_rom;
     rom_data_in_ram = false;
 
     bool is_sd_rom = (selected->Mapper & SOURCE_SD_FLAG) != 0;
     if (is_sd_rom) {
+        debug_trace("DBG launch load sd");
         if (!load_rom_from_sd((uint16_t)rom_index, (uint32_t)selected->Size)) {
             printf("Debug: Failed to load ROM from SD card\n");
             while (true) { tight_loop_contents(); }
@@ -7158,14 +7727,14 @@ int __no_inline_not_in_flash_func(main)()
         rom_data = sd_rom_region.ptr;
         rom_data_in_ram = true;
         rom_offset = 0;
+        debug_trace("DBG launch sd loaded hold wait");
+        hold_msx_wait();
     }
 
     // Cache the leading window into rom_sram for both flash- and PSRAM-resident
     // ROMs (SD ROMs are staged to PSRAM, so caching them into SRAM mirrors the
     // flash path and keeps the mapper hot loop fast).
     bool cache_enable = true;
-    uint8_t mapper = mapper_code_from_record_byte(selected->Mapper);
-    audio_mode_t audio_mode = resolve_audio_mode(mapper, ctrl_audio_selection);
     bool scc_audio = (audio_mode == AUDIO_MODE_SCC || audio_mode == AUDIO_MODE_SCC_PLUS);
     bool psg_emulation = (ctrl_psg_emulation != 0u) && !is_system_mapper(mapper);
     if (psg_emulation) {
@@ -7181,6 +7750,7 @@ int __no_inline_not_in_flash_func(main)()
     bool wifi_support = (ctrl_wifi_support != 0u) && is_system_mapper(mapper);
 
     if (audio_mode == AUDIO_MODE_MSX_MUSIC) {
+        debug_trace("DBG launch load fmpac");
         loadrom_fmpac(rom_offset, cache_enable, mapper);
         continue;
     }

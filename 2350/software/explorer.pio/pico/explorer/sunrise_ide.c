@@ -21,8 +21,10 @@
 #include "pico/stdlib.h"
 #include "pico/sync.h"
 #include "bsp/board.h"
+#if !EXPLORER_USB_STDIO_DEBUG
 #include "tusb.h"
 #include "class/msc/msc_host.h"
+#endif
 #include "sunrise_ide.h"
 
 // -----------------------------------------------------------------------
@@ -30,7 +32,17 @@
 // -----------------------------------------------------------------------
 static sunrise_ide_t *usb_ide_ctx = NULL;
 
+#if !EXPLORER_USB_STDIO_DEBUG
 static scsi_inquiry_resp_t inquiry_resp;
+#else
+typedef struct {
+    uint8_t vendor_id[8];
+    uint8_t product_id[16];
+    uint8_t product_rev[4];
+} explorer_usb_inquiry_resp_t;
+
+static explorer_usb_inquiry_resp_t inquiry_resp;
+#endif
 
 static uint8_t current_dev_addr = 0;
 static uint8_t current_lun = 0;
@@ -41,8 +53,13 @@ static volatile uint32_t usb_block_size = 0;
 // Block I/O buffers — aligned for DMA.
 // usb_read_buffer is 4096 bytes to accommodate devices with 4K native sectors.
 // Each USB read fetches one native block; we extract the correct 512-byte slice.
+#if !EXPLORER_USB_STDIO_DEBUG
 CFG_TUH_MEM_SECTION TU_ATTR_ALIGNED(4) static uint8_t usb_read_buffer[4096];
 TU_ATTR_ALIGNED(4) uint8_t usb_write_buffer[512];
+#else
+static uint8_t usb_read_buffer[4096];
+uint8_t usb_write_buffer[512];
+#endif
 
 // Pending request flags (set by Core 0/IDE handler, cleared by Core 1)
 volatile bool usb_read_requested = false;
@@ -568,6 +585,8 @@ bool __not_in_flash_func(sunrise_ide_handle_read)(sunrise_ide_t *ide, uint16_t a
 // USB MSC callbacks (called from TinyUSB on Core 1)
 // -----------------------------------------------------------------------
 
+#if !EXPLORER_USB_STDIO_DEBUG
+
 static bool read_complete_cb(uint8_t dev_addr, tuh_msc_complete_data_t const *cb_data);
 static bool write_complete_cb(uint8_t dev_addr, tuh_msc_complete_data_t const *cb_data);
 
@@ -861,3 +880,29 @@ void __not_in_flash_func(sunrise_usb_task)(void)
         }
     }
 }
+
+#else
+
+void sunrise_usb_set_ide_ctx(sunrise_ide_t *ide)
+{
+    usb_ide_ctx = ide;
+}
+
+void sunrise_ide_set_device_info(uint32_t block_count, uint32_t block_size,
+                                const char *vendor, const char *product,
+                                const char *revision)
+{
+    (void)vendor;
+    (void)product;
+    (void)revision;
+    usb_block_count = block_count;
+    usb_block_size = block_size;
+}
+
+void __not_in_flash_func(sunrise_usb_task)(void)
+{
+    while (true)
+        sleep_ms(1000);
+}
+
+#endif

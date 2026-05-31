@@ -23,14 +23,14 @@ ADDR_CODE = 0x4050
 ADDR_DATA = 0xC000
 
 VERBOSE = --verbose
-CCFLAGS = $(VERBOSE) --code-loc $(ADDR_CODE) --data-loc $(ADDR_DATA) --disable-warning 196 
+CCFLAGS = $(VERBOSE) --code-loc $(ADDR_CODE) --data-loc $(ADDR_DATA) --disable-warning 196 --opt-code-size 
 DEBUGFLAGS =-g -DDEBUG
 ifdef DEBUG
 CCFLAGS += $(DEBUGFLAGS)
 endif
 
 # Project metadata
-VERSION ?= v1.00
+VERSION ?= v2.29
 CCDEFS = -DEXPLORER_VERSION=\"$(VERSION)\"
 
 SOURCES = menu.c menu_state.c menu_ui.c menu_input.c screen_rom.c explorer_fh.c

@@ -25,6 +25,7 @@ int currentIndex;
 unsigned int totalFiles;
 unsigned long totalSize;
 ROMRecord records[FILES_PER_PAGE];
+static unsigned char menu_message_row;
 
 // --- Forward declarations (UI + Pico protocol) ---
 static int read_search_query(char *buffer, int max_len);
@@ -37,12 +38,12 @@ void trim_name_to_buffer(const char *src, char *dst, int max_len);
 static void build_menu_row_text(const ROMRecord *record, const char *name_override, char *out, unsigned char width);
 static void enter_directory(const char *name);
 static void refresh_menu_state(const char *loading_text);
-static const char *status_text(const char *text_40, const char *text_80);
-static void blink_status_tick(const char *text, int *blink_state, int *blink_tick);
 static void wait_key_with_blinking_status(const char *text);
 static void wait_command_with_blinking_status(const char *text, unsigned int wait_limit);
+static void draw_menu_row(unsigned char row, ROMRecord *record, int selected);
 static void redefine_function_keys(void);
 static void switch_browse_source(unsigned char source_mode, const char *loading_text);
+static void switch_menu_source(unsigned char source_mode);
 void msx_wait(uint16_t times_jiffy);
 void delay_ms(uint16_t milliseconds);
 
@@ -291,7 +292,7 @@ void trim_name_to_buffer(const char *src, char *dst, int max_len) {
 // enter_directory - Send command to Pico to enter a directory.
 static void enter_directory(const char *name) {
     char folder[CTRL_QUERY_SIZE];
-    const char *loading_text = status_text("Loading...", "Loading folder...");
+    const char *loading_text = menu_ui_status_text("Loading...", "Loading folder...");
     Poke(MP3_CTRL_CMD, MP3_CMD_STOP);
     if (name) {
         trim_name_to_buffer(name, folder, CTRL_QUERY_SIZE - 1);
@@ -302,14 +303,14 @@ static void enter_directory(const char *name) {
         folder[0] = '\0';
     }
     menu_ui_print_last_line_text(loading_text);
-    int blink_state = 1;
-    int blink_tick = 0;
+    unsigned char blink_state = 1;
+    unsigned char blink_tick = 0;
     for (unsigned int wait = 0; wait < 100; wait++) {
         if (Peek(CTRL_CMD) == 0) {
             break;
         }
         delay_ms(10);
-        blink_status_tick(loading_text, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(loading_text, &blink_state, &blink_tick, 8);
     }
     send_query_to_pico(folder);
     Poke(CTRL_CMD, CMD_ENTER_DIR);
@@ -318,18 +319,18 @@ static void enter_directory(const char *name) {
             break;
         }
         delay_ms(10);
-        blink_status_tick(loading_text, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(loading_text, &blink_state, &blink_tick, 8);
     }
 }
 
 // refresh_menu_state - Refresh the menu state by reading total files and pages from Pico.
 static void refresh_menu_state(const char *loading_text) {
-    const char *message = loading_text ? loading_text : status_text("Loading...", "Loading menu...");
+    const char *message = loading_text ? loading_text : menu_ui_status_text("Loading...", "Loading menu...");
     unsigned int count = 0xFFFFu;
     unsigned int last = 0xFFFFu;
     unsigned int stable = 0;
-    int blink_state = 1;
-    int blink_tick = 0;
+    unsigned char blink_state = 1;
+    unsigned char blink_tick = 0;
     menu_ui_print_last_line_text(message);
     for (unsigned int wait = 0; wait < 100; wait++) {
         count = read_total_count();
@@ -343,7 +344,7 @@ static void refresh_menu_state(const char *loading_text) {
         }
         last = count;
         delay_ms(10);
-        blink_status_tick(message, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(message, &blink_state, &blink_tick, 8);
     }
     readROMData(records, &totalFiles, &totalSize);
     totalPages = (int)((totalFiles + FILES_PER_PAGE - 1) / FILES_PER_PAGE);
@@ -358,40 +359,26 @@ static void refresh_menu_state(const char *loading_text) {
     }
     menu_ui_clear_last_line();
     displayMenu();
-}
-
-static const char *status_text(const char *text_40, const char *text_80) {
-    return use_80_columns ? text_80 : text_40;
-}
-
-static void blink_status_tick(const char *text, int *blink_state, int *blink_tick) {
-    if (++(*blink_tick) >= 8) {
-        *blink_tick = 0;
-        if (*blink_state) {
-            menu_ui_clear_last_line();
-            *blink_state = 0;
-        } else {
-            menu_ui_print_last_line_text(text);
-            *blink_state = 1;
-        }
+    if (menu_shortcut_selection == MENU_SHORTCUT_MICROSD && Peek(CTRL_STATUS) == CTRL_STATUS_SD_MISSING) {
+        menu_ui_print_last_line_text(menu_ui_status_text("No microSD card", "No microSD card inserted."));
     }
 }
 
 static void wait_key_with_blinking_status(const char *text) {
-    int blink_state = 1;
-    int blink_tick = 0;
+    unsigned char blink_state = 1;
+    unsigned char blink_tick = 0;
 
     menu_ui_print_last_line_text(text);
     while (!bios_chsns()) {
         delay_ms(20);
-        blink_status_tick(text, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(text, &blink_state, &blink_tick, 8);
     }
     (void)bios_chget();
 }
 
 static void wait_command_with_blinking_status(const char *text, unsigned int wait_limit) {
-    int blink_state = 1;
-    int blink_tick = 0;
+    unsigned char blink_state = 1;
+    unsigned char blink_tick = 0;
 
     menu_ui_print_last_line_text(text);
     for (unsigned int wait = 0; wait < wait_limit; wait++) {
@@ -399,7 +386,7 @@ static void wait_command_with_blinking_status(const char *text, unsigned int wai
             break;
         }
         delay_ms(10);
-        blink_status_tick(text, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(text, &blink_state, &blink_tick, 8);
     }
 }
 
@@ -546,6 +533,19 @@ void readROMData(ROMRecord *records, unsigned int *recordCount, unsigned long *s
     unsigned long total;
 
     unsigned char ctrl_status = *((unsigned char *)CTRL_STATUS);
+    menu_message_row = 0;
+    if (ctrl_status == CTRL_STATUS_SD_MISSING) {
+        strncpy(records[0].Name, menu_ui_status_text("No microSD card", "No microSD card inserted."), MAX_FILE_NAME_LENGTH);
+        records[0].Name[MAX_FILE_NAME_LENGTH] = '\0';
+        records[0].Mapper = SOURCE_SD_FLAG;
+        records[0].Size = 0;
+        records[0].Offset = 0;
+        paging_enabled = 0;
+        *recordCount = 1;
+        *sizeTotal = 0;
+        menu_message_row = 1;
+        return;
+    }
     count = read_total_count();
     paging_enabled = (ctrl_status == CTRL_MAGIC);
     if (!paging_enabled) {
@@ -660,16 +660,24 @@ static void switch_browse_source(unsigned char source_mode, const char *loading_
     refresh_menu_state(loading_text);
 }
 
+static void switch_menu_source(unsigned char source_mode) {
+    switch_browse_source(
+        source_mode,
+        (source_mode == SOURCE_MODE_SD)
+            ? menu_ui_status_text("Load SD", "Loading from microSD...")
+            : menu_ui_status_text("Load Flash", "Loading from flash memory..."));
+}
+
 void launch_wifi_config(void) {
-    const char *message = status_text("Wi-Fi setup...", "Opening Wi-Fi setup...");
-    int blink_state = 1;
-    int blink_tick = 0;
+    const char *message = menu_ui_status_text("Wi-Fi setup...", "Opening Wi-Fi setup...");
+    unsigned char blink_state = 1;
+    unsigned char blink_tick = 0;
 
     menu_ui_print_last_line_text(message);
     Poke(CTRL_CMD, CMD_FH_WIFI_CONFIG);
     while (Peek(CTRL_CMD) != 0) {
         delay_ms(20);
-        blink_status_tick(message, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(message, &blink_state, &blink_tick, 8);
     }
     execute_rst00();
     execute_rst00();
@@ -697,7 +705,7 @@ static int wait_for_key_with_scroll(void)
         }
 
         // handle scrolling
-        if (totalFiles > 0) {
+        if (totalFiles > 0 && !menu_message_row) {
             ROMRecord *record = &records[currentIndex % FILES_PER_PAGE];
             size_t len = strlen(record->Name);
             if (!record_is_folder(record) && (use_80_columns ? (len >= name_col_width) : (len > name_col_width)) && (unsigned int)(*jiffyPtr - lastTick) >= scrollDelay) {
@@ -745,6 +753,12 @@ char* mapper_description(int number) {
 
 // displayMenu - Display the menu on the screen
 // This function will display the menu on the screen. It will print the header, the files on the current page and the footer with the page number and options.
+static void draw_menu_row(unsigned char row, ROMRecord *record, int selected) {
+    char row_text[81];
+    build_menu_row_text(record, NULL, row_text, menu_ui_row_width());
+    menu_ui_render_selectable_line(row, row_text + 1, selected);
+}
+
 void displayMenu() {
     if (!frame_rendered) {
         menu_ui_render_menu_frame();
@@ -762,13 +776,7 @@ void displayMenu() {
 
     unsigned int line = 0;
     for (unsigned int idx = startIndex; idx < endIndex; idx++, line++) {
-        Locate(0, 2 + line); // Position on the screen, starting at line 2
-        {
-            unsigned char row_width = menu_ui_row_width();
-            char row_text[81];
-            build_menu_row_text(&records[line], NULL, row_text, row_width);
-            printf("%s", row_text);
-        }
+        draw_menu_row((unsigned char)(2 + line), &records[line], !menu_message_row && idx == (unsigned int)currentIndex);
     }
 
     {
@@ -777,19 +785,6 @@ void displayMenu() {
     }
 
     menu_ui_update_footer_page();
-    if (totalFiles > 0) {
-        unsigned char row = (unsigned char)((currentIndex % FILES_PER_PAGE) + 2);
-        unsigned char row_width = menu_ui_row_width();
-        unsigned char highlight_width = menu_ui_highlight_width();
-        char row_text[81];
-        build_menu_row_text(&records[currentIndex % FILES_PER_PAGE], NULL, row_text, row_width);
-        Locate(0, row); // Position the cursor on the selected file
-        PrintChar('>'); // Print the cursor
-        if (highlight_width > 1) {
-            menu_ui_print_str_inverted_width(row_text + 1, (unsigned char)(highlight_width - 1)); // Print shortened row inverted
-        }
-
-    }
 }
 
 // --- Menu screens ---
@@ -917,33 +912,27 @@ void navigateMenu()
         char fkey = Fkeys();
         (void)fkey;
 
-        {
-            unsigned char row_width = menu_ui_row_width();
-            char row_text[81];
-            build_menu_row_text(&records[currentIndex % FILES_PER_PAGE], NULL, row_text, row_width);
-            Locate(0, currentRow); // Position the cursor on the previously selected file
-            printf("%s", row_text); // Restore full row
-        }
+        draw_menu_row((unsigned char)currentRow, &records[currentIndex % FILES_PER_PAGE], 0);
         switch (key) 
         {
             case '1':
-                switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+                switch_menu_source(SOURCE_MODE_FLASH);
                 break;
             case '2':
-                switch_browse_source(SOURCE_MODE_SD, status_text("Load SD", "Loading from microSD..."));
+                switch_menu_source(SOURCE_MODE_SD);
                 break;
             case '3':
             {
                 unsigned char return_shortcut = menu_shortcut_selection;
                 unsigned char next_source = explorer_fh_run();
                 if (next_source == SOURCE_MODE_SD) {
-                    switch_browse_source(SOURCE_MODE_SD, status_text("Load SD", "Loading from microSD..."));
+                    switch_menu_source(SOURCE_MODE_SD);
                 } else if (next_source == SOURCE_MODE_FLASH) {
-                    switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+                    switch_menu_source(SOURCE_MODE_FLASH);
                 } else if (return_shortcut == MENU_SHORTCUT_MICROSD) {
-                    switch_browse_source(SOURCE_MODE_SD, status_text("Load SD", "Loading from microSD..."));
+                    switch_menu_source(SOURCE_MODE_SD);
                 } else {
-                    switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+                    switch_menu_source(SOURCE_MODE_FLASH);
                 }
             }
                 break;
@@ -998,6 +987,9 @@ void navigateMenu()
             case 99: // C 
             case 67: // c 
                 if (menu_ui_try_toggle_columns()) {
+                    if (menu_message_row) {
+                        readROMData(records, &totalFiles, &totalSize);
+                    }
                     frame_rendered = 0;
                     displayMenu();
                 }
@@ -1010,13 +1002,13 @@ void navigateMenu()
                     break;
                 }
                 if (search_result) {
-                    const char *message = status_text("Searching...", "Searching the ROM list...");
+                    const char *message = menu_ui_status_text("Searching...", "Searching the ROM list...");
                     send_query_to_pico(search_query);
                     Poke(CTRL_CMD, CMD_FIND_FIRST);
                     wait_command_with_blinking_status(message, 1000);
                     unsigned int match = read_match_index();
                     if (match == 0xFFFFu || match >= totalFiles) {
-                        wait_key_with_blinking_status(status_text("Not found", "No matching ROM found."));
+                        wait_key_with_blinking_status(menu_ui_status_text("Not found", "No matching ROM found."));
                         menu_ui_clear_last_line();
                     } else {
                         currentIndex = (int)match;
@@ -1029,6 +1021,9 @@ void navigateMenu()
             }
             case 13: // Enter
             case 32: // Space
+                if (menu_message_row) {
+                    break;
+                }
                 if (record_is_folder(&records[currentIndex % FILES_PER_PAGE])) {
                     char selected_name[CTRL_QUERY_SIZE];
                     trim_name_to_buffer(records[currentIndex % FILES_PER_PAGE].Name, selected_name, CTRL_QUERY_SIZE - 1);
@@ -1043,18 +1038,10 @@ void navigateMenu()
                 }
                 break;
         }
-        if (totalFiles > 0) {
+        if (totalFiles > 0 && !menu_message_row) {
             unsigned char row = (unsigned char)((currentIndex % FILES_PER_PAGE) + 2);
-            unsigned char row_width = menu_ui_row_width();
-            unsigned char highlight_width = menu_ui_highlight_width();
-            char row_text[81];
-            build_menu_row_text(&records[currentIndex % FILES_PER_PAGE], NULL, row_text, row_width);
-            Locate(0, row); // Position the cursor on the selected file
-            PrintChar('>'); // Print the cursor
-            if (highlight_width > 1) {
-                menu_ui_print_str_inverted_width(row_text + 1, (unsigned char)(highlight_width - 1)); // Print shortened row inverted
-            }
-            Locate(0, row); // Position the cursor on the selected file
+            draw_menu_row(row, &records[currentIndex % FILES_PER_PAGE], 1);
+            Locate(0, row);
         }
     }
 }
@@ -1067,6 +1054,7 @@ void main() {
     use_80_columns = 0;
     name_col_width = NAME_COL_WIDTH;
     frame_rendered = 0;
+    menu_message_row = 0;
     menu_shortcut_selection = MENU_SHORTCUT_FLASH;
     
     readROMData(records, &totalFiles, &totalSize);
@@ -1081,7 +1069,7 @@ void main() {
     //KillKeyBuffer(); // Clear the key buffer
 
     menu_ui_render_menu_frame();
-    switch_browse_source(SOURCE_MODE_FLASH, status_text("Load Flash", "Loading from flash memory..."));
+    switch_menu_source(SOURCE_MODE_FLASH);
     // Activate navigation
     navigateMenu();
 }

@@ -7,6 +7,8 @@
 
 static void send_detect_mapper(unsigned int index);
 static unsigned char send_set_mapper(unsigned int index, unsigned char mapper);
+static unsigned char send_load_options(unsigned int index, unsigned char *audio_profile, unsigned char *psg_enabled, unsigned char *mapper);
+static void send_save_options(unsigned int index, unsigned char audio_profile, unsigned char psg_enabled, unsigned char mapper);
 static unsigned char read_mapper_value(void);
 static unsigned char read_ack_value(void);
 static void render_rom_screen(const ROMRecord *record);
@@ -33,6 +35,11 @@ static unsigned char next_audio_profile(const ROMRecord *record, unsigned char a
 #define MP3_COUNTER_POLL_JIFFIES 5
 #define MP3_COUNTER_FORCE_JIFFIES 50
 
+static void write_index_query(unsigned int index) {
+    Poke(CTRL_QUERY_BASE + 0, (unsigned char)(index & 0xFFu));
+    Poke(CTRL_QUERY_BASE + 1, (unsigned char)((index >> 8) & 0xFFu));
+}
+
 static unsigned char record_is_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
     return mapper_code == 9 || mapper_code == 10 || mapper_code == 11 || mapper_code == 15 || mapper_code == 16;
@@ -57,10 +64,7 @@ static unsigned char record_supports_msx_music(const ROMRecord *record) {
 }
 
 static void send_detect_mapper(unsigned int index) {
-    unsigned char low = (unsigned char)(index & 0xFFu);
-    unsigned char high = (unsigned char)((index >> 8) & 0xFFu);
-    Poke(CTRL_QUERY_BASE + 0, low);
-    Poke(CTRL_QUERY_BASE + 1, high);
+    write_index_query(index);
     for (unsigned int i = 2; i < CTRL_QUERY_SIZE; i++) {
         Poke(CTRL_QUERY_BASE + i, 0);
     }
@@ -68,10 +72,7 @@ static void send_detect_mapper(unsigned int index) {
 }
 
 static unsigned char send_set_mapper(unsigned int index, unsigned char mapper) {
-    unsigned char low = (unsigned char)(index & 0xFFu);
-    unsigned char high = (unsigned char)((index >> 8) & 0xFFu);
-    Poke(CTRL_QUERY_BASE + 0, low);
-    Poke(CTRL_QUERY_BASE + 1, high);
+    write_index_query(index);
     Poke(CTRL_QUERY_BASE + 2, mapper);
     for (unsigned int i = 3; i < CTRL_QUERY_SIZE; i++) {
         Poke(CTRL_QUERY_BASE + i, 0);
@@ -84,6 +85,44 @@ static unsigned char send_set_mapper(unsigned int index, unsigned char mapper) {
         delay_ms(5);
     }
     return read_ack_value();
+}
+
+static unsigned char send_load_options(unsigned int index, unsigned char *audio_profile, unsigned char *psg_enabled, unsigned char *mapper) {
+    write_index_query(index);
+    for (unsigned int i = 2; i < CTRL_QUERY_SIZE; i++) {
+        Poke(CTRL_QUERY_BASE + i, 0);
+    }
+    Poke(CTRL_CMD, CMD_LOAD_OPTIONS);
+    for (unsigned int wait = 0; wait < 200; wait++) {
+        if (Peek(CTRL_CMD) == 0) {
+            break;
+        }
+        delay_ms(5);
+    }
+    if (!read_ack_value()) {
+        return 0;
+    }
+    *audio_profile = Peek(CTRL_AUDIO);
+    *psg_enabled = Peek(CTRL_PSG_EMULATION) ? 1 : 0;
+    *mapper = Peek(CTRL_MAPPER);
+    return 1;
+}
+
+static void send_save_options(unsigned int index, unsigned char audio_profile, unsigned char psg_enabled, unsigned char mapper) {
+    write_index_query(index);
+    Poke(CTRL_QUERY_BASE + 2, audio_profile);
+    Poke(CTRL_QUERY_BASE + 3, psg_enabled ? 1 : 0);
+    Poke(CTRL_QUERY_BASE + 4, mapper);
+    for (unsigned int i = 5; i < CTRL_QUERY_SIZE; i++) {
+        Poke(CTRL_QUERY_BASE + i, 0);
+    }
+    Poke(CTRL_CMD, CMD_SAVE_OPTIONS);
+    for (unsigned int wait = 0; wait < 200; wait++) {
+        if (Peek(CTRL_CMD) == 0) {
+            break;
+        }
+        delay_ms(5);
+    }
 }
 
 static unsigned char read_mapper_value(void) {
@@ -103,11 +142,11 @@ static void render_rom_screen(const ROMRecord *record) {
     menu_ui_clear_rows(2, 21);
 
     {
-        char name[CTRL_QUERY_SIZE];
+        char name[MAX_FILE_NAME_LENGTH + 1];
         const char *source = (record->Mapper & SOURCE_SD_FLAG) ? "SD" : "FL";
         unsigned long size_kb = record->Size / 1024u;
 
-        trim_name_to_buffer(record->Name, name, CTRL_QUERY_SIZE - 1);
+        trim_name_to_buffer(record->Name, name, use_80_columns ? 71 : 29);
 
         Locate(0, 3);
         if (use_80_columns) {
@@ -141,6 +180,8 @@ void show_rom_screen(unsigned int index) {
     char audio_text[32];
     unsigned char audio_profile = AUDIO_PROFILE_NONE;
     unsigned char psg_enabled = 0;
+    unsigned char saved_mapper = 0;
+    unsigned char options_loaded = 0;
     unsigned char allow_mapper_override = !record_is_system_rom(record);
     unsigned char allow_wifi_support = record_is_wifi_capable_system_rom(record);
     unsigned char wifi_enabled = 0;
@@ -177,6 +218,12 @@ void show_rom_screen(unsigned int index) {
         }
     }
 
+    if (!waiting_mapper) {
+        options_loaded = send_load_options(index, &audio_profile, &psg_enabled, &saved_mapper);
+        if (options_loaded && saved_mapper != 0 && allow_mapper_override) {
+            record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | OVERRIDE_FLAG | saved_mapper;
+        }
+    }
     audio_profile = sanitize_audio_profile(record, audio_profile);
 
     build_mapper_text(record, waiting_mapper, mapper_text, sizeof(mapper_text));
@@ -220,6 +267,7 @@ void show_rom_screen(unsigned int index) {
                     Poke(CTRL_AUDIO, audio_profile);
                     Poke(CTRL_PSG_EMULATION, psg_enabled);
                     Poke(CTRL_WIFI_SUPPORT, allow_wifi_support ? wifi_enabled : 0);
+                    send_save_options(index, audio_profile, psg_enabled, record_mapper_code(record->Mapper));
                     loadGame((int)index);
                     return;
                 }
@@ -323,6 +371,13 @@ void show_rom_screen(unsigned int index) {
             } else {
                 audio_profile = sanitize_audio_profile(record, audio_profile);
             }
+            if (!options_loaded) {
+                options_loaded = send_load_options(index, &audio_profile, &psg_enabled, &saved_mapper);
+                if (options_loaded && saved_mapper != 0 && allow_mapper_override) {
+                    record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | OVERRIDE_FLAG | saved_mapper;
+                }
+            }
+            audio_profile = sanitize_audio_profile(record, audio_profile);
             build_audio_text(record, audio_profile, audio_text, sizeof(audio_text));
             render_rom_audio_line(audio_text, selection == 1);
             render_rom_psg_line(psg_enabled, selection == psg_selection);
@@ -478,7 +533,7 @@ static void render_mp3_screen(const ROMRecord *record) {
     menu_ui_print_delimiter_line();
     menu_ui_clear_rows(2, 21);
 
-    trim_name_to_buffer(record->Name, name, MAX_FILE_NAME_LENGTH);
+    trim_name_to_buffer(record->Name, name, use_80_columns ? 71 : 29);
 
     Locate(0, 3);
     if (use_80_columns) {

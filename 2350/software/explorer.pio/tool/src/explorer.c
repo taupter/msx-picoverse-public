@@ -40,7 +40,7 @@
 #define WIFI_CONFIG_ROM_SIZE    (8 * 1024)      // Hidden WiFi configuration ROM payload stored after config area
 #define WIFI_BIOS_ROM_SIZE      (16 * 1024)     // Hidden ESP8266P UNAPI BIOS payload used by Sunrise WiFi support
 #define FMPAC_BIOS_ROM_SIZE     (64 * 1024)     // Hidden FM-PAC BIOS payload used by Explorer MSX-MUSIC support
-#define MAX_FILE_NAME_LENGTH    60              // Maximum length of a ROM name
+#define MAX_FILE_NAME_LENGTH    71              // Maximum length of a ROM name on the 80-column detail screen
 #define FLASH_START             0x10000000      // Start of the flash memory on the Raspberry Pi Pico
 #define MAX_ROM_FILES           128             // Maximum number of ROM files
 #define MAX_TOTAL_ROM_SIZE      (14U * 1024U * 1024U) // Cap combined ROM payload to 14 MB

@@ -22,7 +22,11 @@
   #error CFG_TUSB_MCU must be defined
 #endif
 
+#if EXPLORER_USB_STDIO_DEBUG
+#define CFG_TUSB_RHPORT0_MODE       OPT_MODE_DEVICE
+#else
 #define CFG_TUSB_RHPORT0_MODE       OPT_MODE_HOST
+#endif
 
 #ifndef CFG_TUSB_OS
 #define CFG_TUSB_OS                 OPT_OS_NONE
@@ -35,6 +39,25 @@
 #ifndef CFG_TUSB_MEM_ALIGN
 #define CFG_TUSB_MEM_ALIGN          __attribute__ ((aligned(4)))
 #endif
+
+#if EXPLORER_USB_STDIO_DEBUG
+
+//--------------------------------------------------------------------
+// DEVICE CONFIGURATION - temporary USB stdio diagnostics
+//--------------------------------------------------------------------
+
+#define CFG_TUD_ENDPOINT0_SIZE      64
+
+#define CFG_TUD_CDC                 1
+#define CFG_TUD_MSC                 0
+#define CFG_TUD_HID                 0
+#define CFG_TUD_MIDI                0
+#define CFG_TUD_VENDOR              0
+
+#define CFG_TUD_CDC_RX_BUFSIZE      256
+#define CFG_TUD_CDC_TX_BUFSIZE      256
+
+#else
 
 //--------------------------------------------------------------------
 // HOST CONFIGURATION
@@ -53,6 +76,8 @@
 
 #define CFG_TUH_HID_EPIN_BUFSIZE    64
 #define CFG_TUH_HID_EPOUT_BUFSIZE   64
+
+#endif
 
 #ifdef __cplusplus
  }

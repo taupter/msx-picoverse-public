@@ -19,13 +19,15 @@
 #define PICO_AUDIO_I2S_PIO 0
 #endif
 
-#if PICO_AUDIO_I2S_PIO == 1
+#if PICO_AUDIO_I2S_PIO == 2
+#define MP3_I2S_PIO pio2
+#elif PICO_AUDIO_I2S_PIO == 1
 #define MP3_I2S_PIO pio1
 #else
 #define MP3_I2S_PIO pio0
 #endif
 
-#define MP3_BUFFER_FALLBACK 65536
+#define MP3_BUFFER_FALLBACK 8192
 #define MP3_READ_ERROR_LIMIT 8
 #define MP3_I2S_BUFFER_SAMPLES 1152
 #define MP3_I2S_BUFFER_COUNT 16
@@ -95,6 +97,7 @@ static bool error_flag = false;
 #define MP3_CORE_CMD_PAUSE       4
 #define MP3_CORE_CMD_RESUME      5
 #define MP3_CORE_CMD_TOGGLE_MUTE 6
+#define MP3_CORE_CMD_SHUTDOWN    7
 
 #define MP3_CORE_CMD_QUEUE_SIZE 8u
 static volatile uint8_t  core_cmd_queue[MP3_CORE_CMD_QUEUE_SIZE];
@@ -103,6 +106,8 @@ static volatile uint8_t  core_cmd_tail = 0; // Core 1 reads here
 static volatile char     core_cmd_path[MP3_PATH_MAX];
 static volatile uint32_t core_cmd_file_size = 0;
 static volatile bool core1_running = false;
+static volatile bool core1_stopped = true;
+static volatile bool core1_keep_i2s_on_exit = false;
 static mp3_bg_callback_t bg_callback = NULL;
 
 void mp3_set_external_buffer(uint8_t *buffer, size_t size) {
@@ -146,24 +151,6 @@ static void i2s_stop(void) {
     i2s_ready = false;
 }
 
-// Full teardown and rebuild of the I2S pipeline (pool + PIO + DMA).
-// Required when changing sample rate because audio_i2s_connect
-// binds the consumer to the pool at setup time.
-static bool i2s_restart(void) {
-    i2s_stop();
-    // The old pool's consumer is now stale; create a fresh pool
-    audio_pool = audio_new_producer_pool(&producer_format, MP3_I2S_BUFFER_COUNT, MP3_I2S_BUFFER_SAMPLES);
-    if (!audio_pool) {
-        printf("MP3: pool realloc failed\n");
-        return false;
-    }
-    if (!i2s_start()) {
-        printf("MP3: i2s restart failed\n");
-        return false;
-    }
-    return true;
-}
-
 static void update_status_flags(void) {
     uint8_t flags = 0;
     if (playing) flags |= MP3_STATUS_PLAYING;
@@ -195,9 +182,8 @@ static void reset_decoder_state(void) {
     total_seconds = 0;
     total_seconds_estimated = false;
     paused = false;
-    // Do NOT reset sample_rate / audio_format.sample_freq here.
-    // They must reflect the actual I2S hardware rate so the decode
-    // loop can detect a mismatch and call i2s_restart() when needed.
+    // Do NOT reset sample_rate / audio_format.sample_freq here. They
+    // track the live producer rate so pico_audio_i2s can retune the PIO clock.
     eof = false;
     error_flag = false;
 }
@@ -253,6 +239,21 @@ static void update_time_counters(void) {
     if (sample_rate > 0) {
         elapsed_seconds = (uint16_t)(elapsed_samples / sample_rate);
     }
+}
+
+static void mp3_apply_frame_sample_rate(const MP3FrameInfo *info) {
+    if (!info || info->samprate <= 0) {
+        return;
+    }
+
+    uint32_t frame_rate = (uint32_t)info->samprate;
+    if (frame_rate == sample_rate && audio_format.sample_freq == frame_rate) {
+        return;
+    }
+
+    printf("MP3: sample rate %lu -> %lu\n", (unsigned long)sample_rate, (unsigned long)frame_rate);
+    sample_rate = frame_rate;
+    audio_format.sample_freq = frame_rate;
 }
 
 static int output_pcm_to_i2s(const int16_t *pcm, int output_samps, int channels) {
@@ -322,9 +323,39 @@ void mp3_deinit(void) {
     audio_pool = NULL;
     mp3_buf_used = 0;
     mp3_buf_pos = 0;
+    core_cmd_head = 0;
+    core_cmd_tail = 0;
+    core_cmd_path[0] = '\0';
     eof = false;
     error_flag = false;
     paused = false;
+    status_flags = 0;
+}
+
+static void mp3_prepare_i2s_handoff(void) {
+    playing = false;
+    paused = false;
+    set_mute(true);
+    close_file();
+
+    if (mp3_decoder) {
+        MP3FreeDecoder(mp3_decoder);
+        mp3_decoder = NULL;
+    }
+
+    mp3_buf_used = 0;
+    mp3_buf_pos = 0;
+    mp3_bytes_read = 0;
+    mp3_read_errors = 0;
+    elapsed_samples = 0;
+    elapsed_seconds = 0;
+    total_seconds = 0;
+    total_seconds_estimated = false;
+    core_cmd_head = 0;
+    core_cmd_tail = 0;
+    core_cmd_path[0] = '\0';
+    eof = false;
+    error_flag = false;
     status_flags = 0;
 }
 
@@ -425,6 +456,53 @@ void mp3_send_cmd(uint8_t cmd) {
 
 bool mp3_core1_is_ready(void) {
     return core1_running;
+}
+
+bool mp3_core1_has_stopped(void) {
+    return core1_stopped;
+}
+
+struct audio_buffer_pool *mp3_take_i2s_audio_pool(void) {
+    if (!i2s_ready || !audio_pool) {
+        return NULL;
+    }
+
+    struct audio_buffer *stale_buffer;
+    while ((stale_buffer = get_full_audio_buffer(audio_pool, false)) != NULL) {
+        stale_buffer->sample_count = 0;
+        queue_free_audio_buffer(audio_pool, stale_buffer);
+    }
+
+    sample_rate = DEFAULT_SAMPLE_RATE;
+    audio_format.sample_freq = DEFAULT_SAMPLE_RATE;
+
+    struct audio_buffer_pool *handoff_pool = audio_pool;
+    audio_pool = NULL;
+    i2s_ready = false;
+    mp3_dma_channel = -1;
+    return handoff_pool;
+}
+
+struct audio_buffer_pool *mp3_force_i2s_handoff_from_core0(void) {
+    playing = false;
+    paused = false;
+    set_mute(true);
+    status_flags = 0;
+    core_cmd_head = 0;
+    core_cmd_tail = 0;
+
+    if (!i2s_ready || !audio_pool) {
+        return NULL;
+    }
+
+    sample_rate = DEFAULT_SAMPLE_RATE;
+    audio_format.sample_freq = DEFAULT_SAMPLE_RATE;
+
+    struct audio_buffer_pool *handoff_pool = audio_pool;
+    audio_pool = NULL;
+    i2s_ready = false;
+    mp3_dma_channel = -1;
+    return handoff_pool;
 }
 
 // Called from Core 1 only
@@ -548,6 +626,12 @@ static void mp3_process_commands(void) {
         case MP3_CORE_CMD_TOGGLE_MUTE:
             mp3_do_toggle_mute();
             break;
+        case MP3_CORE_CMD_SHUTDOWN:
+            mp3_prepare_i2s_handoff();
+            core1_keep_i2s_on_exit = true;
+            core1_running = false;
+            __mem_fence_release();
+            break;
         default:
             break;
     }
@@ -625,6 +709,7 @@ void mp3_update(void) {
 
         MP3FrameInfo info;
         MP3GetLastFrameInfo(mp3_decoder, &info);
+        mp3_apply_frame_sample_rate(&info);
         if (info.bitrate > 0 && mp3_file_size > 0 && (total_seconds == 0 || total_seconds_estimated)) {
             uint64_t bits = (uint64_t)mp3_file_size * 8ull;
             uint64_t denom = (uint64_t)info.bitrate * 1000ull;
@@ -656,6 +741,9 @@ void mp3_update(void) {
 
 void mp3_core1_loop(void) {
     printf("MP3: core1 loop start\n");
+    core1_stopped = false;
+    core1_keep_i2s_on_exit = false;
+    __mem_fence_release();
     mp3_init();
     core1_running = true;
     __mem_fence_release();
@@ -677,6 +765,14 @@ void mp3_core1_loop(void) {
             bg_callback();
         }
     }
+
+    if (!core1_keep_i2s_on_exit) {
+        mp3_deinit();
+    }
+    core1_keep_i2s_on_exit = false;
+    core1_running = false;
+    core1_stopped = true;
+    __mem_fence_release();
 }
 
 void mp3_set_bg_callback(mp3_bg_callback_t cb) {
@@ -685,6 +781,10 @@ void mp3_set_bg_callback(mp3_bg_callback_t cb) {
 
 void mp3_stop_core1(void) {
     core1_running = false;
+}
+
+void mp3_request_shutdown(void) {
+    core_cmd_push(MP3_CORE_CMD_SHUTDOWN);
 }
 
 uint8_t mp3_get_status(void) {

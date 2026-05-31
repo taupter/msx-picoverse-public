@@ -7,7 +7,7 @@
 ######################################################################
 
 # Shared version (can be overridden on the command line)
-VERSION ?= v2.28
+VERSION ?= v2.29
 
 # Sub-project locations
 MSX_DIR       := msx
@@ -37,11 +37,12 @@ all: tool
 msx:
 	"$(MAKE)" -C $(MSX_DIR) VERSION=$(VERSION)
 
-pico: msx $(PICO_CONFIG)
+pico: msx
+	$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S $(PICO_DIR) -B $(PICO_BUILD) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) -DEXPLORER_VERSION:STRING="$(VERSION)"
 	$(CMAKE) --build $(PICO_BUILD)
 
 $(PICO_CONFIG):
-	$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S $(PICO_DIR) -B $(PICO_BUILD) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
+	$(CMAKE) $(CMAKE_GENERATOR_FLAG) $(CMAKE_MAKE_PROGRAM_FLAG) -S $(PICO_DIR) -B $(PICO_BUILD) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE) -DEXPLORER_VERSION:STRING="$(VERSION)"
 
 wifi-config:
 	"$(MAKE)" -C $(WIFI_CONFIG_DIR)

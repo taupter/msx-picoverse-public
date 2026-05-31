@@ -1,21 +1,41 @@
 # Change Log
 
+## v2.29
+
+- Bumped Explorer to v2.29.
+- Applied each decoded MP3 frame's sample rate to the I2S output clock so MP3 files encoded at rates other than 44.1 kHz play at the correct pitch and speed.
+- Retuned the existing MP3 I2S producer format in place on sample-rate changes instead of allocating a second audio pool during playback.
+- Expanded Explorer ROM/MP3 record names to the 80-column detail-screen width and only truncate detail-screen names when they exceed the active screen width.
+- Reported a missing microSD card to the MSX menu, display a clear no-card message when switching to the microSD source without a card inserted, and avoid reading stale records while keeping the MSX ROM code below the Pico communication window.
+- Enabled SDCC code-size optimization for the MSX menu build so the ROM code stays clear of the `0xB900` Pico page-buffer window.
+- Show the missing-microSD state as a single menu entry so the user can still switch to Flash or File Hunter from the microSD page.
+- Reduced the MSX menu ROM code size by reusing shared row rendering, status text selection, last-line blinking, and source-switch helpers.
+- Block File Hunter offline/status message rows from opening the detail screen and fail File Hunter network checks quickly when the ESP8266 does not respond.
+- Align the missing-microSD row with File Hunter status rows so it is visible but not selected, scrolled, or actionable.
+- Shorten 40-column missing-microSD and File Hunter offline messages so they fit without truncation.
+- Refresh status-row text after column toggles so 80-column missing-microSD/File Hunter messages are not reused in 40-column mode.
+- Bound each packed Explorer page name so all 19 microSD rows receive a visible name when long filenames fill the page-buffer string pool.
+- Persist each ROM detail screen's audio profile and primary PSG setting to a `.PVC` file on microSD, reusing it on later launches and keeping those files out of the menu listing.
+- Added the selected mapper to persisted `.PVC` ROM settings while keeping existing audio/PSG option files readable.
+- Updated File Hunter catalog requests to use `http://msxpico.file-hunter.com/picoverse.php` while preserving the packed-list `base=1BA0` ROM query parameters required by the Explorer parser.
+- Expanded File Hunter page records and detail rendering so 80-column ROM detail screens can show names up to the shared 71-character limit.
+
+
 ## v2.28
 
 - Bumped Explorer to v2.28.
-- Re-enabled microSD MP3 discovery in Explorer, added MP3 list/detail UI with Play, Stop, Pause, Resume, and play counter controls, and wired the menu to the Pico MP3 decoder service.
-- Prevented idle MP3 Stop/Pause/Resume commands from lazy-starting Core 1 during Explorer startup or normal flash browsing.
-- Moved Explorer I2S audio to PIO1 SM2 and removed MP3 teardown of PIO0 so MP3 selection cannot disrupt the live MSX bus PIO programs.
-- Removed the unused MP3 now-playing memory window that overlapped the Explorer ROM/query exchange area and could corrupt the MP3 detail screen.
-- Rendered MP3 action rows from fixed literals instead of a RAM pointer table to avoid corrupted action labels on the MSX detail screen.
-- Refreshed the MP3 play counter from the MSX JIFFY timer, cleared the menu shortcut line on the MP3 detail page, and stopped playback when leaving MP3 details with ESC.
-- Removed the unavailable MP3 total-duration field from the detail screen and expanded the MP3 name display to use the full 80-column line.
-- Restored the MP3 elapsed play time and playback status to the detail page content area while keeping the normal menu shortcut hints hidden.
+- Added microSD MP3 discovery, MP3 list/detail UI, play counter/status display, full filename rendering, and Play/Stop plus Pause/Resume controls backed by the Pico MP3 decoder service.
+- Kept MP3 startup lazy so idle Stop/Pause/Resume commands do not start Core 1 during Explorer startup or normal flash browsing.
+- Moved MP3 stream buffering to a dedicated 64 KB PSRAM allocation and reduced the SRAM fallback buffer to 8 KB, freeing SRAM for MSX-MUSIC initialization after MP3 playback.
+- Kept the MP3/I2S backend on PIO1 SM2 and preserved the live MSX bus PIO programs when selecting, stopping, or leaving MP3 playback.
 - Blocked File Hunter downloads above the 4 MB microSD/PSRAM launch limit used for SD-loaded ROMs.
 - Kept the I2S DAC mute line asserted while Explorer is idle, only unmuting it after MP3 playback or a ROM audio profile starts.
-- Simplified MP3 detail actions into Play/Stop and Pause/Resume toggle rows that follow the current playback state.
 - Added a ROM detail PSG option that mirrors primary PSG writes to the Pico DAC and mixes with existing ROM audio profiles.
 - Updated Explorer, public, feature, Dual PSG, and PIO documentation for the MP3 player and primary PSG DAC mirroring behavior.
+- Reused the MP3 I2S pipeline for ROM audio profiles after MP3 playback, resetting Core 1 before ROM launch and forcing the Pico audio singleton through disable/enable so SCC and MSX-MUSIC DMA output can restart cleanly.
+- Moved MSX-MUSIC/FM-PAC I/O bus responders to PIO2, keeping FM-PAC ports isolated from the PIO1 I2S audio backend used by MP3 and ROM audio.
+- Started MSX-MUSIC audio output only after the final FM-PAC ROM bus initialization releases `/WAIT`.
+- Added temporary USB CDC diagnostics, with TinyUSB host disabled and a CDC-only PicoVerse debug product descriptor, to capture MP3-to-ROM audio launch checkpoints without using UART.
 
 ## v2.27
 

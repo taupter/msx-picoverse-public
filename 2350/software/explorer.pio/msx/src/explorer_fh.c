@@ -11,6 +11,7 @@
 #define EXPLORER_FH_STATUS_BUSY 0x5A
 #define EXPLORER_FH_RESULT_SAVING 0x02
 #define EXPLORER_FH_MAX_QUERY 24
+#define EXPLORER_FH_FLAG_MESSAGE 0x80
 
 typedef struct {
     char name[EXPLORER_FH_NAME_MAX + 1];
@@ -24,13 +25,13 @@ static unsigned int fh_current_index;
 static unsigned int fh_total_files;
 static ExplorerFHRecord fh_records[FILES_PER_PAGE];
 static char fh_status_right[CTRL_FH_STATUS_TEXT_SIZE];
+static unsigned char fh_message_row;
 
 static void fh_redraw(void);
 static void fh_read_status_text(void);
 static void fh_show_detail(unsigned int index);
 static void fh_draw_status_left(const char *text);
-static const char *fh_status_text(const char *text_40, const char *text_80);
-static void fh_blink_status_tick(const char *text, unsigned char *blink_state, unsigned char *blink_tick);
+static void fh_update_message_row_text(void);
 static void fh_wait_ready_status(const char *text);
 static unsigned char fh_record_fits_sd_cache(const ExplorerFHRecord *record);
 
@@ -64,24 +65,6 @@ static void fh_wait_ready(void)
     }
 }
 
-static const char *fh_status_text(const char *text_40, const char *text_80)
-{
-    return use_80_columns ? text_80 : text_40;
-}
-
-static void fh_blink_status_tick(const char *text, unsigned char *blink_state, unsigned char *blink_tick)
-{
-    if (++(*blink_tick) >= 4) {
-        *blink_tick = 0;
-        *blink_state = !(*blink_state);
-        if (*blink_state) {
-            fh_draw_status_left(text);
-        } else {
-            menu_ui_clear_last_line();
-        }
-    }
-}
-
 static void fh_wait_ready_status(const char *text)
 {
     unsigned char blink_state = 1;
@@ -90,7 +73,7 @@ static void fh_wait_ready_status(const char *text)
     fh_draw_status_left(text);
     while (Peek(CTRL_CMD) != 0) {
         delay_ms(20);
-        fh_blink_status_tick(text, &blink_state, &blink_tick);
+        menu_ui_blink_last_line(text, &blink_state, &blink_tick, 4);
     }
 }
 
@@ -187,8 +170,20 @@ static void fh_read_page_records(void)
         unsigned char *src = (unsigned char *)(MEMORY_START + (row * CTRL_FH_RECORD_SIZE));
         memcpy(fh_records[row].name, src, EXPLORER_FH_NAME_MAX);
         fh_records[row].name[EXPLORER_FH_NAME_MAX] = '\0';
-        fh_records[row].flags = src[60];
-        fh_records[row].size_kb = (unsigned int)src[61] | ((unsigned int)src[62] << 8);
+        fh_records[row].flags = src[CTRL_FH_FLAG_OFFSET];
+        fh_records[row].size_kb = (unsigned int)src[CTRL_FH_SIZE_OFFSET] | ((unsigned int)src[CTRL_FH_SIZE_OFFSET + 1] << 8);
+        if (!use_80_columns && (fh_records[row].flags & EXPLORER_FH_FLAG_MESSAGE) != 0 && strncmp(fh_records[row].name, "Offline", 7) == 0) {
+            strncpy(fh_records[row].name, "Network Offline", EXPLORER_FH_NAME_MAX);
+            fh_records[row].name[EXPLORER_FH_NAME_MAX] = '\0';
+        }
+    }
+}
+
+static void fh_update_message_row_text(void)
+{
+    if (fh_total_files == 1 && (fh_records[0].flags & EXPLORER_FH_FLAG_MESSAGE) != 0 && strncmp(fh_records[0].name, "Offline", 7) == 0) {
+        strncpy(fh_records[0].name, menu_ui_status_text("Network Offline", "Network: Offline"), EXPLORER_FH_NAME_MAX);
+        fh_records[0].name[EXPLORER_FH_NAME_MAX] = '\0';
     }
 }
 
@@ -207,6 +202,8 @@ static void fh_load_page(unsigned int page, const char *status_text)
         fh_total_pages = 1;
     }
     fh_read_page_records();
+    fh_message_row = (fh_total_files == 1 && (fh_records[0].flags & EXPLORER_FH_FLAG_MESSAGE) != 0);
+    fh_update_message_row_text();
 }
 
 static void fh_search(const char *query, const char *status_text)
@@ -248,7 +245,7 @@ static void fh_network_status_with_text(const char *status_text)
 
 static void fh_network_status(void)
 {
-    fh_network_status_with_text(fh_status_text("Checking net...", "Checking network status..."));
+    fh_network_status_with_text(menu_ui_status_text("Checking net...", "Checking network status..."));
 }
 
 static void fh_draw_network_status(void)
@@ -256,7 +253,7 @@ static void fh_draw_network_status(void)
     if (strncmp(fh_status_right, "Connected to ", 13) == 0) {
         fh_draw_status_left(use_80_columns ? "Network: Online" : "Net: Online");
     } else {
-        fh_draw_status_left(use_80_columns ? "Network: Offline" : "Net: Offline");
+        fh_draw_status_left(use_80_columns ? "Network: Offline" : "Network Offline");
     }
 }
 
@@ -312,6 +309,7 @@ static void fh_draw_list(void)
     char row_text[81];
     unsigned char width = menu_ui_row_width();
 
+    fh_update_message_row_text();
     menu_ui_clear_rows(2, 21);
     for (row = 0; row < FILES_PER_PAGE; row++) {
         unsigned int index = (fh_current_page * FILES_PER_PAGE) + row;
@@ -319,7 +317,7 @@ static void fh_draw_list(void)
             continue;
         }
         fh_build_row_text(&fh_records[row], row_text, width);
-        menu_ui_render_selectable_line((unsigned char)(row + 2), row_text + 1, index == fh_current_index);
+        menu_ui_render_selectable_line((unsigned char)(row + 2), row_text + 1, !fh_message_row && index == fh_current_index);
     }
 }
 
@@ -346,7 +344,7 @@ static void fh_draw_row_for_index(unsigned int index)
 
 static void fh_position_cursor_on_selection(void)
 {
-    if (fh_total_files > 0) {
+    if (fh_total_files > 0 && !fh_message_row) {
         Locate(0, (unsigned char)((fh_current_index % FILES_PER_PAGE) + 2));
     }
 }
@@ -359,7 +357,7 @@ static void fh_move_selection(unsigned int new_index)
     fh_current_index = new_index;
     fh_current_page = fh_current_index / FILES_PER_PAGE;
     if (fh_current_page != old_page) {
-        fh_load_page(fh_current_page, fh_status_text("Loading...", "Loading File Hunter list..."));
+        fh_load_page(fh_current_page, menu_ui_status_text("Loading...", "Loading File Hunter list..."));
         fh_redraw();
         return;
     }
@@ -383,7 +381,7 @@ static char fh_wait_key_with_scroll(void)
             return (char)bios_chget();
         }
 
-        if (fh_total_files > 0) {
+        if (fh_total_files > 0 && !fh_message_row) {
             unsigned int row = fh_current_index % FILES_PER_PAGE;
             const ExplorerFHRecord *record = &fh_records[row];
             size_t len = strlen(record->name);
@@ -399,7 +397,7 @@ static char fh_wait_key_with_scroll(void)
                         fh_build_row_text_with_name(record, name_window, row_text, menu_ui_row_width());
                         Locate(0, (unsigned char)(row + 2));
                         PrintChar('>');
-                        menu_ui_print_str_inverted_width(row_text + 1, (unsigned char)(menu_ui_highlight_width() - 1));
+                        menu_ui_print_str_inverted_width(row_text + 1, (unsigned char)(menu_ui_row_width() - 3));
                     }
                     startPos++;
                     if (startPos >= lenInt + 1) {
@@ -498,7 +496,7 @@ static void fh_render_detail_footer(void)
 
 static void fh_render_detail_screen(const ExplorerFHRecord *record)
 {
-    char name[CTRL_QUERY_SIZE];
+    char name[MAX_FILE_NAME_LENGTH + 1];
     char size_text[8];
     unsigned char can_download = fh_record_fits_sd_cache(record);
 
@@ -508,7 +506,7 @@ static void fh_render_detail_screen(const ExplorerFHRecord *record)
     menu_ui_print_delimiter_line();
     menu_ui_clear_rows(2, 21);
 
-    trim_name_to_buffer(record->name, name, CTRL_QUERY_SIZE - 1);
+    trim_name_to_buffer(record->name, name, MAX_FILE_NAME_LENGTH);
     fh_size_text(record->size_kb, size_text);
 
     Locate(0, 3);
@@ -547,12 +545,12 @@ static void fh_show_detail(unsigned int index)
     ExplorerFHRecord *record;
     char key;
 
-    if (index >= fh_total_files || (index / FILES_PER_PAGE) != fh_current_page) {
+    if (fh_message_row || index >= fh_total_files || (index / FILES_PER_PAGE) != fh_current_page) {
         return;
     }
     row = index % FILES_PER_PAGE;
     record = &fh_records[row];
-    if (record->name[0] == '\0') {
+    if (record->name[0] == '\0' || (record->flags & EXPLORER_FH_FLAG_MESSAGE) != 0) {
         return;
     }
 
@@ -586,7 +584,7 @@ static void fh_show_detail(unsigned int index)
                 }
                 continue;
             }
-            fh_network_status_with_text(fh_status_text("Downloading...", "Downloading..."));
+            fh_network_status_with_text(menu_ui_status_text("Downloading...", "Downloading..."));
             fh_render_detail_screen(record);
             fh_download(index);
             if (Peek(CTRL_FH_RESULT)) {
@@ -610,14 +608,15 @@ unsigned char explorer_fh_run(void)
 {
     char key;
     char search_query[EXPLORER_FH_MAX_QUERY + 1];
-    const char *retrieving_status = fh_status_text("Retrieving...", "Retrieving File Hunter list...");
-    const char *page_status = fh_status_text("Loading...", "Loading File Hunter page...");
-    const char *search_status = fh_status_text("Searching...", "Searching File Hunter list...");
+    const char *retrieving_status = menu_ui_status_text("Retrieving...", "Retrieving File Hunter list...");
+    const char *page_status = menu_ui_status_text("Loading...", "Loading File Hunter page...");
+    const char *search_status = menu_ui_status_text("Searching...", "Searching File Hunter list...");
 
     fh_current_page = 0;
     fh_total_pages = 1;
     fh_current_index = 0;
     fh_total_files = 0;
+    fh_message_row = 0;
     memset(fh_records, 0, sizeof(fh_records));
     memset(fh_status_right, 0, sizeof(fh_status_right));
 
@@ -681,7 +680,9 @@ unsigned char explorer_fh_run(void)
                 break;
             case 13:
             case ' ':
-                fh_show_detail(fh_current_index);
+                if (!fh_message_row) {
+                    fh_show_detail(fh_current_index);
+                }
                 break;
             case 'c':
             case 'C':

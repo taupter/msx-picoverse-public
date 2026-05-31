@@ -38,10 +38,13 @@ project(explorer C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
+# Set to 1 to enable USB stdio debug output, 0 to disable. If enabled, the pico will appear as a USB CDC device when connected to a host, and printf output will be sent over USB instead of UART. Note that enabling this will prevent the use of the USB host stack, so it is not recommended for normal use.
+# I used to debug some pico crashes during development... 
+set(EXPLORER_USB_STDIO_DEBUG 0)
+
 # Add executable. Default name is the project name, version 0.1
-add_executable(explorer 
-    ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c
-        hw_config.c
+set(EXPLORER_SOURCES
+    hw_config.c
     sunrise_ide.c
     sunrise_sd.c
     explorer.c 
@@ -52,21 +55,28 @@ add_executable(explorer
     msx_bus.pio
 )
 
+if (NOT EXPLORER_USB_STDIO_DEBUG)
+    list(APPEND EXPLORER_SOURCES ${PICO_SDK_PATH}/lib/tinyusb/src/tusb.c)
+endif()
+
+add_executable(explorer ${EXPLORER_SOURCES})
+
 pico_generate_pio_header(explorer ${CMAKE_CURRENT_SOURCE_DIR}/msx_bus.pio)
 
 add_subdirectory(lib/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src build)
 add_subdirectory(lib/picomp3lib/src picomp3lib_build)
 
 pico_set_program_name(explorer "explorer")
-pico_set_program_version(explorer "0.1")
+pico_set_program_version(explorer "${EXPLORER_VERSION}")
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(explorer 0)
-pico_enable_stdio_usb(explorer 0)
+pico_enable_stdio_usb(explorer ${EXPLORER_USB_STDIO_DEBUG})
 
 # Add the standard library to the build
 target_link_libraries(explorer
         pico_stdlib
+    pico_unique_id
         no-OS-FatFS-SD-SDIO-SPI-RPi-Pico
         pico_multicore
     pico_audio_i2s
@@ -74,11 +84,21 @@ target_link_libraries(explorer
     hardware_dma
     hardware_pio
     tinyusb_board
-    tinyusb_host
         )
+
+if (NOT EXPLORER_USB_STDIO_DEBUG)
+    target_link_libraries(explorer tinyusb_host)
+endif()
 
 target_compile_definitions(explorer PRIVATE
     PICO_AUDIO_I2S_PIO=1
+    EXPLORER_USB_STDIO_DEBUG=$<BOOL:${EXPLORER_USB_STDIO_DEBUG}>
+    EXPLORER_VERSION="${EXPLORER_VERSION}"
+    PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=5000
+    PICO_STDIO_USB_ENABLE_RESET_VIA_VENDOR_INTERFACE=0
+    PICO_STDIO_USB_STDOUT_TIMEOUT_US=10000
+    USBD_PID=0x00E1
+    USBD_PRODUCT="PicoVerse USB Debug CDC"
 )
 
 # Add the standard include files to the build
