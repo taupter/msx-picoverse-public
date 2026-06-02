@@ -2794,6 +2794,7 @@ static inline void __not_in_flash_func(dual_psg_audio_service_buffer)(void)
     int16_t *samples = (int16_t *)buffer->buffer->bytes;
     for (int i = 0; i < SCC_AUDIO_BUFFER_SAMPLES; i++)
     {
+        dual_psg_service_io();
         dual_psg_write_stereo_sample(samples, i);
     }
     buffer->sample_count = SCC_AUDIO_BUFFER_SAMPLES;
@@ -2903,6 +2904,7 @@ static inline void __not_in_flash_func(main_psg_audio_service_buffer)(void)
     int16_t *samples = (int16_t *)buffer->buffer->bytes;
     for (int i = 0; i < SCC_AUDIO_BUFFER_SAMPLES; i++)
     {
+        main_psg_service_io();
         int16_t sample = main_psg_calc_sample();
         samples[i * 2] = sample;
         samples[i * 2 + 1] = sample;
