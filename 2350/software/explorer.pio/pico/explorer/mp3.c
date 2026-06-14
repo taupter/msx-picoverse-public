@@ -46,6 +46,10 @@ typedef enum {
 } audio_file_kind_t;
 
 static struct audio_buffer_pool *audio_pool;
+// Set on Core 0 (via mp3_adopt_i2s_audio_pool) before relaunching the core so
+// mp3_init() reuses an already-live I2S pool instead of re-initialising the
+// pico_audio_i2s singleton. Consumed once by mp3_init().
+static struct audio_buffer_pool *mp3_pending_handoff_pool = NULL;
 static struct audio_i2s_config i2s_config = {
     .data_pin = MP3_I2S_DATA_PIN,
     .clock_pin_base = MP3_I2S_BCLK_PIN,
@@ -215,20 +219,6 @@ static bool i2s_start(void) {
     audio_i2s_set_enabled(true);
     i2s_ready = true;
     return true;
-}
-
-static void i2s_stop(void) {
-    if (!i2s_ready) {
-        return;
-    }
-    audio_i2s_set_enabled(false);
-    // Abort DMA to ensure the channel is idle before reconfiguration
-    if (mp3_dma_channel >= 0) {
-        dma_channel_abort(mp3_dma_channel);
-    }
-    // Release only the I2S state machine; the MSX bus PIO programs stay live.
-    i2s_release_sm();
-    i2s_ready = false;
 }
 
 static void update_status_flags(void) {
@@ -849,6 +839,25 @@ static void mp3_prepare_i2s_handoff(void) {
 
 void mp3_init(void) {
     printf("MP3: init\n");
+
+    // If a previously handed-off I2S pool was adopted (WAVEGAME relaunch after
+    // a menu MP3/WAV), reuse the live pico_audio_i2s pipeline instead of
+    // re-running audio_i2s_setup()/audio_new_producer_pool(). The DMA IRQ was
+    // already re-enabled on Core 0 via the set_enabled() toggle in
+    // claim_rom_audio_handoff_pool(), so here we only re-bind the pool.
+    if (mp3_pending_handoff_pool) {
+        audio_pool = mp3_pending_handoff_pool;
+        mp3_pending_handoff_pool = NULL;
+        gpio_init(MP3_I2S_MUTE_PIN);
+        gpio_set_dir(MP3_I2S_MUTE_PIN, GPIO_OUT);
+        set_mute(true);
+        i2s_ready = true;
+        reset_decoder_state();
+        update_status_flags();
+        printf("MP3: init reused handoff pool\n");
+        return;
+    }
+
     if (mp3_dma_channel < 0) {
         for (int ch = 0; ch < NUM_DMA_CHANNELS; ch++) {
             if (!dma_channel_is_claimed(ch)) {
@@ -991,6 +1000,10 @@ bool mp3_core1_is_ready(void) {
 
 bool mp3_core1_has_stopped(void) {
     return core1_stopped;
+}
+
+void mp3_adopt_i2s_audio_pool(struct audio_buffer_pool *pool) {
+    mp3_pending_handoff_pool = pool;
 }
 
 struct audio_buffer_pool *mp3_take_i2s_audio_pool(void) {

@@ -49,6 +49,9 @@
 #define CTRL_WIFI_SUPPORT (CTRL_BASE_ADDR + 10)
 #define CTRL_PSG_EMULATION (CTRL_BASE_ADDR + 11)
 #define CTRL_WAVEGAME_ROM (CTRL_BASE_ADDR + 12)
+#define CTRL_SD_PARTITION (CTRL_BASE_ADDR + 13)
+#define CTRL_SD_BROWSE_PARTITION (CTRL_BASE_ADDR + 14)
+#define CTRL_AUDIO_VOLUME (CTRL_BASE_ADDR + 15)
 #define CTRL_MAGIC   0xA5
 #define CTRL_STATUS_SD_MISSING 0x5D
 #define CTRL_QUERY_BASE 0xBFC0
@@ -62,6 +65,9 @@
 #define AUDIO_PROFILE_SCC_PLUS_EXTERNAL 6
 #define AUDIO_PROFILE_YM2151_SFG05 7
 #define AUDIO_PROFILE_YM2151_SFG01 8
+#define AUDIO_VOLUME_DEFAULT 100
+#define AUDIO_VOLUME_MAX 200
+#define AUDIO_VOLUME_STEP 10
 #define MP3_CTRL_BASE      0xBFE0
 #define MP3_CTRL_CMD       (MP3_CTRL_BASE + 0)
 #define MP3_CTRL_STATUS    (MP3_CTRL_BASE + 1)
@@ -71,6 +77,7 @@
 #define MP3_CTRL_ELAPSED_H (MP3_CTRL_BASE + 5)
 #define MP3_CTRL_TOTAL_L   (MP3_CTRL_BASE + 6)
 #define MP3_CTRL_TOTAL_H   (MP3_CTRL_BASE + 7)
+#define MP3_CTRL_MODE      (MP3_CTRL_BASE + 8)
 #define MP3_STATUS_PLAYING 0x01
 #define MP3_STATUS_ERROR   0x04
 #define MP3_STATUS_EOF     0x08
@@ -80,6 +87,11 @@
 #define MP3_CMD_STOP       0x03
 #define MP3_CMD_PAUSE      0x04
 #define MP3_CMD_RESUME     0x05
+#define MP3_CMD_NEXT       0x08
+#define MP3_CMD_PREVIOUS   0x09
+#define MP3_PLAY_MODE_SINGLE 0
+#define MP3_PLAY_MODE_ALL    1
+#define MP3_PLAY_MODE_RANDOM 2
 #define DATA_BUFFER_END CTRL_FH_STATUS_TEXT_BASE
 #define DATA_BUFFER_SIZE (DATA_BUFFER_END - MEMORY_START)
 #define CMD_APPLY_FILTER 0x01
@@ -91,6 +103,8 @@
 #define CMD_LOAD_OPTIONS 0x07
 #define CMD_SAVE_OPTIONS 0x08
 #define CMD_PREPARE_QUICK_RUN 0x09
+#define CMD_CYCLE_SD_PARTITION 0x0A
+#define CMD_DELETE_SD_FILE 0x0B
 #define CMD_FH_LIST_PAGE 0x40
 #define CMD_FH_DOWNLOAD  0x41
 #define CMD_FH_SEARCH    0x42
@@ -101,6 +115,10 @@
 #define CTRL_FH_RESULT CTRL_AUDIO
 #define CTRL_FH_STATUS_TEXT_BASE 0xBF80
 #define CTRL_FH_STATUS_TEXT_SIZE 64
+#define CTRL_SD_PARTITION_INFO_BASE CTRL_FH_STATUS_TEXT_BASE
+#define CTRL_SD_PARTITION_INFO_SIZE 32
+#define CTRL_CHIP_ID_BASE (CTRL_FH_STATUS_TEXT_BASE + CTRL_FH_STATUS_TEXT_SIZE - 17)
+#define CTRL_CHIP_ID_SIZE 17
 #define CTRL_FH_FLAG_OFFSET MAX_FILE_NAME_LENGTH
 #define CTRL_FH_SIZE_OFFSET (CTRL_FH_FLAG_OFFSET + 1)
 #define CTRL_FH_RECORD_SIZE (MAX_FILE_NAME_LENGTH + 3)
@@ -172,6 +190,7 @@ int record_is_mp3(const ROMRecord *record);
 void trim_name_to_buffer(const char *src, char *dst, int max_len);
 int build_sliding_name_window(const char *str, int startPos, char *out, unsigned char width);
 void displayMenu();
+void load_page_records(unsigned int page_index);
 void navigateMenu();
 void helpMenu();
 void loadGame(int index);

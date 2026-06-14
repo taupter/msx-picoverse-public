@@ -16,8 +16,8 @@ If you find any issues, have questions, or want to contribute, please open an is
 
 - Single-ROM LoadROM workflow for instant and easy booting of one title.
 - Multi-ROM loader with an on-screen menu and mapper auto-detection.
-- Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds microSD MP3/WAV playback, supports WAVEGAME microSD ROMs with port `0x92` controlled WAV streaming, supports on-device search, includes ROM detail audio profiles with native and external SCC/SCC+, Dual PSG, MSX-MUSIC, and YM2151/SFG support, adds an independent primary PSG DAC mirror option, and includes an integrated File Hunter browser for downloading ROMs over ESP-01 WiFi.
-- Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or microSD card (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
+- Explorer firmware (PicoVerse 2350) merges flash and microSD ROMs, labels the source (FL/SD), adds microSD MP3/WAV playback, supports WAVEGAME microSD ROMs with port `0x92` controlled WAV streaming, supports on-device search, can cycle supported microSD partitions with `P`, can delete selected SD files with confirmed `D`, includes ROM detail audio profiles with native and external SCC/SCC+, Dual PSG, MSX-MUSIC, and YM2151/SFG support, adds an independent primary PSG DAC mirror option, and includes an integrated File Hunter browser for downloading ROMs over ESP-01 WiFi.
+- Ready-made Nextor builds with USB pendrive (`-s2`/`-m2`) or FAT16 up-to-4GB microSD partitions (`-s1`/`-m1`) via Sunrise IDE emulation on PicoVerse 2350, and USB (`-s`/`-m`) on PicoVerse 2040.
 - Sunrise IDE + 192KB memory mapper on PicoVerse 2040 (`loadrom.exe -m`), or Sunrise IDE standalone (`loadrom.exe -s`).
 - Sunrise IDE + 1MB PSRAM memory mapper on PicoVerse 2350 (`loadrom.exe -m1` for microSD, `loadrom.exe -m2` for USB), or Sunrise IDE standalone (`loadrom.exe -s1` / `loadrom.exe -s2`).
 - Carnivore2-compatible RAM-mode loader on PicoVerse 2350 (`loadrom.exe -c1` / `loadrom.exe -c2`) for `SROM.COM /D15` uploads into the 1MB PSRAM mapper.
@@ -41,7 +41,7 @@ If you find any issues, have questions, or want to contribute, please open an is
 - [PicoVerse 2040 MultiROM Guide Manual (English)](/docs/msx-picoverse-2040-multirom-tool-manual.en-us.md)
 - [PicoVerse 2350 MultiROM Tool Manual (English)](/docs/msx-picoverse-2350-multirom-tool-manual.en-us.md)
 
-**Explorer Guides:** Use the Explorer tool to manage flash and microSD ROMs, play MP3s from the microSD card, browse File Hunter over ESP-01 WiFi, select ROM audio/PSG options, and search for titles on the device.
+**Explorer Guides:** Use the Explorer tool to manage flash and microSD ROMs, cycle supported microSD partitions, delete selected SD files, play MP3/WAV files from the microSD card, browse File Hunter over ESP-01 WiFi, select ROM audio/PSG options, and search for titles on the device.
 - [MSX PicoVerse 2350 Explorer Tool Manual (English)](/docs/msx-picoverse-2350-explorer-tool-manual.en-us.md)
 - [MSX PicoVerse 2350 WAVEGAME Protocol and Support](/docs/msx-picoverse-2350-wavegame.md)
 
@@ -106,9 +106,9 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Targets RP2350 boards exposing all 48 GPIO pins (not compatible with standard Pico 2 boards).
 - Adds microSD storage, ESP8266 WiFi header, and I2S audio expansion alongside 16 MB flash space.
 - Extra RAM (PSRAM) now backs the 1MB mapper modes and the Carnivore2-compatible RAM loader, with room for additional advanced firmware features.
-- Explorer firmware can load ROMs from both flash and microSD, play MP3 files from microSD, browse File Hunter over ESP-01 WiFi, save downloaded File Hunter ROMs to the microSD root, search local title lists, select native or external SCC/SCC+, Dual PSG, MSX-MUSIC, or YM2151/SFG audio profiles per ROM where supported, and optionally mirror primary PSG audio through the cartridge DAC.
+- Explorer firmware can load ROMs from both flash and microSD, cycle FAT16/FAT32/exFAT microSD browsing partitions with `P`, delete selected SD files after confirmation with `D`, play MP3/WAV files from microSD, browse File Hunter over ESP-01 WiFi, save downloaded File Hunter ROMs to the microSD root, search local title lists, select native or external SCC/SCC+, Dual PSG, MSX-MUSIC, or YM2151/SFG audio profiles per ROM where supported, and optionally mirror primary PSG audio through the cartridge DAC.
 - USB-C port doubles as a bridge for Nextor mass storage via Sunrise IDE emulation (`-s2`).
-- microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`-s1`).
+- microSD card slot provides Nextor mass storage via Sunrise IDE emulation (`-s1`) when using FAT16 partitions up to 4 GB.
 - Sunrise IDE + 1MB PSRAM memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
 - Carnivore2-compatible RAM-mode loading lets `SROM.COM /D15` upload ROMs into the 1MB PSRAM mapper (`-c1` for microSD, `-c2` for USB).
 - LoadROM Sunrise builds can also expose ESP-01 WiFi support with `-w` on top of the `-s1`/`-m1`/`-s2`/`-m2` modes.
@@ -215,7 +215,9 @@ Consult the LoadROM manuals linked above for screenshots, troubleshooting, and i
 |<img src="/images/2026-05-17_21-30.png" alt="File Hunter Explorer menu" width="420" height="315">|<img src="/images/2026-05-17_21-31.png" alt="WiFi configuration screen" width="420" height="315">|
 
 
-Explorer is a PicoVerse 2350-only firmware that merges ROMs stored in flash with additional ROMs and MP3/WAV files on the microSD card. ROMs are labeled with source tags (FL/SD), MP3 and WAV entries open a player screen with Play/Stop and Pause/Resume controls, the list supports paging, and you can search by name directly in the menu. With an ESP-01 / ESP8266 module installed and WiFi configured, pressing `F3` opens the integrated File Hunter browser. File Hunter results show the ROM name and size, can be searched from the MSX, and selected ROMs are downloaded through the Pico into PSRAM before being saved as `.ROM` files in the microSD root. microSD ROMs up to 4 MB can be executed directly from there. Use the Explorer tool to build the UF2 and copy extra ROMs and audio files to the microSD card. See the Explorer manual for limits, File Hunter requirements, and supported formats.
+Explorer is a PicoVerse 2350-only firmware that merges ROMs stored in flash with additional ROMs and MP3/WAV files on the microSD card. ROMs are labeled with source tags (FL/SD), MP3 and WAV entries open a player screen with Play/Stop and Pause/Resume controls, the list supports paging, and you can search by name directly in the menu. In the `F2` microSD screen, `P` cycles supported FAT16, FAT32, and exFAT browsing partitions, while `D` deletes the selected file after confirmation; folders are protected. With an ESP-01 / ESP8266 module installed and WiFi configured, pressing `F3` opens the integrated File Hunter browser. File Hunter results show the ROM name and size, can be searched from the MSX, and selected ROMs are downloaded through the Pico into PSRAM before being saved as `.ROM` files in the microSD root. microSD ROMs up to 4 MB can be executed directly from there. Use the Explorer tool to build the UF2 and copy extra ROMs and audio files to the microSD card. See the Explorer manual for limits, File Hunter requirements, and supported formats.
+
+For Sunrise Nextor SYSTEM entries in Explorer, SD storage is limited to FAT16 microSD partitions up to 4 GB. If more than one compatible partition exists, choose the desired one from the ROM detail screen's `SD Part` option; Explorer saves that selection in the ROM's `.PVC` options file. FAT32 and exFAT partitions remain supported for normal Explorer file browsing but are not offered to Nextor.
 
 You can have up to 1024 entries per folder view (folders + ROMs + MP3s; the root view can also include flash entries). The menu auto-detects whether the MSX supports 80-column text mode and boots accordingly; you can also press `C` at any time to toggle between 40- and 80-column layouts.
 

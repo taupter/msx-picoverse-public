@@ -45,6 +45,7 @@
 #define PIN_IORQ   26   // IO Request line from MSX
 #define PIN_SLTSL  27   // Slot Select for this cartridge slot
 #define PIN_WAIT    28  // WAIT line to MSX 
+#define PIN_INT     40  // MSX maskable interrupt line (/INT), open-drain
 #define PIN_BUSSDIR 37  // Bus direction line 
 #define PIN_ESP_UART_TX 38 // ESP-01 UART TX
 #define PIN_ESP_UART_RX 39 // ESP-01 UART RX

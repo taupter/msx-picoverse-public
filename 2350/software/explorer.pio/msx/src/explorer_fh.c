@@ -487,11 +487,8 @@ static int fh_read_search_query(char *buffer, unsigned int max_len)
 static void fh_render_detail_footer(void)
 {
     Locate(0, 22);
-    if (use_80_columns) {
-        printf("[ENTER - DOWNLOAD]                                                [ESC - BACK]");
-    } else {
-        printf("[ENTER-DOWNLOAD]            [ESC-BACK]");
-    }
+    printf("[ESC - BACK] [ENTER - DOWNLOAD]");
+
 }
 
 static void fh_render_detail_screen(const ExplorerFHRecord *record)
@@ -517,22 +514,15 @@ static void fh_render_detail_screen(const ExplorerFHRecord *record)
     }
 
     Locate(0, 4);
-    if (use_80_columns) {
-        printf("   Size: %-8.8s", size_text);
-    } else {
-        printf("   Size: %-8.8s", size_text);
-    }
-
+    printf("   Size: %-8.8s", size_text);
     Locate(0, 5);
     printf(" Source: FH");
 
     menu_ui_render_selectable_line(9, can_download ? "Action: Download" : "Action: Too large", 1);
     if (can_download) {
         fh_draw_detail_status("");
-    } else if (use_80_columns) {
-        fh_draw_detail_status("File exceeds 4MB microSD launch limit.");
     } else {
-        fh_draw_detail_status("Too large for microSD launch.");
+        fh_draw_detail_status("File exceeds 4MB limit!");
     }
     Locate(0, 21);
     menu_ui_print_delimiter_line();
@@ -577,11 +567,7 @@ static void fh_show_detail(unsigned int index)
         }
         if (key == 13 || key == ' ') {
             if (!fh_record_fits_sd_cache(record)) {
-                if (use_80_columns) {
-                    fh_draw_detail_status("Download blocked: exceeds 4MB microSD launch limit.");
-                } else {
-                    fh_draw_detail_status("Download blocked: too large.");
-                }
+                fh_draw_detail_status("Download blocked: exceeds 4MB limit!");
                 continue;
             }
             fh_network_status_with_text(menu_ui_status_text("Downloading...", "Downloading..."));

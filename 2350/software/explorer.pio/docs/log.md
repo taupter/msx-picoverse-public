@@ -1,5 +1,42 @@
 # Change Log
 
+## PicoVerse 2350 Explorer v2.35
+
+- Bumped Explorer version to v2.35.
+- Refreshed the generated ROM mapper SHA1 databases used by the Explorer tool and Pico firmware from the current openMSX `softwaredb.xml`.
+- Fixed the Kikikaikai - Mystery - TAITO (ASCII8) hang under the YM2151 (SFG05/SFG01) audio profiles (the earlier v2.34 ASCII8 banking patch did not address the real cause). The combined SFG bus loops (`loadrom_external_sfg` and `loadrom_sunrise_sfg_common`) only drained the captured-write FIFO at the top of the loop, then serviced a read without re-draining. A bank-switch or `ENASLT` secondary-slot (`0xFFFF`) write landing between that drain and the read dequeue was applied only after the read, so the read was answered with a stale subslot/bank and returned a corrupt byte. The game's music driver remaps the SFG into page 2 via `ENASLT` every frame, so this race eventually corrupted a read and froze the MSX after some time. Both SFG loops now re-drain pending writes immediately after dequeuing the read address (matching the proven `banked8_loop` ordering), so the response always reflects the latest subslot/bank state.
+- Improved speed when drawing of the ROM/MP3/WAV list by rendering each menu row with a single VRAM block write.
+- Added MP3/WAV folder playback controls with Single, All, and Random modes, plus guarded Next/Previous music navigation.
+- Improved the MP3/WAV detail screen so it keeps the current track information and controls aligned while playback changes.
+- Fixed microSD folder navigation after returning from subfolders, keeping the page and cursor state consistent.
+- Improved WAVEGAME audio startup/restart reliability and reduced MSX menu ROM size so the menu stays below the Pico page-buffer window.
+- Fixed WAVEGAME ROMs launching with no audio after an MP3/WAV had been played first.
+- Fixed File Hunter downloads being rejected with "audio busy" after MP3/WAV playback.
+- Fixed the MSX freezing (and the audio dying permanently) when entering File Hunter after playing an MP3/WAV. 
+- Reordered the MP3/WAV detail screen options so the playback Mode is the last option and Action: Play is selected by default.
+- Added the Pico unique Chip ID to the MSX help screen and moved the return prompt to the row below it.
+- Shortened the selected-row inverted highlight by two columns on the right to align it with the menu frame.
+- Added Sunrise Nextor SD partition selection for FAT16 microSD partitions up to 4GB, persisted in each ROM's `.PVC` options file.
+- Changed Sunrise Nextor SD partition selection to show Pico-supplied partition labels/messages without detail-screen footer text, and added F2 microSD partition cycling across FAT16, FAT32, and exFAT partitions with `/PICOVERSE.PVC` persistence.
+- Fixed F2 microSD partition cycling so it can move through supported primary/logical partitions and keeps F1/F3 source switching responsive after a partition change.
+- Fixed the empty F2 microSD partition screen so `P` can cycle back to another partition and `1`/`2` source shortcuts still work.
+- Changed the ROM detail screen to show only the selected-option helper footer, restored the SD Part helper text, and show the actual compatible FAT16 partition label instead of `SINGLE PARTITION`.
+- Show the selected F2 microSD partition label in the status area whenever no transient status message is active.
+- Fixed FAT16/FAT32/exFAT partition label detection so F2 and Sunrise SD partition names use the filesystem volume label instead of boot-sector defaults or generic partition names.
+- Fixed a regression where scanning a filesystem label could overwrite the MBR/EBR sector buffer and hide later microSD partitions from the F2 partition cycle.
+- Added free-space MB reporting to the F2 microSD partition status label, including the first time F2 selects the microSD source.
+- Changed the ROM detail and quick-run defaults so PSG Mirror starts enabled unless saved `.PVC` options override it.
+- Fixed F3 File Hunter launching from an empty F2 microSD partition screen.
+- Fixed blinking status messages so the hidden phase never substitutes the F2 partition buffer and cuts the start of File Hunter network text.
+- Added a confirmed `D` delete command for selected files on the F2 microSD screen while leaving folders protected.
+- Changed the 40-column F2 microSD status to alternate between the partition label and free-space amount instead of truncating the free-space text.
+- Improved help screen with additional `D` and `P` commands.
+- Updated Explorer, feature, public README, and Sunrise Nextor documentation for the new `P`/`D` commands, multi-partition microSD browsing, and FAT16 up-to-4GB Nextor partition requirements.
+- Fixed Sunrise Nextor SD partition detection for exact 4GB FAT16 partitions and show `PARTITION1` fallback text when the filesystem has no user volume label.
+- Added a per-ROM audio volume control to the ROM detail screen, persisted it in `.PVC` options files, and raised the YM2151 SFG01/SFG05 baseline output to better match other audio profiles.
+- Fixed MP3/WAV Random mode so pressing `N` or `P` while playback is active chooses a random track instead of stepping through the folder list.
+- Fixed MP3/WAV and WAVEGAME audio becoming silent after ROM detail SD work by quiescing the lazy MP3 core before option load/save and mapper detection, preserving the I2S handoff pool for the next audio launch.
+
 ## PicoVerse 2350 Explorer v2.34
 
 - Bumped Explorer to v2.34.

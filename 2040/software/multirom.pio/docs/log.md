@@ -1,5 +1,10 @@
 # Change Log
 
+## PicoVerse 2040 Multirom v2.60
+
+- Moved the shared MultiROM version declaration into the aggregate and tool Makefiles, removing the separate `version.mk` include.
+- Refreshed the generated ROM mapper SHA1 database from the current openMSX `softwaredb.xml` and updated the generator to parse the new attribute-based XML format.
+  
 ## PicoVerse 2040 Multirom v2.59
 
 - Bumped the multirom.pio version to v2.59.

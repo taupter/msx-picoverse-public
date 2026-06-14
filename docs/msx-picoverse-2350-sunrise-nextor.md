@@ -29,6 +29,14 @@ The Carnivore2 RAM-mode variants (`-c1`, `-c2`) build on that same mapper archit
 
 The `-w` WiFi flag is available for `-s1`, `-m1`, `-s2`, and `-m2`. It does not create new mapper IDs; instead, it sets an additional configuration flag that makes the firmware expose a WiFi subslot containing the ESP8266P system ROM and memio UART surface. See the dedicated WiFi guide for the full register-level details.
 
+### Nextor partition requirements and Explorer selection
+
+Nextor storage uses the Sunrise IDE block device and should be prepared with FAT16 partitions up to 4 GB for reliable MSX-DOS/Nextor access. FAT32 and exFAT partitions can be useful on the same microSD card for Explorer browsing, ROM loading, MP3/WAV playback, or File Hunter downloads, but they are not valid boot/storage partitions for Sunrise Nextor SYSTEM entries.
+
+In Explorer, Sunrise Nextor SD SYSTEM entries scan the microSD partition table and offer only compatible FAT16 partitions up to 4 GB in the ROM detail screen. The `SD Part` option shows the filesystem volume label when available; use Left/Right to choose between compatible partitions. The selected partition is stored in that ROM's `.PVC` options file, so each Sunrise Nextor SYSTEM entry can remember its own FAT16 partition.
+
+The normal Explorer `F2` microSD browser has different rules: it can cycle through supported FAT16, FAT32, and exFAT primary/logical partitions with `P`, saves the current browsing partition in `/PICOVERSE.PVC`, and displays the selected partition label plus free-space status. This partition selection is for Explorer file browsing and does not make FAT32/exFAT partitions valid for Nextor.
+
 ## 2. Architecture
 
 All six modes share an identical ATA front-end on Core 0. Core 1 runs the appropriate storage backend depending on the mapper type.
@@ -373,7 +381,7 @@ loadrom.exe -m2 -w -o nextor_mapper_usb_wifi.uf2
 2. Review the console output (ROM type, name, size).
 3. Hold BOOTSEL on the PicoVerse 2350 and connect USB.
 4. Copy the generated UF2 to the `RPI-RP2` drive.
-5. For `-s1`/`-m1`: Insert a FAT-formatted microSD card into the PicoVerse 2350 card slot.
+5. For `-s1`/`-m1`: Insert a microSD card with a FAT16 partition up to 4 GB into the PicoVerse 2350 card slot.
 6. For `-s2`/`-m2`: Connect a USB flash drive to the USB-C port (via OTG adapter if needed).
 7. Insert the cartridge into the MSX and power on.
 
@@ -460,4 +468,4 @@ All paths are relative to `2350/software/loadrom.pio/`.
 The ATA front-end code (`sunrise_ide.c`) is shared between both platforms. The 2350 simply adds the SD backend as an alternative to USB.
 
 Author: Cristiano Goncalves  
-Last updated: 03/29/2026
+Last updated: 06/13/2026

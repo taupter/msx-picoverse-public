@@ -44,6 +44,7 @@ static void draw_menu_row(unsigned char row, ROMRecord *record, int selected);
 static void redefine_function_keys(void);
 static void switch_browse_source(unsigned char source_mode, const char *loading_text);
 static void switch_menu_source(unsigned char source_mode);
+static void print_chip_id_line(void);
 void msx_wait(uint16_t times_jiffy);
 void delay_ms(uint16_t milliseconds);
 
@@ -351,11 +352,7 @@ static void refresh_menu_state(const char *loading_text) {
         totalPages = 1;
     }
     currentPage = 1;
-    if (totalFiles == 0) {
-        currentIndex = 0;
-    } else if ((unsigned int)currentIndex >= totalFiles) {
-        currentIndex = (int)(totalFiles - 1);
-    }
+    currentIndex = 0;
     menu_ui_clear_last_line();
     displayMenu();
     if (menu_shortcut_selection == MENU_SHORTCUT_MICROSD && Peek(CTRL_STATUS) == CTRL_STATUS_SD_MISSING) {
@@ -482,7 +479,7 @@ static int parse_page_buffer(unsigned int page_index) {
     return 1;
 }
 
-static void load_page_records(unsigned int page_index) {
+void load_page_records(unsigned int page_index) {
     unsigned char *memory = (unsigned char *)MEMORY_START;
     unsigned int i;
 
@@ -667,6 +664,24 @@ static void switch_menu_source(unsigned char source_mode) {
             : menu_ui_status_text("Load Flash", "Loading from flash memory..."));
 }
 
+static void cycle_sd_partition(void) {
+    if (menu_shortcut_selection == MENU_SHORTCUT_MICROSD) {
+        Poke(CTRL_CMD, CMD_CYCLE_SD_PARTITION);
+        refresh_menu_state(menu_ui_status_text("Load SD", "Loading from microSD..."));
+    }
+}
+
+static void print_chip_id_line(void) {
+    char chip_id[CTRL_CHIP_ID_SIZE];
+    unsigned char i;
+
+    for (i = 0; i < CTRL_CHIP_ID_SIZE - 1; i++) {
+        chip_id[i] = *((char *)(CTRL_CHIP_ID_BASE + i));
+    }
+    chip_id[CTRL_CHIP_ID_SIZE - 1] = '\0';
+    printf("Chip ID: %s", chip_id);
+}
+
 void launch_wifi_config(void) {
     const char *message = menu_ui_status_text("Wi-Fi setup...", "Opening Wi-Fi setup...");
     unsigned char blink_state = 1;
@@ -704,10 +719,14 @@ static int wait_for_key_with_scroll(void)
         }
 
         // handle scrolling
-        if (totalFiles > 0 && !menu_message_row) {
+        if ((unsigned int)(*jiffyPtr - lastTick) >= scrollDelay) {
+            if (!use_80_columns && menu_shortcut_selection == MENU_SHORTCUT_MICROSD) {
+                menu_ui_clear_last_line();
+            }
+            if (totalFiles > 0 && !menu_message_row) {
             ROMRecord *record = &records[currentIndex % FILES_PER_PAGE];
             size_t len = strlen(record->Name);
-            if (!record_is_folder(record) && (use_80_columns ? (len >= name_col_width) : (len > name_col_width)) && (unsigned int)(*jiffyPtr - lastTick) >= scrollDelay) {
+            if (!record_is_folder(record) && (use_80_columns ? (len >= name_col_width) : (len > name_col_width))) {
                 int attempts = 0;
                 int printed = 0;
                 int lenInt = (int)len;
@@ -724,8 +743,9 @@ static int wait_for_key_with_scroll(void)
                     }
                     attempts++;
                 }
-                lastTick = *jiffyPtr;
             }
+            }
+            lastTick = *jiffyPtr;
         }
 
 
@@ -798,55 +818,49 @@ void helpMenu()
     Locate(0, 1);
     menu_ui_print_delimiter_line();
     Locate(0, 2);
-    printf("Navigation");
+    menu_ui_print_str_inverted_width("Navigation", 10);
     Locate(0, 3);
-    printf("UP/DOWN     Move selection");
+    printf("UP/DOWN - Move selection");
     Locate(0, 4);
-    printf("LEFT/RIGHT  Change page or option");
+    printf("LEFT/RIGHT - Change page or option");
     Locate(0, 5);
-    printf("ENTER Detail SPACE Run");
+    printf("ENTER - Detail  /  SPACE - Run");
     Locate(0, 6);
-    printf("ESC         Back or leave folder");
+    printf("ESC - Back or leave folder");
     Locate(0, 7);
-    printf("Sources");
+    menu_ui_print_str_inverted_width("Sources", 7);
     Locate(0, 8);
-    if (use_80_columns) {
-        printf("F1/1 Flash  F2/2 microSD  F3/3 File Hunter");
-    } else {
-        printf("F1/1 Flash F2/2 SD F3/3 File Hunter");
-    }
+    printf("F1 - Flash  F2 - SD  F3 - FileHunter");
     Locate(0, 9);
-    printf("F4          Wi-Fi setup");
+    printf("F4 - Wi-Fi setup");
     Locate(0, 10);
-    printf("List Commands");
+    menu_ui_print_str_inverted_width("List Commands", 13);
     Locate(0, 11);
-    printf("/           Search current list");
+    printf("/ - Search / P - Cycle SD partition");
     Locate(0, 12);
-    printf("H           Show this help");
+    printf("H - Show this help / D - Delete file");
     Locate(0, 13);
-    printf("C           Toggle 40/80 columns");
+    printf("C - Toggle 40/80 columns");
     Locate(0, 14);
-    printf("ROM Detail");
+    menu_ui_print_str_inverted_width("ROM Detail", 10);
     Locate(0, 15);
-    printf("UP/DOWN     Select Mapper, Audio, Action");
+    printf("UP/DOWN Select Mapper/Audio/PSG/Action");
     Locate(0, 16);
-    printf("LEFT/RIGHT  Change mapper/audio");
+    printf("LEFT/RIGHT Change mapper/audio/PSG");
     Locate(0, 17);
-    printf("ENTER       Run selected ROM");
+    printf("ENTER/SPACE Configure/Run selected ROM");
     Locate(0, 18);
-    printf("File Hunter");
+    menu_ui_print_str_inverted_width("File Hunter", 11);
     Locate(0, 19);
-    printf("ENTER/SPACE Open detail or download ROM");
+    printf("ENTER/SPACE Open detail/Download ROM");
     Locate(0, 20);
     printf("ESC         Return to Explorer menu");
     Locate(0, 21);
     menu_ui_print_delimiter_line();
     Locate(0, 22);
-    if (use_80_columns) {
-        printf("Press any key to return.");
-    } else {
-        printf("Any key returns.");
-    }
+    print_chip_id_line();
+    Locate(0, 23);
+    printf("Press any key to return.");
     (void)bios_chget();
     frame_rendered = 0;
 }
@@ -888,9 +902,21 @@ void navigateMenu()
         //printf("Key: %3d", key);
         //printf("Size: %05lu/15872", totalSize/1024);
         if (totalFiles == 0) {
-            key = (char)bios_chget();
+            key = (char)wait_for_key_with_scroll();
+            if (key == '1') {
+                switch_menu_source(SOURCE_MODE_FLASH);
+            }
+            if (key == '2') {
+                switch_menu_source(SOURCE_MODE_SD);
+            }
+            if (key == '3') {
+                switch_menu_source(explorer_fh_run() == SOURCE_MODE_SD ? SOURCE_MODE_SD : SOURCE_MODE_FLASH);
+            }
             if (key == MENU_KEY_F4_CONFIG) {
                 launch_wifi_config();
+            }
+            if (key == 'p' || key == 'P') {
+                cycle_sd_partition();
             }
             if (key == 'h' || key == 'H') {
                 helpMenu();
@@ -991,6 +1017,26 @@ void navigateMenu()
                     }
                     frame_rendered = 0;
                     displayMenu();
+                }
+                break;
+            case 80: // P
+            case 112: // p
+                cycle_sd_partition();
+                break;
+            case 68: // D
+            case 100: // d
+                if (menu_shortcut_selection == MENU_SHORTCUT_MICROSD && !menu_message_row && !record_is_folder(&records[currentIndex % FILES_PER_PAGE])) {
+                    menu_ui_print_last_line_text("Delete? Y/N");
+                    key = (char)bios_chget();
+                    if (key == 'y' || key == 'Y') {
+                        Poke(CTRL_QUERY_BASE + 0, (unsigned char)(currentIndex & 0xFF));
+                        Poke(CTRL_QUERY_BASE + 1, (unsigned char)((currentIndex >> 8) & 0xFF));
+                        Poke(CTRL_CMD, CMD_DELETE_SD_FILE);
+                        wait_command_with_blinking_status("Del...", 1000);
+                        refresh_menu_state(0);
+                    } else {
+                        menu_ui_clear_last_line();
+                    }
                 }
                 break;
             case 47: // / - Search

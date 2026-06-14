@@ -1,5 +1,8 @@
 # Change Log
 
+## PicoVerse 2350 Multirom v2.59
+- Refreshed the generated ROM mapper SHA1 database from the current openMSX `softwaredb.xml` and updated the shared generator to parse the new attribute-based XML format.
+
 ## PicoVerse 2350 Multirom v2.58
 
 - Bumped the multirom.pio version to v2.58.

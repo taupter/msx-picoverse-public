@@ -69,6 +69,59 @@ clear_rows_done:
     __endasm;
 }
 
+// blit_row_vram - Copy `width` bytes from a RAM buffer straight into the text
+// name table at the given row using BIOS LDIRVM, replacing per-character CHPUT. 
+static void blit_row_vram(unsigned char row, const char *src, unsigned char width) __naked
+{
+    (void)row;
+    (void)src;
+    (void)width;
+    __asm
+    ld      hl, #2
+    add     hl, sp
+    ld      b, (hl)        ; B = row
+    inc     hl
+    ld      e, (hl)        ; src low
+    inc     hl
+    ld      d, (hl)        ; DE = src
+    inc     hl
+    ld      c, (hl)        ; C = width
+
+    push    de             ; save src
+    push    bc             ; save row(B) + width(C)
+
+    ; dest = TXTNAM + row * width
+    ld      l, c           ; HL = width
+    ld      h, #0
+    ex      de, hl         ; DE = width
+    ld      hl, #0
+    ld      a, b           ; A = row
+    or      a
+    jr      z, blit_addr_done
+
+blit_addr_loop:
+    add     hl, de
+    dec     a
+    jr      nz, blit_addr_loop
+
+blit_addr_done:
+    ld      de, (#BIOS_TXTNAM)
+    add     hl, de         ; HL = dest VRAM address
+    ex      de, hl         ; DE = dest VRAM
+
+    pop     bc             ; B = row, C = width
+    ld      b, #0          ; BC = width (length)
+    pop     hl             ; HL = src
+
+    ld      iy,(#BIOS_EXPTBL-1)
+    push    ix
+    ld      ix,#BIOS_LDIRVM
+    call    BIOS_CALSLT
+    pop     ix
+    ret
+    __endasm;
+}
+
 int menu_ui_supports_80_column_mode(void) {
     return msx_version >= 1;
 }
@@ -220,39 +273,32 @@ static unsigned char menu_ui_print_shortcut_token(const char *token, int selecte
     return len;
 }
 
+static const char *menu_ui_shortcut_token(unsigned char index) {
+    if (use_80_columns) {
+        switch (index) {
+            case 0:  return "[F1 - Flash]";
+            case 1:  return "[F2 - MicroSD]";
+            default: return "[F3 - File Hunter]";
+        }
+    }
+    switch (index) {
+        case 0:  return "[F1-FL]";
+        case 1:  return "[F2-SD]";
+        default: return "[F3-FH]";
+    }
+}
+
 static unsigned char menu_ui_shortcuts_length(void) {
-    const char *tokens_80[] = {
-        "[F1 - Flash]",
-        "[F2 - MicroSD]",
-        "[F3 - File Hunter]"
-    };
-    const char *tokens_40[] = {
-        "[F1-FL]",
-        "[F2-SD]",
-        "[F3-FH]"
-    };
-    const char **tokens = use_80_columns ? tokens_80 : tokens_40;
     unsigned char total_len = 0;
 
     for (unsigned char i = 0; i < 3; i++) {
-        total_len = (unsigned char)(total_len + (unsigned char)strlen(tokens[i]));
+        total_len = (unsigned char)(total_len + (unsigned char)strlen(menu_ui_shortcut_token(i)));
     }
 
     return (unsigned char)(total_len + 2);
 }
 
 static unsigned char menu_ui_render_shortcuts(unsigned char content_width) {
-    const char *tokens_80[] = {
-        "[F1 - Flash]",
-        "[F2 - MicroSD]",
-        "[F3 - File Hunter]"
-    };
-    const char *tokens_40[] = {
-        "[F1-FL]",
-        "[F2-SD]",
-        "[F3-FH]"
-    };
-    const char **tokens = use_80_columns ? tokens_80 : tokens_40;
     unsigned char total_len = 0;
     unsigned char col = 0;
 
@@ -263,7 +309,7 @@ static unsigned char menu_ui_render_shortcuts(unsigned char content_width) {
     }
 
     for (unsigned char i = 0; i < 3 && col < content_width; i++) {
-        unsigned char token_len = menu_ui_print_shortcut_token(tokens[i], menu_shortcut_selection == (unsigned char)(i + 1));
+        unsigned char token_len = menu_ui_print_shortcut_token(menu_ui_shortcut_token(i), menu_shortcut_selection == (unsigned char)(i + 1));
         col = (unsigned char)(col + token_len);
         if (i < 2 && col < content_width) {
             PrintChar(' ');
@@ -278,6 +324,7 @@ static void menu_ui_render_last_line(const char *left_text) {
     unsigned char width = menu_ui_row_width();
     unsigned char content_width = (unsigned char)(width - 2);
     const char *actions;
+    char stop_char = 0;
     unsigned char right_len;
     unsigned char right_start = 0;
     unsigned char col = 0;
@@ -286,6 +333,21 @@ static void menu_ui_render_last_line(const char *left_text) {
     actions = use_80_columns ?
             "[/ - Search] [  H - Help  ] [F4 - WiFi Config]" :
             "[/-Fnd] [H-Hlp] [F4-WF]";
+    if (!left_text && menu_shortcut_selection == MENU_SHORTCUT_MICROSD) {
+        left_text = (const char *)(CTRL_SD_PARTITION_INFO_BASE + 2);
+        if (!use_80_columns) {
+            const char *free_text = left_text;
+            while (*free_text && *free_text != '(') {
+                free_text++;
+            }
+            if (*free_text == '(' && (*((volatile unsigned char *)JIFFY) & 0x80)) {
+                left_text = free_text + 1;
+                stop_char = ')';
+            } else {
+                stop_char = '(';
+            }
+        }
+    }
     
 
     right_len = (unsigned char)strlen(actions);
@@ -296,7 +358,10 @@ static void menu_ui_render_last_line(const char *left_text) {
         right_start = (unsigned char)(content_width - right_len);
     }
 
-    while (left_text && *left_text && col < right_start) {
+    while (left_text && *left_text && *left_text != stop_char && col < right_start) {
+        if (stop_char == '(' && *left_text == ' ' && left_text[1] == '(') {
+            break;
+        }
         PrintChar((unsigned char)*left_text++);
         col++;
     }
@@ -350,7 +415,7 @@ void menu_ui_blink_last_line(const char *text, unsigned char *visible, unsigned 
         if (*visible) {
             menu_ui_print_last_line_text(text);
         } else {
-            menu_ui_clear_last_line();
+            menu_ui_render_last_line("");
         }
     }
 }
@@ -387,36 +452,42 @@ void menu_ui_print_str_inverted_width(const char *str, unsigned char width)
 
 void menu_ui_render_selectable_line(unsigned char row, const char *text, int selected) {
     unsigned char width = menu_ui_row_width();
-    unsigned char content_width = width > 3 ? (unsigned char)(width - 3) : 0;
     char buffer[81];
     unsigned char len = 0;
+    unsigned char content_width;
+    unsigned char selected_width;
+    unsigned char i;
 
-    if (content_width > 80) {
-        content_width = 80;
+    if (width > 80) {
+        width = 80;
     }
+    content_width = width > 1 ? (unsigned char)(width - 1) : 0;
+    selected_width = width > 3 ? (unsigned char)(width - 3) : content_width;
 
     if (text) {
         len = (unsigned char)strlen(text);
         if (len > content_width) {
             len = content_width;
         }
-        memcpy(buffer, text, len);
     }
-    for (unsigned char i = len; i < content_width; i++) {
-        buffer[i] = ' ';
-    }
-    buffer[content_width] = '\0';
 
-    Locate(0, row);
+    // Build the full row (selection marker + content) in RAM, applying the
+    // inverted-glyph offset (+96) for the selected row, then write it to VRAM
+    // in a single block transfer instead of one CHPUT per column.
+    buffer[0] = selected ? '>' : ' ';
     if (selected) {
-        PrintChar('>');
-        if (content_width > 0) {
-            menu_ui_print_str_inverted_width(buffer, content_width);
+        for (i = 0; i < selected_width; i++) {
+            unsigned char ch = (i < len) ? (unsigned char)text[i] : ' ';
+            buffer[1 + i] = (char)(ch + 96);
+        }
+        for (i = selected_width; i < content_width; i++) {
+            buffer[1 + i] = ' ';
         }
     } else {
-        PrintChar(' ');
-        for (unsigned char i = 0; i < content_width; i++) {
-            PrintChar((unsigned char)buffer[i]);
+        for (i = 0; i < content_width; i++) {
+            buffer[1 + i] = (i < len) ? text[i] : ' ';
         }
     }
+
+    blit_row_vram(row, buffer, width);
 }

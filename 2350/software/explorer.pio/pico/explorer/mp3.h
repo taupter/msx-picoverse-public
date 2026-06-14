@@ -31,6 +31,12 @@ bool mp3_core1_has_stopped(void);
 struct audio_buffer_pool *mp3_take_i2s_audio_pool(void);
 struct audio_buffer_pool *mp3_force_i2s_handoff_from_core0(void);
 
+// Hand a previously taken I2S pool back to the MP3/WAV core so its next
+// mp3_init() reuses the live pico_audio_i2s pipeline instead of re-running
+// audio_i2s_setup() on the singleton (used when WAVEGAME relaunches the core
+// after a menu MP3/WAV played and the pool was handed off).
+void mp3_adopt_i2s_audio_pool(struct audio_buffer_pool *pool);
+
 void mp3_deinit(void);
 
 void mp3_set_external_buffer(uint8_t *buffer, size_t size);
@@ -53,6 +59,8 @@ void mp3_wavegame_resume_previous(void);
 #define MP3_CMD_RESUME      5
 #define MP3_CMD_TOGGLE_MUTE 6
 #define MP3_CMD_PLAY_LOOP   7
+#define MP3_CMD_NEXT        8
+#define MP3_CMD_PREVIOUS    9
 
 // Play modes for auto-advance
 #define MP3_PLAY_MODE_SINGLE 0

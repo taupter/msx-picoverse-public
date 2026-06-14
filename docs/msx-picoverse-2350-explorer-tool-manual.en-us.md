@@ -14,7 +14,7 @@ Use the Explorer tool when you want a menu that loads ROMs from flash, microSD, 
 - Windows PC (the distributed binary is a Windows console app).
 - A folder containing the `.ROM` files you want stored in flash.
 - A PicoVerse 2350 cartridge and USB-C cable.
-- Optional: a microSD card (for additional ROMs and MP3 files on SD).
+- Optional: a microSD card (for additional ROMs, MP3/WAV files, and Sunrise Nextor SD storage).
 - Optional but required for File Hunter: an ESP-01 / ESP8266 module with compatible firmware, installed on the PicoVerse 2350 WiFi header and configured for your wireless network.
 
 ## Limits
@@ -89,7 +89,10 @@ Notes:
 
 Explorer can load ROMs from a microSD card in addition to flash. ROMs on SD are merged into the menu list and marked with the "SD" source tag. You can organize your ROM collection into folders for easier navigation.
 
-- Format the microSD card as FAT/FAT32.
+- Format Explorer browsing partitions as FAT16, FAT32, or exFAT.
+- Explorer can enumerate supported primary and logical partitions. Press `P` while in the `F2` microSD screen to cycle between supported partitions.
+- The selected Explorer browsing partition is saved in `/PICOVERSE.PVC` on the first supported partition and restored on later boots.
+- The lower status area shows the selected partition label and free MB. In 40-column mode, the label and free-space amount alternate so both remain readable.
 - Copy `.ROM` and `.MP3` files to the root of the card or organize them in subfolders for better organization.
 - SD ROMs appear in the menu with the source label "SD".
 - MP3 files appear in the menu with the "MP3" type label and open the MP3 player screen.
@@ -97,6 +100,12 @@ Explorer can load ROMs from a microSD card in addition to flash. ROMs on SD are 
 - File Hunter downloads are saved directly to the root of the microSD card and then appear as normal SD ROM files in the Explorer root list.
 - Folders are displayed in the menu and can be entered to browse their contents.
 - The special ".." entry appears when inside a folder, allowing you to navigate back to the parent directory.
+
+### Sunrise Nextor SD partitions in Explorer
+
+Sunrise Nextor SYSTEM entries use stricter partition rules than the normal `F2` microSD browser. Nextor SD storage is offered only for FAT16 microSD partitions up to 4 GB. FAT32 and exFAT partitions remain usable for Explorer file browsing, ROM loading, MP3/WAV playback, and File Hunter downloads, but they are not offered to Sunrise Nextor SYSTEM ROMs.
+
+When a Sunrise Nextor SYSTEM entry is opened in the ROM screen, Explorer shows the compatible FAT16 partition label in the `SD Part` option. If more than one compatible FAT16 partition exists, use Left/Right on `SD Part` to choose the partition before running. The selected partition is saved in that ROM's `.PVC` options file, so each Sunrise Nextor SYSTEM entry can remember its own storage partition.
 
 ### microSD limitations
 
@@ -125,6 +134,8 @@ For the best experience with very large ROM collections, consider organizing ROM
 - **F3**: Open the integrated File Hunter browser.
 - **F4**: Open WiFi configuration.
 - **H**: Show help screen.
+- **P**: In the `F2` microSD screen, cycle through supported FAT16, FAT32, and exFAT partitions. The selected browsing partition is saved in `/PICOVERSE.PVC`.
+- **D**: In the `F2` microSD screen, delete the selected file after a `Y/N` confirmation. This command is valid for files only; folders are protected.
 - **/**: Search ROM names. Type a partial name and press Enter to jump to the first matching ROM.
 - **C**: Toggle between 40-column and 80-column layouts when your MSX supports it (auto-detects 80-column capable machines and defaults to 80 columns unless forced otherwise).
 
@@ -148,7 +159,7 @@ The File Hunter integration is inspired by NataliaPC's MSX File Hunter Browser p
 
 - Install an ESP-01 / ESP8266 module on the PicoVerse 2350 WiFi header.
 - Use ESP firmware compatible with the ESP8266P / memio command protocol used by PicoVerse.
-- Insert a FAT/FAT32 microSD card. File Hunter downloads are saved to the card root.
+- Insert a FAT16, FAT32, or exFAT microSD browsing partition. File Hunter downloads are saved to the selected Explorer partition root.
 - If the card has not been mounted in the current session, press `F2` once to open the microSD list before downloading from File Hunter.
 - Configure WiFi from the Explorer menu if the ESP module has not already been configured for your network.
 
@@ -249,8 +260,9 @@ Selecting a ROM entry opens a ROM details screen before running:
 
 - **Mapper**: Shows the detected mapper (for SD ROMs) and allows manual override using Left/Right.
 - **Audio**: Choose an audio profile with Left/Right (None, SCC, SCC+, external SCC/SCC+, Dual PSG, MSX-MUSIC, SFG01/SFG05). The menu only cycles through profiles supported by the selected ROM mapper.
-- **PSG**: Choose whether to mirror the MSX primary PSG writes through the cartridge DAC. The default is No.
+- **PSG**: Choose whether to mirror the MSX primary PSG writes through the cartridge DAC. The default is Yes unless saved `.PVC` options override it.
 - **Wifi**: For Sunrise Nextor entries only, choose whether to expose the ESP8266P WiFi BIOS before running. The default is No.
+- **SD Part**: For Sunrise Nextor SD entries only, choose the FAT16 partition up to 4 GB that Nextor will boot from. The selected partition is saved with the ROM options.
 - **Action: Run**: Press Enter to launch the ROM.
 - **Esc**: Return to the menu without running.
 
@@ -270,7 +282,7 @@ If a ROM mapper is unknown, the screen will briefly show "Detecting..." while th
 
 Explorer treats audio profiles as mutually exclusive: a ROM can run with no extra audio, SCC, SCC+, external SCC/SCC+, Dual PSG, MSX-MUSIC, or YM2151/SFG, but not multiple cartridge audio engines at the same time.
 
-The **PSG** field is independent from the Audio profile. When set to **Yes**, Explorer mirrors writes to the primary MSX PSG ports `0xA0` and `0xA1`, generates matching AY/YM audio on the Pico, and sends that audio through the cartridge I2S DAC. The real MSX PSG is not disabled; the option provides a DAC-side copy of the main PSG. It can be combined with **None**, **SCC**, **SCC+**, external SCC/SCC+, **Dual PSG**, **MSX-MUSIC**, or **YM2151 (SFG01/SFG05)**, so PSG music can be heard through the cartridge DAC together with the selected cartridge audio profile. When **Dual PSG** and **PSG: Yes** are enabled together, Explorer routes Dual PSG to the left channel and the mirrored primary PSG to the right channel for a stereo split. The option defaults to **No** each time the ROM screen is opened.
+The **PSG** field is independent from the Audio profile. When set to **Yes**, Explorer mirrors writes to the primary MSX PSG ports `0xA0` and `0xA1`, generates matching AY/YM audio on the Pico, and sends that audio through the cartridge I2S DAC. The real MSX PSG is not disabled; the option provides a DAC-side copy of the main PSG. It can be combined with **None**, **SCC**, **SCC+**, external SCC/SCC+, **Dual PSG**, **MSX-MUSIC**, or **YM2151 (SFG01/SFG05)**, so PSG music can be heard through the cartridge DAC together with the selected cartridge audio profile. When **Dual PSG** and **PSG: Yes** are enabled together, Explorer routes Dual PSG to the left channel and the mirrored primary PSG to the right channel for a stereo split. The option defaults to **Yes** unless saved `.PVC` options override it.
 
 The SCC and SCC+ audio profiles work with ROMs using the Konami SCC mapper (`KonSCC`) or the Manbow2 mapper (`MANBW2`). When a ROM is detected as `KonSCC` or `MANBW2`, the ROM screen pre-selects **SCC** in the Audio field; you can change it to None, SCC+, or one of the external SCC profiles before pressing Run. Dual PSG and MSX-MUSIC are not offered for these mappers because the cartridge audio slot is reserved for SCC/SCC+.
 
@@ -322,4 +334,4 @@ The SFG register window is memory-mapped, following the SFG layout used by emula
 - openMSX Yamaha SFG implementation, used as an emulator behavior reference: https://github.com/openMSX/openMSX
 
 Author: Cristiano Goncalves
-Last updated: 06/04/2026
+Last updated: 06/13/2026
