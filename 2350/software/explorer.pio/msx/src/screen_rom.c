@@ -90,11 +90,13 @@ static unsigned char record_supports_external_scc_audio(const ROMRecord *record)
 }
 
 static unsigned char record_supports_dual_psg(const ROMRecord *record) {
-    return !record_is_folder(record) && (!record_is_system_rom(record) || record_is_sunrise_system_rom(record)) && !record_supports_scc_audio(record);
+    return record_supports_external_scc_audio(record) && !record_supports_scc_audio(record);
 }
 
 static unsigned char record_supports_msx_music(const ROMRecord *record) {
-    return !record_is_folder(record) && (!record_is_system_rom(record) || record_is_sunrise_system_rom(record));
+    /* Base support shared with YM2151/SFG. YM2413/FM-PAC (MSX-MUSIC) additionally
+       excludes the Sunrise 1MB-mapper options in audio_profile_is_supported(). */
+    return record_supports_external_scc_audio(record);
 }
 
 static void send_detect_mapper(unsigned int index) {
@@ -890,7 +892,9 @@ static unsigned char audio_profile_is_supported(const ROMRecord *record, unsigne
         return record_supports_dual_psg(record);
     }
     if (audio_profile == AUDIO_PROFILE_MSX_MUSIC) {
-        return record_supports_msx_music(record);
+        /* YM2413/FM-PAC excludes the Sunrise 1MB-mapper options (codes 11/16). */
+        unsigned char mc = record_mapper_code(record->Mapper);
+        return record_supports_msx_music(record) && mc != 11 && mc != 16;
     }
     return 0;
 }

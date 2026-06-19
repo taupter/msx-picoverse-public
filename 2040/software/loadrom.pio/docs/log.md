@@ -3,7 +3,7 @@
 ## PicoVerse 2040 Loadrom v2.60
 
 - Refreshed the generated ROM mapper SHA1 database from the current openMSX `softwaredb.xml` and updated the generator to parse the new attribute-based XML format.
-- 
+  
 ## PicoVerse 2040 Loadrom v2.59
 
 - Bumped the loadrom.pio version to v2.59.

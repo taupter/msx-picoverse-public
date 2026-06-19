@@ -737,6 +737,34 @@ static bool main_psg_ready = false;
 static bool main_psg_audio_started = false;
 static bool main_psg_core1_services_io = true;
 
+// Lock-free single-producer/single-consumer ring used when core0 owns the MSX
+// I/O write FIFO (Sunrise mapper mode). core0 pushes primary-PSG port writes
+// here without taking main_psg_lock so it can never stall and drop the mapper
+// segment-register writes (0xFC-0xFF) that share the lossy I/O capture FIFO.
+// core1 drains the ring and applies the PSG writes while producing audio.
+#define MAIN_PSG_WRITE_RING_SIZE 256u
+#define MAIN_PSG_WRITE_RING_MASK (MAIN_PSG_WRITE_RING_SIZE - 1u)
+static volatile uint16_t main_psg_write_ring[MAIN_PSG_WRITE_RING_SIZE];
+static volatile uint32_t main_psg_write_ring_head; // written by producer (core0)
+static volatile uint32_t main_psg_write_ring_tail; // written by consumer (core1)
+
+// Same decoupling for the secondary (Dual PSG) and MSX-MUSIC (YM2413) audio
+// register writes: in Sunrise mapper mode core0 must never block on an audio
+// spinlock while it owns the lossy MSX I/O write FIFO, otherwise queued mapper
+// segment writes (0xFC-0xFF) get dropped. core0 enqueues these chip writes and
+// core1 applies them next to audio generation.
+#define DUAL_PSG_WRITE_RING_SIZE 256u
+#define DUAL_PSG_WRITE_RING_MASK (DUAL_PSG_WRITE_RING_SIZE - 1u)
+static volatile uint16_t dual_psg_write_ring[DUAL_PSG_WRITE_RING_SIZE];
+static volatile uint32_t dual_psg_write_ring_head; // written by producer (core0)
+static volatile uint32_t dual_psg_write_ring_tail; // written by consumer (core1)
+
+#define MSX_MUSIC_WRITE_RING_SIZE 256u
+#define MSX_MUSIC_WRITE_RING_MASK (MSX_MUSIC_WRITE_RING_SIZE - 1u)
+static volatile uint16_t msx_music_write_ring[MSX_MUSIC_WRITE_RING_SIZE];
+static volatile uint32_t msx_music_write_ring_head; // written by producer (core0)
+static volatile uint32_t msx_music_write_ring_tail; // written by consumer (core1)
+
 typedef enum {
     SYSTEM_AUDIO_PROFILE_NONE = 0,
     SYSTEM_AUDIO_PROFILE_MAIN_PSG,
@@ -866,8 +894,9 @@ static audio_mode_t resolve_audio_mode(uint8_t mapper, uint8_t requested_profile
             return AUDIO_MODE_SCC_EXTERNAL;
         if (requested_profile == AUDIO_PROFILE_DUAL_PSG)
             return AUDIO_MODE_DUAL_PSG;
-        if (requested_profile == AUDIO_PROFILE_MSX_MUSIC)
-            return AUDIO_MODE_MSX_MUSIC;
+        if (requested_profile == AUDIO_PROFILE_MSX_MUSIC &&
+            mapper != MAPPER_SUNRISE_MAPPER_USB && mapper != MAPPER_SUNRISE_MAPPER_SD)
+            return AUDIO_MODE_MSX_MUSIC; // YM2413/FM-PAC only for non-mapper Sunrise Nextor options
         if (requested_profile == AUDIO_PROFILE_YM2151_SFG05)
             return AUDIO_MODE_YM2151_SFG05;
         if (requested_profile == AUDIO_PROFILE_YM2151_SFG01)
@@ -3415,12 +3444,49 @@ static void __not_in_flash_func(dual_psg_init)(void)
     dual_psg_ready = true;
 }
 
+static inline void __not_in_flash_func(dual_psg_write_ring_push)(uint8_t port, uint8_t data)
+{
+    uint32_t head = dual_psg_write_ring_head;
+    uint32_t next = (head + 1u) & DUAL_PSG_WRITE_RING_MASK;
+    if (next == dual_psg_write_ring_tail)
+        return; // ring full: drop write (audio only; mapper state unaffected)
+    dual_psg_write_ring[head] = (uint16_t)(((uint16_t)port << 8) | data);
+    __dmb();
+    dual_psg_write_ring_head = next;
+}
+
+static inline void __not_in_flash_func(dual_psg_drain_write_ring)(void)
+{
+    if (!dual_psg_ready)
+        return;
+    uint32_t tail = dual_psg_write_ring_tail;
+    while (tail != dual_psg_write_ring_head)
+    {
+        __dmb();
+        uint16_t entry = dual_psg_write_ring[tail];
+        uint8_t port = (uint8_t)(entry >> 8);
+        uint8_t data = (uint8_t)(entry & 0xFFu);
+        uint32_t save = spin_lock_blocking(dual_psg_lock);
+        PSG_writeIO(&psg_instance, port, data);
+        spin_unlock(dual_psg_lock, save);
+        tail = (tail + 1u) & DUAL_PSG_WRITE_RING_MASK;
+    }
+    dual_psg_write_ring_tail = tail;
+}
+
 static inline bool __not_in_flash_func(dual_psg_handle_io_write)(uint8_t port, uint8_t data)
 {
     if (!dual_psg_ready)
         return false;
     if (port == PSG_PORT_REG || port == PSG_PORT_DATA)
     {
+        if (!dual_psg_core1_services_io)
+        {
+            // core0 owns the MSX I/O write FIFO (mapper mode): defer to core1
+            // through the lock-free ring instead of taking dual_psg_lock.
+            dual_psg_write_ring_push(port, data);
+            return true;
+        }
         uint32_t save = spin_lock_blocking(dual_psg_lock);
         PSG_writeIO(&psg_instance, port, data);
         spin_unlock(dual_psg_lock, save);
@@ -3456,12 +3522,48 @@ static void __not_in_flash_func(main_psg_init)(uint8_t quality)
     main_psg_init_with_io(quality, true);
 }
 
+static inline void __not_in_flash_func(main_psg_write_ring_push)(uint8_t port, uint8_t data)
+{
+    uint32_t head = main_psg_write_ring_head;
+    uint32_t next = (head + 1u) & MAIN_PSG_WRITE_RING_MASK;
+    if (next == main_psg_write_ring_tail)
+        return; // ring full: drop PSG write (audio only; mapper state unaffected)
+    main_psg_write_ring[head] = (uint16_t)(((uint16_t)port << 8) | data);
+    __dmb();
+    main_psg_write_ring_head = next;
+}
+
+static inline void __not_in_flash_func(main_psg_drain_write_ring)(void)
+{
+    uint32_t tail = main_psg_write_ring_tail;
+    while (tail != main_psg_write_ring_head)
+    {
+        __dmb();
+        uint16_t entry = main_psg_write_ring[tail];
+        uint8_t port = (uint8_t)(entry >> 8);
+        uint8_t data = (uint8_t)(entry & 0xFFu);
+        uint32_t save = spin_lock_blocking(main_psg_lock);
+        PSG_writeIO(&main_psg_instance, port, data);
+        spin_unlock(main_psg_lock, save);
+        tail = (tail + 1u) & MAIN_PSG_WRITE_RING_MASK;
+    }
+    main_psg_write_ring_tail = tail;
+}
+
 static inline bool __not_in_flash_func(main_psg_handle_io_write)(uint8_t port, uint8_t data)
 {
     if (!main_psg_ready)
         return false;
     if (port == MAIN_PSG_PORT_REG || port == MAIN_PSG_PORT_DATA)
     {
+        if (!main_psg_core1_services_io)
+        {
+            // Called from core0 while it owns the MSX I/O write FIFO (mapper mode).
+            // Hand the write off to core1 through the lock-free ring instead of
+            // taking main_psg_lock, so core0 never stalls and drops mapper writes.
+            main_psg_write_ring_push(port, data);
+            return true;
+        }
         uint32_t save = spin_lock_blocking(main_psg_lock);
         PSG_writeIO(&main_psg_instance, port, data);
         spin_unlock(main_psg_lock, save);
@@ -3472,8 +3574,16 @@ static inline bool __not_in_flash_func(main_psg_handle_io_write)(uint8_t port, u
 
 static inline void __not_in_flash_func(main_psg_service_io)(void)
 {
-    if (!main_psg_ready || !main_psg_core1_services_io)
+    if (!main_psg_ready)
         return;
+
+    if (!main_psg_core1_services_io)
+    {
+        // core0 owns the MSX I/O write FIFO (mapper mode); apply the PSG writes
+        // it queued for us here on core1, next to audio generation.
+        main_psg_drain_write_ring();
+        return;
+    }
 
     uint16_t io_addr;
     uint8_t io_data;
@@ -3489,8 +3599,17 @@ static inline void __not_in_flash_func(main_psg_service_io)(void)
 
 static inline void __not_in_flash_func(dual_psg_service_io)(void)
 {
-    if (!dual_psg_ready || !dual_psg_core1_services_io)
+    if (!dual_psg_ready)
         return;
+
+    if (!dual_psg_core1_services_io)
+    {
+        // core0 owns the MSX I/O write FIFO (mapper mode); apply the writes it
+        // queued for the mirrored PSG and the secondary PSG here on core1.
+        main_psg_drain_write_ring();
+        dual_psg_drain_write_ring();
+        return;
+    }
 
     uint16_t io_addr;
     uint8_t io_data;
@@ -3962,7 +4081,9 @@ static inline void __not_in_flash_func(system_audio_service_core1)(void)
         break;
     case SYSTEM_AUDIO_PROFILE_YM2151_SFG05:
     case SYSTEM_AUDIO_PROFILE_YM2151_SFG01:
-        ym2151_audio_service_buffer(false);
+        // service_psg_io drains the primary-PSG ring core0 queued in mapper mode
+        // (no-op when PSG Mirror is off), keeping mirrored PSG audio alive.
+        ym2151_audio_service_buffer(true);
         break;
     case SYSTEM_AUDIO_PROFILE_SCC_EXTERNAL:
     case SYSTEM_AUDIO_PROFILE_SCC_PLUS_EXTERNAL:
@@ -4063,10 +4184,50 @@ static inline int16_t __not_in_flash_func(msx_music_calc_sample)(void)
     return msx_music_soft_limit(filtered << MSX_MUSIC_VOLUME_SHIFT);
 }
 
+static inline void __not_in_flash_func(msx_music_write_ring_push)(uint8_t port, uint8_t data)
+{
+    uint32_t head = msx_music_write_ring_head;
+    uint32_t next = (head + 1u) & MSX_MUSIC_WRITE_RING_MASK;
+    if (next == msx_music_write_ring_tail)
+        return; // ring full: drop write (audio only; mapper state unaffected)
+    msx_music_write_ring[head] = (uint16_t)(((uint16_t)port << 8) | data);
+    __dmb();
+    msx_music_write_ring_head = next;
+}
+
+static inline void __not_in_flash_func(msx_music_drain_write_ring)(void)
+{
+    if (!msx_music_ready)
+        return;
+    uint32_t tail = msx_music_write_ring_tail;
+    while (tail != msx_music_write_ring_head)
+    {
+        __dmb();
+        uint16_t entry = msx_music_write_ring[tail];
+        uint8_t port = (uint8_t)(entry >> 8);
+        uint8_t data = (uint8_t)(entry & 0xFFu);
+        uint32_t save = spin_lock_blocking(msx_music_lock);
+        OPLL_writeIO(msx_music_instance, port, data);
+        spin_unlock(msx_music_lock, save);
+        tail = (tail + 1u) & MSX_MUSIC_WRITE_RING_MASK;
+    }
+    msx_music_write_ring_tail = tail;
+}
+
 static inline void __not_in_flash_func(msx_music_write_io)(uint8_t port, uint8_t data)
 {
     if (!msx_music_ready)
         return;
+
+    if (!msx_music_core1_services_io)
+    {
+        // core0 owns the MSX I/O write FIFO (mapper mode): defer to core1 through
+        // the lock-free ring instead of taking msx_music_lock. This also covers
+        // the FM-PAC memory-mapped register writes (0x7FF4/0x7FF5) dispatched
+        // from core0 in the Sunrise + FM-PAC loaders.
+        msx_music_write_ring_push(port, data);
+        return;
+    }
 
     uint32_t save = spin_lock_blocking(msx_music_lock);
     OPLL_writeIO(msx_music_instance, port, data);
@@ -4075,8 +4236,17 @@ static inline void __not_in_flash_func(msx_music_write_io)(uint8_t port, uint8_t
 
 static inline void __not_in_flash_func(msx_music_service_io)(void)
 {
-    if (!msx_music_ready || !msx_music_core1_services_io)
+    if (!msx_music_ready)
         return;
+
+    if (!msx_music_core1_services_io)
+    {
+        // core0 owns the MSX I/O write FIFO (mapper mode); apply the writes it
+        // queued for the mirrored PSG and the YM2413 here on core1.
+        main_psg_drain_write_ring();
+        msx_music_drain_write_ring();
+        return;
+    }
 
     uint16_t io_addr;
     uint8_t io_data;
