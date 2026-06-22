@@ -1,5 +1,13 @@
 # Change Log
 
+## PicoVerse 2350 Multirom v2.61
+- Bumped the multirom.pio version to v2.61.
+- Improved MSX MultiROM menu drawing by rendering ROM rows with a single VRAM block write, preserving long-name scrolling from the first visible character.
+- Fixed short mapper labels in the optimized row renderer so they pad with spaces instead of leaking stray characters at the end of the line.
+- Reduced page-navigation redraws so page changes update only the ROM rows and footer instead of repainting the static title and separator lines.
+- Fixed the MultiROM tool mapper detector so 8KB ROMs do not read past the ROM buffer when building images with embedded Sunrise/mapper options.
+- Frogger - Konami (1983) [RC-704] rom on the MSX1 Konami compilation had a bug and was replaced by a working dump from File Hunter.
+
 ## PicoVerse 2350 Multirom v2.59
 - Refreshed the generated ROM mapper SHA1 database from the current openMSX `softwaredb.xml` and updated the shared generator to parse the new attribute-based XML format.
 

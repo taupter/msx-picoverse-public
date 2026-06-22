@@ -24,9 +24,59 @@
 #define MENU_HLINE_SOURCE_CHAR 0x17
 #define MENU_HLINE_PRINT_CHAR  0x7E
 #define MENU_SEPARATOR_WIDTH   37
+#define MENU_ROW_WIDTH         40
+#define MENU_NAME_WIDTH        24
+#define MENU_SIZE_COL          26
+#define MENU_MAPPER_COL        31
 
 static void copy_separator_char_pattern(void);
 static void print_separator_line(void);
+static void render_menu_row(unsigned int recordIndex, unsigned char row, unsigned char selected);
+static int render_menu_row_scrolled(unsigned int recordIndex, unsigned char row, int startPos);
+static void clear_menu_row(unsigned char row);
+static void render_menu_page(void);
+
+static void blit_row_vram(unsigned char row, const char *src) __naked
+{
+    (void)row;
+    (void)src;
+    __asm
+    ld      hl, #2
+    add     hl, sp
+    ld      b, (hl)        ; B = row
+    inc     hl
+    ld      e, (hl)        ; src low
+    inc     hl
+    ld      d, (hl)        ; DE = src
+
+    push    de
+
+    ld      de, #MENU_ROW_WIDTH
+    ld      hl, #0
+    ld      a, b
+    or      a
+    jr      z, blit_addr_done
+
+blit_addr_loop:
+    add     hl, de
+    dec     a
+    jr      nz, blit_addr_loop
+
+blit_addr_done:
+    ld      de, (#BIOS_TXTNAM)
+    add     hl, de
+    ex      de, hl         ; DE = destination VRAM address
+    pop     hl             ; HL = source RAM address
+    ld      bc, #MENU_ROW_WIDTH
+
+    ld      iy,(#BIOS_EXPTBL-1)
+    push    ix
+    ld      ix,#BIOS_LDIRVM
+    call    BIOS_CALSLT
+    pop     ix
+    ret
+    __endasm;
+}
 
 // read_ulong - Read a 4-byte value from the memory area
 // This function will read a 4-byte value from the memory area pointed by ptr and return the value as an unsigned long
@@ -170,6 +220,110 @@ static void print_separator_line(void)
     for (unsigned char i = 0; i < MENU_SEPARATOR_WIDTH; i++) {
         PrintChar(MENU_HLINE_PRINT_CHAR);
     }
+}
+
+static void fill_menu_row(char *buffer)
+{
+    for (unsigned char i = 0; i < MENU_ROW_WIDTH; i++) {
+        buffer[i] = ' ';
+    }
+}
+
+static void copy_menu_text(char *dst, const char *src, unsigned char width, unsigned char inverted)
+{
+    for (unsigned char i = 0; i < width; i++) {
+        unsigned char ch = src[i] ? (unsigned char)src[i] : ' ';
+        dst[i] = (char)(inverted ? (unsigned char)(ch + 96) : ch);
+    }
+}
+
+static int copy_menu_text_window(char *dst, const char *src, size_t len, int startPos)
+{
+    int hasVisible = 0;
+    int base = startPos % (int)len;
+
+    if (base < 0) {
+        base += (int)len;
+    }
+
+    for (unsigned char i = 0; i < MENU_NAME_WIDTH; i++) {
+        unsigned char ch = (unsigned char)src[(base + (int)i) % (int)len];
+        dst[i] = (char)(ch + 96);
+        if (ch != ' ') {
+            hasVisible = 1;
+        }
+    }
+
+    return hasVisible;
+}
+
+static void write_menu_size(char *dst, unsigned int value)
+{
+    dst[0] = (char)('0' + ((value / 1000U) % 10U));
+    dst[1] = (char)('0' + ((value / 100U) % 10U));
+    dst[2] = (char)('0' + ((value / 10U) % 10U));
+    dst[3] = (char)('0' + (value % 10U));
+}
+
+static void clear_menu_row(unsigned char row)
+{
+    char buffer[MENU_ROW_WIDTH];
+    fill_menu_row(buffer);
+    blit_row_vram(row, buffer);
+}
+
+static void render_menu_row(unsigned int recordIndex, unsigned char row, unsigned char selected)
+{
+    char buffer[MENU_ROW_WIDTH];
+    const char *mapper;
+    unsigned int size_kb;
+
+    fill_menu_row(buffer);
+    buffer[0] = selected ? '>' : ' ';
+    copy_menu_text(&buffer[1], records[recordIndex].Name, MENU_NAME_WIDTH, selected);
+
+    size_kb = (unsigned int)(records[recordIndex].Size / 1024UL);
+    write_menu_size(&buffer[MENU_SIZE_COL], size_kb);
+
+    mapper = mapper_description(records[recordIndex].Mapper);
+    copy_menu_text(&buffer[MENU_MAPPER_COL], mapper, 6, 0);
+
+    blit_row_vram(row, buffer);
+}
+
+static int render_menu_row_scrolled(unsigned int recordIndex, unsigned char row, int startPos)
+{
+    char buffer[MENU_ROW_WIDTH];
+    const char *mapper;
+    size_t len = strlen(records[recordIndex].Name);
+    unsigned int size_kb;
+    int hasVisible;
+
+    if (len == 0) {
+        render_menu_row(recordIndex, row, 1);
+        return 0;
+    }
+
+    if (len <= MENU_NAME_WIDTH) {
+        render_menu_row(recordIndex, row, 1);
+        return 1;
+    }
+
+    fill_menu_row(buffer);
+    buffer[0] = '>';
+    hasVisible = copy_menu_text_window(&buffer[1], records[recordIndex].Name, len, startPos);
+    if (!hasVisible) {
+        return 0;
+    }
+
+    size_kb = (unsigned int)(records[recordIndex].Size / 1024UL);
+    write_menu_size(&buffer[MENU_SIZE_COL], size_kb);
+
+    mapper = mapper_description(records[recordIndex].Mapper);
+    copy_menu_text(&buffer[MENU_MAPPER_COL], mapper, 6, 0);
+
+    blit_row_vram(row, buffer);
+    return 1;
 }
 
 // invert_chars - Invert the characters in the character table
@@ -333,11 +487,12 @@ static int joystick_direction_to_key(unsigned char dir)
 
 // wait_for_key_with_scroll - Wait for a key press with scrolling effect
 // This function will wait for a key press and return the key code. While waiting, it
-static int wait_for_key_with_scroll(const char *name, unsigned int row)
+static int wait_for_key_with_scroll(unsigned int recordIndex, unsigned int row)
 {
     volatile unsigned int *jiffyPtr = (volatile unsigned int *)JIFFY;
     unsigned int lastTick = *jiffyPtr;
     int startPos = 0;
+    const char *name = records[recordIndex].Name;
     size_t len = strlen(name);
     int shouldScroll = (len > 24);
     const unsigned int scrollDelay = 30U; // 0.5 seconds at 60 Hz
@@ -392,8 +547,7 @@ static int wait_for_key_with_scroll(const char *name, unsigned int row)
                 int lenInt = (int)len;
 
                 while (attempts < lenInt && !printed) {
-                    Locate(1, row);
-                    printed = print_str_inverted_sliding(name, startPos);
+                    printed = render_menu_row_scrolled(recordIndex, (unsigned char)row, startPos);
                     startPos++;
                     if (startPos >= lenInt) {
                         startPos = 0;
@@ -450,6 +604,12 @@ void displayMenu() {
     printf("MSX PICOVERSE 2040   [MultiROM %s]", MULTIROM_VERSION);
     Locate(0, 1);
     print_separator_line();
+    render_menu_page();
+    Locate(0, 21);
+    print_separator_line();
+}
+
+static void render_menu_page(void) {
     unsigned int startIndex = (currentPage - 1) * FILES_PER_PAGE;
     unsigned int endIndex = startIndex + FILES_PER_PAGE;
 
@@ -459,27 +619,15 @@ void displayMenu() {
 
     unsigned int line = 0;
     for (unsigned int idx = startIndex; idx < endIndex; idx++, line++) {
-        Locate(0, 2 + line); // Position on the screen, starting at line 2
-        // Keep varargs simple for Fusion-C min printf: use 16-bit KB value.
-        unsigned int size_kb = (unsigned int)(records[idx].Size / 1024UL);
-        printf(" %-24.24s %04u %-6.6s", records[idx].Name, size_kb, mapper_description(records[idx].Mapper));
+        render_menu_row(idx, (unsigned char)(2 + line), (unsigned char)(idx == currentIndex));
     }
 
     for (; line < FILES_PER_PAGE; line++) {
-        Locate(0, 2 + line);
-        printf("                                 "); // clear unused lines to avoid stale entries
+        clear_menu_row((unsigned char)(2 + line));
     }
-    // footer
-    Locate(0, 21);
-    print_separator_line();
+
     Locate(0, 22);
     printf("Page: %02d/%02d                [H - Help]",currentPage, totalPages); // Print the page number and the help option
-    if (totalFiles > 0) {
-        Locate(0, (currentIndex % FILES_PER_PAGE) + 2); // Position the cursor on the selected file
-        printf(">"); // Print the cursor
-        print_str_inverted(records[currentIndex].Name); // Print the selected file name inverted
-
-    }
 }
 
 // helpMenu - Display the help menu on the screen
@@ -567,16 +715,16 @@ void navigateMenu()
         //debug
         Locate(0, 23);
         unsigned int currentRow = (currentIndex%FILES_PER_PAGE) + 2;
+        unsigned int previousIndex = currentIndex;
+        unsigned int previousRow = currentRow;
+        int pageRedrawn = 0;
 
-        key = wait_for_key_with_scroll(records[currentIndex].Name, currentRow);
+        key = wait_for_key_with_scroll(currentIndex, currentRow);
         //key = KeyboardRead();
         //key = InputChar();
         char fkey = Fkeys();
         (void)fkey;
 
-        Locate(0, currentRow); // Position the cursor on the previously selected file
-        printf(" "); // Clear the cursor
-        printf("%-24.24s", records[currentIndex].Name); // Print only the first 24 characters of the file name
         switch (key) 
         {
             case 30: // Up arrow
@@ -586,7 +734,8 @@ void navigateMenu()
                     if (currentIndex < ((currentPage-1) * FILES_PER_PAGE))  // Check if we need to move to the previous page
                     {
                         currentPage--; // Move to the previous page
-                        displayMenu(); // Display the menu
+                        render_menu_page(); // Redraw only page rows and footer
+                        pageRedrawn = 1;
                     }
                 }
                 break;
@@ -595,7 +744,8 @@ void navigateMenu()
                 if (currentIndex >= (currentPage * FILES_PER_PAGE)) // Check if we need to move to the next page
                 {
                     currentPage++; // Move to the next page
-                    displayMenu(); // Display the menu
+                    render_menu_page(); // Redraw only page rows and footer
+                    pageRedrawn = 1;
                 }
                 break;
             case 28: // Right arrow
@@ -603,7 +753,8 @@ void navigateMenu()
                 {
                     currentPage++; // Move to the next page
                     currentIndex = (currentPage-1) * FILES_PER_PAGE; // Move to the first file of the page
-                    displayMenu(); // Display the menu
+                    render_menu_page(); // Redraw only page rows and footer
+                    pageRedrawn = 1;
                 }
                 break;
             case 29: // Left arrow
@@ -611,7 +762,8 @@ void navigateMenu()
                 {
                     currentPage--; // Move to the previous page
                     currentIndex = (currentPage-1) * FILES_PER_PAGE; // Move to the first file of the page
-                    displayMenu(); // Display the menu
+                    render_menu_page(); // Redraw only page rows and footer
+                    pageRedrawn = 1;
                 }
                 break;
             case 27: // ESC
@@ -629,9 +781,10 @@ void navigateMenu()
                 loadGame(currentIndex); // Load the selected game
                 break;
         }
-        Locate(0, (currentIndex%FILES_PER_PAGE) + 2); // Position the cursor on the selected file
-        printf(">"); // Print the cursor
-        print_str_inverted(records[currentIndex].Name); // Print the selected file name
+        if (!pageRedrawn && currentIndex != previousIndex) {
+            render_menu_row(previousIndex, (unsigned char)previousRow, 0);
+            render_menu_row(currentIndex, (unsigned char)((currentIndex%FILES_PER_PAGE) + 2), 1);
+        }
         Locate(0, (currentIndex%FILES_PER_PAGE) + 2); // Position the cursor on the selected file
     }
 }

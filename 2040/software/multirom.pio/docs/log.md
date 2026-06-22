@@ -1,5 +1,14 @@
 # Change Log
 
+## PicoVerse 2040 Multirom v2.61
+
+- Bumped the multirom.pio version to v2.61.
+- Improved MSX MultiROM menu list drawing by rendering each ROM row through a single VRAM block write instead of per-character BIOS output.
+- Fixed the MultiROM tool mapper detector so 8KB ROMs do not read past the ROM buffer when building images with embedded Sunrise/mapper options.
+- Restored selected-row name scrolling so long ROM names advance from the first visible character while using the VRAM row renderer.
+- Reduced page-navigation redraws so LEFT/RIGHT and page-boundary moves update only the ROM rows and footer instead of repainting the static title and separator lines.
+- Frogger - Konami (1983) [RC-704] rom on the MSX1 Konami compilation had a bug and was replaced by a working dump from File Hunter.
+
 ## PicoVerse 2040 Multirom v2.60
 
 - Moved the shared MultiROM version declaration into the aggregate and tool Makefiles, removing the separate `version.mk` include.

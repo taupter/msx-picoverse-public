@@ -169,6 +169,10 @@ const char* mapper_description(int number) {
     return MAPPER_DESCRIPTIONS[number - 1];
 }
 
+static bool rom_has_ab_at(const uint8_t *rom, uint32_t size, uint32_t offset) {
+    return (offset + 1u < size) && rom[offset] == 'A' && rom[offset + 1u] == 'B';
+}
+
 // Attempt to guess the mapper type from the ROM contents.
 // Returns the mapper byte expected by the firmware (0 signals unsupported/unknown).
 // Code adapted from openMSX mapper detection routines.
@@ -221,17 +225,20 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
         }
     }
     
+    bool ab0 = rom_has_ab_at(rom, size, 0x0000u);
+    bool ab4000 = rom_has_ab_at(rom, size, 0x4000u);
+
     // Check if the ROM has the signature "AB" at 0x0000 and 0x0001
     // Those are the cases for 16KB and 32KB ROMs
-    if (rom[0] == 'A' && rom[1] == 'B' && size == 16384) {
+    if (ab0 && size <= 16384u) {
         free(rom);
-        return 1;     // Plain 16KB 
+        return 1;     // Plain 8KB/16KB
     }
 
-    if (rom[0] == 'A' && rom[1] == 'B' && size <= 32768) {
+    if (ab0 && size <= 32768u) {
 
         // Check if it is a normal 32KB ROM or Planar32/48-style layout.
-        if (rom[0x4000] == 'A' && rom[0x4001] == 'B') {
+        if (ab4000) {
             free(rom);
             return 4; // Planar32/48 style (AB at 0x4000)
         }
@@ -241,7 +248,7 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     }
 
     // Check for the "AB" header at the start
-    if (rom[0] == 'A' && rom[1] == 'B') {
+    if (ab0) {
         if (memcmp(&rom[16], ascii16x_signature, sizeof(ascii16x_signature) - 1) == 0) {
             free(rom);
             return ROM_TYPE_ASCII16X; // ASCII16-X mapper detected
@@ -257,7 +264,7 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
     }
 
     // Manbow 2 detection: 512KB ROM with "Manbow 2" string at offset 0x28000.
-    if (size == 524288u && rom[0] == 'A' && rom[1] == 'B' &&
+    if (size == 524288u && ab0 &&
         memcmp(&rom[0x28000], "Manbow 2", 8) == 0)
     {
         free(rom);
@@ -266,14 +273,13 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 
     // Check if the ROM has the signature "AB" at 0x4000 and 0x4001
     // That is the case for 48KB Planar mapping.
-    if (rom[0x4000] == 'A' && rom[0x4001] == 'B' && size <= 49152) {
+    if (ab4000 && size <= 49152) {
         free(rom);
         return 4; // Planar48
     }
 
     // 64KB planar ROMs may only expose AB at 0x4000.
     if (size == 65536u) {
-        bool ab4000 = (rom[0x4000] == 'A' && rom[0x4001] == 'B');
         if (ab4000) {
             free(rom);
             return ROM_TYPE_PLANAR64;
@@ -348,9 +354,6 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
         // Fallbacks when no mapper writes were identified.
         if (konami_score == 0 && konami_scc_score == 0 && ascii8_score == 0 && ascii16_score == 0)
         {
-            bool ab0 = (rom[0x0000] == 'A' && rom[0x0001] == 'B');
-            bool ab4000 = (rom[0x4000] == 'A' && rom[0x4001] == 'B');
-
             if (size == 65536u && (ab0 || ab4000))
             {
                 free(rom);
