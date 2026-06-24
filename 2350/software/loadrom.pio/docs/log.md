@@ -1,5 +1,13 @@
 # Change Log
 
+## PicoVerse 2350 Loadrom v2.62
+
+- Bumped the loadrom build version to v2.62.
+- Expanded the standalone OPL4 `OPL4DBG` USB CDC report with timer, read latency, write FIFO/ring-drop, limiter, and clock-mode counters for field captures of missing-instrument issues, while keeping USB CDC disabled by default for normal timing validation. Left enabled by default so we can capture data in case of future reports of missing instruments or other audio issues.
+- Added the OPL4-only `--lowclock` tool option for `-4`/`--opl4` images; default OPL4 UF2s keep the 300 MHz RP2350 clock, while `--lowclock` marks the OPL4 config header so the firmware boots at 282 MHz. This is to cover low quality PSRAM modules that cannot sustain the 300 MHz clock at full polyphony, which can cause audio underruns and missing instruments. The firmware reads the config header and sets the RP2350 clock divider to 282 MHz if the option is present.
+- Raised the standalone OPL4 firmware's final I2S output gain to better match the SCC, MSX-MUSIC, and other emulated audio profiles while preserving signed 16-bit clipping protection (issue reported by Peter).
+- Regenerated the embedded standalone OPL4 firmware payload and rebuilt the loadrom tool so the `loadrom -4` image uses the intended 300 MHz RP2350 clock instead of a stale 250 MHz binary (issue reported by Peter).
+
 ## PicoVerse 2350 Loadrom v2.61
 
 - Updated the public README OPL4 credits to describe the PicoVerse 2350 standalone MoonSound firmware architecture, host-port handling, YMF278B/ymfm wrapper, YRW801-M ROM/RAM model, and third-party reference/ROM attribution more accurately.

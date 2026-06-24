@@ -62,26 +62,27 @@ static void write_index_query(unsigned int index) {
 
 static unsigned char record_is_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
-    return mapper_code == 9 || mapper_code == 10 || mapper_code == 11 || mapper_code == 15 || mapper_code == 16;
+    return mapper_code == 9 || (mapper_code >= 10 && mapper_code <= 11) || (mapper_code >= 15 && mapper_code <= 18);
 }
 
 static unsigned char record_is_wifi_capable_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
-    return mapper_code == 10 || mapper_code == 11 || mapper_code == 15 || mapper_code == 16;
+    return (mapper_code >= 10 && mapper_code <= 11) || (mapper_code >= 15 && mapper_code <= 16);
 }
 
 static unsigned char record_is_sunrise_system_rom(const ROMRecord *record) {
-    return record_is_wifi_capable_system_rom(record);
+    unsigned char mapper_code = record_mapper_code(record->Mapper);
+    return (mapper_code >= 10 && mapper_code <= 11) || (mapper_code >= 15 && mapper_code <= 18);
 }
 
 static unsigned char record_is_sunrise_sd_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
-    return mapper_code == 15 || mapper_code == 16;
+    return mapper_code >= 15 && mapper_code <= 17;
 }
 
 static unsigned char record_is_sunrise_mapper_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
-    return mapper_code == 11 || mapper_code == 16;
+    return mapper_code == 11 || (mapper_code >= 16 && mapper_code <= 18);
 }
 
 static unsigned char record_supports_scc_audio(const ROMRecord *record) {
@@ -277,7 +278,7 @@ void show_rom_screen(unsigned int index) {
     if (!waiting_mapper) {
         options_loaded = send_load_options(index, &audio_profile, &psg_enabled, &saved_mapper, &sd_partition, &rom_audio_volume);
         if (options_loaded && saved_mapper != 0 && allow_mapper_override) {
-            record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | OVERRIDE_FLAG | saved_mapper;
+                record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | saved_mapper;
         }
     }
     audio_profile = sanitize_audio_profile(record, audio_profile);
@@ -354,7 +355,7 @@ void show_rom_screen(unsigned int index) {
                 }
                 unsigned char next_mapper = mapper_cycle[next_index];
                 if (send_set_mapper(index, next_mapper)) {
-                    record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | OVERRIDE_FLAG | next_mapper;
+                    record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | next_mapper;
                     audio_profile = sanitize_audio_profile(record, audio_profile);
                     render_rom_options_block(record, waiting_mapper, audio_profile, psg_enabled, wifi_enabled, allow_mapper_override, allow_wifi_support, selection);
                 }
@@ -417,7 +418,7 @@ void show_rom_screen(unsigned int index) {
             if (!options_loaded) {
                 options_loaded = send_load_options(index, &audio_profile, &psg_enabled, &saved_mapper, &sd_partition, &rom_audio_volume);
                 if (options_loaded && saved_mapper != 0 && allow_mapper_override) {
-                    record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | OVERRIDE_FLAG | saved_mapper;
+                    record->Mapper = (record->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG)) | saved_mapper;
                 }
             }
             audio_profile = sanitize_audio_profile(record, audio_profile);

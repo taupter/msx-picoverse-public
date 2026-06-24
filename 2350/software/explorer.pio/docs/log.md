@@ -1,5 +1,13 @@
 # Change Log
 
+## PicoVerse 2350 Explorer v2.37
+
+- Bumped Explorer version to v2.37.
+- Kept the MSX menu function-key shortcuts disabled during the initial flash-source load, then cleared the key buffer and enabled F1/F2/F3 only once the menu is ready for commands.
+- Added Carnivore2 SD/USB Nextor system options to Explorer, including tool config generation, MSX menu policy, Pico firmware launch dispatch, 1MB PSRAM mapper RAM, C2 RAM-mode emulation, and Explorer-compatible external SCC/SCC+ and YM2151/SFG audio surfaces while keeping Wi-Fi unavailable for C2 to match LoadROM's current policy.
+- Fixed MSX menu mapper decoding so Carnivore2 SYSTEM mapper codes 17/18 are shown as SYSTEM and sorted with the other Flash SYSTEM entries instead of being mistaken for manual PLA-16/PLA-32 overrides.
+- Fixed Pico-side mapper decoding and saved manual mapper values so mapper codes 16/17/18 are preserved, keeping C2 records in the Flash SYSTEM group and dispatching C2 launches through the Carnivore2 Nextor loader instead of the PLA-16/PLA-32 paths.
+
 ## PicoVerse 2350 Explorer v2.36
 
 - Bumped Explorer version to v2.36.

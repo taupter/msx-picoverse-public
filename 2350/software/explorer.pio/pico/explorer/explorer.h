@@ -88,6 +88,7 @@ void __no_inline_not_in_flash_func(loadrom_ascii8)(uint32_t offset, bool cache_e
 void __no_inline_not_in_flash_func(loadrom_ascii16)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise_mapper)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_c2_usb)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_neo8)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_neo16)(uint32_t offset);
 void __no_inline_not_in_flash_func(loadrom_ascii16x)(uint32_t offset, bool cache_enable);
@@ -96,3 +97,4 @@ void __no_inline_not_in_flash_func(loadrom_manbow2)(uint32_t offset, bool cache_
 void __no_inline_not_in_flash_func(loadrom_manbow2_scc)(uint32_t offset, bool cache_enable, uint32_t scc_type);
 void __no_inline_not_in_flash_func(loadrom_sunrise_sd)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_c2_sd)(uint32_t offset, bool cache_enable);

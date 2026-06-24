@@ -56,6 +56,8 @@
 #define ROM_TYPE_SUNRISE_MAPPER    11
 #define ROM_TYPE_SUNRISE_SD        15
 #define ROM_TYPE_SUNRISE_MAPPER_SD 16
+#define ROM_TYPE_C2_SD             17
+#define ROM_TYPE_C2_USB            18
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
@@ -129,6 +131,8 @@ const char* mapper_description(int number) {
         case ROM_TYPE_SUNRISE_MAPPER:
         case ROM_TYPE_SUNRISE_SD:
         case ROM_TYPE_SUNRISE_MAPPER_SD:
+        case ROM_TYPE_C2_SD:
+        case ROM_TYPE_C2_USB:
             return "SYSTEM";
         default:
             break;
@@ -178,15 +182,17 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 // Print usage information
 static void print_usage(const char *prog_name) {
 
-    printf("Usage: %s [-h] [-s1] [-m1] [-s2] [-m2] [-o <filename>]\n", prog_name);
+    printf("Usage: %s [-h] [-s1] [-m1] [-c1] [-s2] [-m2] [-c2] [-o <filename>]\n", prog_name);
     printf("  without options, the tool scans the current directory for .ROM files to include in the Explorer image\n");
     printf("Options:\n");
     printf("  -h   Show this help message\n");
     printf("  -s1, --sunrise-sd  Include Sunrise IDE Nextor ROM (microSD card)\n");
     printf("  -m1, --mapper-sd   Include Sunrise IDE Nextor ROM + 1MB mapper (microSD card)\n");
+    printf("  -c1, --carnivore2-sd  Include Sunrise IDE Nextor ROM + 1MB mapper + Carnivore2 RAM (microSD card)\n");
     printf("  -s2, --sunrise-usb Include Sunrise IDE Nextor ROM (USB pendrive)\n");
     printf("  -m2, --mapper-usb  Include Sunrise IDE Nextor ROM + 1MB mapper (USB pendrive)\n");
-    printf("  Options -s1, -m1, -s2, -m2 can be combined to add multiple Nextor entries\n");
+    printf("  -c2, --carnivore2-usb Include Sunrise IDE Nextor ROM + 1MB mapper + Carnivore2 RAM (USB pendrive)\n");
+    printf("  Options -s1, -m1, -c1, -s2, -m2, -c2 can be combined to add multiple Nextor entries\n");
     printf("  -o <filename>, --output <filename>  Set UF2 output filename (default %s)\n", UF2FILENAME);
     printf("\n");
     printf("  append a mapper tag before the extension to force detection (case-insensitive)\n");
@@ -281,8 +287,10 @@ int main(int argc, char *argv[])
     bool show_help = false;
     bool use_sunrise_sd = false;
     bool use_mapper_sd = false;
+    bool use_c2_sd = false;
     bool use_sunrise_usb = false;
     bool use_mapper_usb = false;
+    bool use_c2_usb = false;
     const char *bad_option = NULL;
     const char *missing_output_option = NULL;
     char uf2_output_filename[MAX_UF2_FILENAME_LENGTH];
@@ -298,10 +306,14 @@ int main(int argc, char *argv[])
             use_sunrise_sd = true;
         } else if ((strcmp(argv[i], "-m1") == 0) || (strcmp(argv[i], "--mapper-sd") == 0)) {
             use_mapper_sd = true;
+        } else if ((strcmp(argv[i], "-c1") == 0) || (strcmp(argv[i], "--carnivore2-sd") == 0)) {
+            use_c2_sd = true;
         } else if ((strcmp(argv[i], "-s2") == 0) || (strcmp(argv[i], "--sunrise-usb") == 0)) {
             use_sunrise_usb = true;
         } else if ((strcmp(argv[i], "-m2") == 0) || (strcmp(argv[i], "--mapper-usb") == 0)) {
             use_mapper_usb = true;
+        } else if ((strcmp(argv[i], "-c2") == 0) || (strcmp(argv[i], "--carnivore2-usb") == 0)) {
+            use_c2_usb = true;
         } else if ((strcmp(argv[i], "-o") == 0) || (strcmp(argv[i], "--output") == 0)) {
             if (i + 1 >= argc) {
                 missing_output_option = argv[i];
@@ -335,7 +347,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    bool include_nextor = use_sunrise_sd || use_mapper_sd || use_sunrise_usb || use_mapper_usb;
+    bool include_nextor = use_sunrise_sd || use_mapper_sd || use_c2_sd || use_sunrise_usb || use_mapper_usb || use_c2_usb;
     struct {
         bool enabled;
         uint8_t mapper;
@@ -343,8 +355,10 @@ int main(int argc, char *argv[])
     } nextor_entries[] = {
         { use_sunrise_sd,  ROM_TYPE_SUNRISE_SD,        "Nextor Sunrise IDE (SD)" },
         { use_mapper_sd,   ROM_TYPE_SUNRISE_MAPPER_SD, "Nextor Sunrise IDE + 1MB Mapper (SD)" },
+        { use_c2_sd,       ROM_TYPE_C2_SD,             "Nextor Sunrise IDE + 1MB Mapper + C2 RAM (SD)" },
         { use_sunrise_usb, ROM_TYPE_SUNRISE,           "Nextor Sunrise IDE (USB)" },
         { use_mapper_usb,  ROM_TYPE_SUNRISE_MAPPER,    "Nextor Sunrise + 1MB Mapper (USB)" },
+        { use_c2_usb,      ROM_TYPE_C2_USB,            "Nextor Sunrise + 1MB Mapper + C2 RAM (USB)" },
     };
 
     // Standard Explorer build mode

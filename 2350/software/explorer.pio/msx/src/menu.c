@@ -177,22 +177,12 @@ int record_is_mp3(const ROMRecord *record) {
 }
 
 unsigned char record_mapper_code(unsigned char mapper) {
-    unsigned char raw = mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
-
-    if (raw == OVERRIDE_FLAG) {
-        return 16;
-    }
-
-    if (raw & OVERRIDE_FLAG) {
-        return raw & (unsigned char)~OVERRIDE_FLAG;
-    }
-
-    return raw;
+    return mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
 }
 
 int record_mapper_is_override(unsigned char mapper) {
-    unsigned char raw = mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG);
-    return (raw & OVERRIDE_FLAG) != 0 && raw != OVERRIDE_FLAG;
+    (void)mapper;
+    return 0;
 }
 
 static void build_menu_row_text(const ROMRecord *record, const char *name_override, char *out, unsigned char width) {
@@ -759,7 +749,7 @@ char* mapper_description(int number) {
     // Array of strings for the descriptions
     const char *descriptions[] = {"PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08", "ASC-16", "Konami", "NEO-8", "NEO-16", "SYSTEM", "SYSTEM", "ASC16X", "PLN-64", "MANBW2"};
     number = record_mapper_code((unsigned char)number);
-    if (number == 15 || number == 16) {
+    if (number >= 15 && number <= 18) {
         return "SYSTEM";
     }
     if (number <= 0 || number > 14) {
@@ -934,8 +924,6 @@ void navigateMenu()
         key = wait_for_key_with_scroll();
         //key = KeyboardRead();
         //key = InputChar();
-        char fkey = Fkeys();
-        (void)fkey;
 
         draw_menu_row((unsigned char)currentRow, &records[currentIndex % FILES_PER_PAGE], 0);
         switch (key) 
@@ -1112,11 +1100,12 @@ void main() {
     }
     menu_ui_init_text_mode();
     invert_chars(32, 126); // Invert the characters from 32 to 126
-    redefine_function_keys();
-    //KillKeyBuffer(); // Clear the key buffer
+    clear_fkeys();
 
     menu_ui_render_menu_frame();
     switch_menu_source(SOURCE_MODE_FLASH);
+    *((unsigned int *)BIOS_GETPNT) = *((unsigned int *)BIOS_PUTPNT);
+    redefine_function_keys();
     // Activate navigation
     navigateMenu();
 }

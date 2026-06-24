@@ -31,6 +31,7 @@
 #include "explorer.h"
 #include "mapper_detect.h"
 #include "mp3.h"
+#include "c2_emu.h"
 #include "emu2212.h"
 #include "emu2149.h"
 #include "emu2413.h"
@@ -567,6 +568,7 @@ static inline uint8_t __not_in_flash_func(wifi_handle_mem_read)(const uint8_t *w
 static psram_region_t sd_rom_region;
 static psram_region_t rom_cache_region;
 static psram_region_t mapper_region;
+static psram_region_t c2_rom_region;
 static psram_region_t mp3_buffer_region;
 static psram_region_t fh_list_region;
 static psram_region_t fh_download_region;
@@ -604,6 +606,8 @@ ROMRecord records[MAX_ROM_RECORDS]; // Array to store the ROM records
 #define MAPPER_SYSTEM             MAPPER_SUNRISE_USB
 #define MAPPER_SUNRISE_SD         15
 #define MAPPER_SUNRISE_MAPPER_SD  16
+#define MAPPER_C2_SD              17
+#define MAPPER_C2_USB             18
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
@@ -822,6 +826,9 @@ static void ym2151_audio_init(void);
 static inline void __not_in_flash_func(ym2151_audio_service_buffer)(bool service_psg_io);
 static void start_ym2151_audio_output(void);
 static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out, uint8_t *data_out);
+static inline bool __not_in_flash_func(external_scc_read)(uint16_t addr, uint8_t *data);
+static inline void __not_in_flash_func(sfg_write)(uint16_t addr, uint8_t data);
+static inline bool __not_in_flash_func(sfg_read)(const uint8_t *bios_base, uint16_t addr, uint8_t *data);
 
 static struct audio_buffer_pool *claim_rom_audio_handoff_pool(void)
 {
@@ -871,11 +878,13 @@ static bool is_system_mapper(uint8_t mapper) {
     return mapper == MAPPER_SUNRISE_USB ||
            mapper == MAPPER_SUNRISE_MAPPER_USB ||
            mapper == MAPPER_SUNRISE_SD ||
-           mapper == MAPPER_SUNRISE_MAPPER_SD;
+           mapper == MAPPER_SUNRISE_MAPPER_SD ||
+           mapper == MAPPER_C2_SD ||
+           mapper == MAPPER_C2_USB;
 }
 
 static bool is_sunrise_sd_mapper(uint8_t mapper) {
-    return mapper == MAPPER_SUNRISE_SD || mapper == MAPPER_SUNRISE_MAPPER_SD;
+    return mapper == MAPPER_SUNRISE_SD || mapper == MAPPER_SUNRISE_MAPPER_SD || mapper == MAPPER_C2_SD;
 }
 
 static bool is_audio_system_mapper(uint8_t mapper) {
@@ -895,7 +904,8 @@ static audio_mode_t resolve_audio_mode(uint8_t mapper, uint8_t requested_profile
         if (requested_profile == AUDIO_PROFILE_DUAL_PSG)
             return AUDIO_MODE_DUAL_PSG;
         if (requested_profile == AUDIO_PROFILE_MSX_MUSIC &&
-            mapper != MAPPER_SUNRISE_MAPPER_USB && mapper != MAPPER_SUNRISE_MAPPER_SD)
+            mapper != MAPPER_SUNRISE_MAPPER_USB && mapper != MAPPER_SUNRISE_MAPPER_SD &&
+            mapper != MAPPER_C2_SD && mapper != MAPPER_C2_USB)
             return AUDIO_MODE_MSX_MUSIC; // YM2413/FM-PAC only for non-mapper Sunrise Nextor options
         if (requested_profile == AUDIO_PROFILE_YM2151_SFG05)
             return AUDIO_MODE_YM2151_SFG05;
@@ -937,17 +947,7 @@ static audio_mode_t resolve_audio_mode(uint8_t mapper, uint8_t requested_profile
 }
 
 static uint8_t mapper_code_from_record_byte(uint8_t mapper) {
-    uint8_t raw = (uint8_t)(mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG));
-
-    if (raw == OVERRIDE_FLAG) {
-        return MAPPER_SUNRISE_MAPPER_SD;
-    }
-
-    if (raw & OVERRIDE_FLAG) {
-        return (uint8_t)(raw & (uint8_t)~OVERRIDE_FLAG);
-    }
-
-    return raw;
+    return (uint8_t)(mapper & ~(SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG));
 }
 
 static int compare_record_names(const ROMRecord *a, const ROMRecord *b) {
@@ -1622,7 +1622,7 @@ static void process_load_options_request(void) {
     if (br >= PVC_OPTIONS_MAPPER_SIZE && data[6] != 0 && !is_system_mapper(data[6]) && data[6] < MAPPER_DESCRIPTION_COUNT) {
         uint8_t flags = rec->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
         if ((flags & (FOLDER_FLAG | MP3_FLAG)) == 0) {
-            rec->Mapper = (uint8_t)(flags | OVERRIDE_FLAG | data[6]);
+            rec->Mapper = (uint8_t)(flags | data[6]);
             ctrl_mapper_value = data[6];
         }
     }
@@ -3067,6 +3067,7 @@ static void psram_mem_init(void)
     memset(&rom_cache_region, 0, sizeof(rom_cache_region));
     rom_sram = NULL;
     memset(&mapper_region, 0, sizeof(mapper_region));
+    memset(&c2_rom_region, 0, sizeof(c2_rom_region));
     memset(&mp3_buffer_region, 0, sizeof(mp3_buffer_region));
     memset(&fh_list_region, 0, sizeof(fh_list_region));
     memset(&fh_download_region, 0, sizeof(fh_download_region));
@@ -3103,6 +3104,13 @@ static bool psram_prepare_mapper_region(void)
     if (!psram_bring_up_once()) return false;
     if (mapper_region.size == MAPPER_SIZE) return true;
     return psram_alloc(MAPPER_SIZE, &mapper_region);
+}
+
+static bool psram_prepare_c2_region(void)
+{
+    if (!psram_bring_up_once()) return false;
+    if (c2_rom_region.size == MAPPER_SIZE) return true;
+    return psram_alloc(MAPPER_SIZE, &c2_rom_region);
 }
 
 static bool psram_prepare_mp3_buffer(void)
@@ -5036,7 +5044,7 @@ static inline void __not_in_flash_func(handle_menu_write_explorer)(uint16_t addr
                     ROMRecord *rec = &records[record_index];
                     uint8_t flags = rec->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
                     if ((flags & (FOLDER_FLAG | MP3_FLAG)) == 0) {
-                        rec->Mapper = (uint8_t)(flags | OVERRIDE_FLAG | mapper);
+                        rec->Mapper = (uint8_t)(flags | mapper);
                         ctrl_ack_value = 1;
                     }
                  }
@@ -7158,7 +7166,7 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                                 ROMRecord *rec = &records[record_index];
                                 uint8_t flags = rec->Mapper & (SOURCE_SD_FLAG | FOLDER_FLAG | MP3_FLAG);
                                 if ((flags & (FOLDER_FLAG | MP3_FLAG)) == 0) {
-                                    rec->Mapper = (uint8_t)(flags | OVERRIDE_FLAG | mapper);
+                                    rec->Mapper = (uint8_t)(flags | mapper);
                                     ctrl_ack_value = 1;
                                 }
                             }
@@ -8341,6 +8349,362 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
 
 typedef void (*sunrise_backend_task_fn_t)(void);
 typedef void (*sunrise_backend_attach_fn_t)(sunrise_ide_t *ide);
+
+static inline void __not_in_flash_func(c2_handle_memory_write)(
+    c2_state_t *c2,
+    sunrise_ide_t *ide,
+    uint8_t mapper_reg[4],
+    uint8_t *subslot_reg,
+    bool c2_scc_enabled,
+    bool external_scc_audio,
+    bool sfg_audio,
+    uint16_t waddr,
+    uint8_t wdata)
+{
+    if (waddr == 0xFFFFu)
+    {
+        *subslot_reg = wdata;
+        return;
+    }
+
+    uint8_t page = (waddr >> 14) & 0x03u;
+    uint8_t active_subslot = (*subslot_reg >> (page * 2)) & 0x03u;
+
+    if (active_subslot == 1u)
+    {
+        if (waddr >= 0x4000u && waddr <= 0x7FFFu)
+            sunrise_ide_handle_write(ide, waddr, wdata);
+    }
+    else if (active_subslot == 0u)
+    {
+        if (c2_addr_is_regwin(c2, waddr))
+        {
+            c2_reg_write(c2, waddr, wdata);
+        }
+        else
+        {
+            if (c2_scc_enabled)
+                SCC_write(&scc_instance, waddr, wdata);
+
+            c2_bank_switch_write(c2, waddr, wdata);
+
+            uint8_t bank_idx;
+            uint32_t linear;
+            if (c2_decode_addr(c2, waddr, &bank_idx, &linear))
+            {
+                bool is_ram = c2_bank_is_ram(c2, bank_idx);
+                bool is_we = c2_bank_is_we(c2, bank_idx);
+                if (is_ram && is_we)
+                {
+                    if (linear < c2->ram_size)
+                    {
+                        c2->ram_ptr[linear] = wdata;
+                        if (linear + 1u > c2->max_written) c2->max_written = linear + 1u;
+                    }
+                }
+                else if (is_we && !is_ram)
+                {
+                    c2_flash_cmd_write(c2, waddr, wdata);
+                }
+            }
+        }
+    }
+    else if (active_subslot == 2u)
+    {
+        uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+        uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (waddr & 0x3FFFu);
+        mapper_write_byte(mapper_offset, wdata);
+    }
+    else if (active_subslot == 3u)
+    {
+        if (external_scc_audio)
+            SCC_write(&scc_instance, waddr, wdata);
+        else if (sfg_audio)
+            sfg_write(waddr, wdata);
+    }
+}
+
+static void __no_inline_not_in_flash_func(loadrom_c2_common)(
+    uint32_t offset,
+    bool cache_enable,
+    sunrise_backend_task_fn_t core1_task,
+    sunrise_backend_attach_fn_t attach_ctx)
+{
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42, 0x0A, 0x40, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xF3, 0xDB, 0xF4, 0xF6, 0x80, 0xD3,
+        0xF4, 0xC7
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata)) { }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u) init_called = true;
+                bool in_window = (addr >= 0x4000u && addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom)) data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+        {
+            restart_detected = true;
+        }
+    }
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, false);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    const uint8_t *rom_base;
+    uint32_t available_length;
+    prepare_sunrise_mapper_rom_source(offset, cache_enable, &rom_base, &available_length);
+
+    if (!psram_prepare_mapper_region() || !psram_prepare_c2_region())
+    {
+        while (true) { tight_loop_contents(); }
+    }
+    mapper_fill_ff();
+
+    static sunrise_ide_t ide;
+    sunrise_ide_init(&ide);
+
+    attach_ctx(&ide);
+    multicore_launch_core1(core1_task);
+
+    uint8_t mapper_reg[4] = { 3, 2, 1, 0 };
+    uint8_t subslot_reg = 0x10u;
+
+    static c2_state_t c2;
+    c2_init(&c2, c2_rom_region.ptr, c2_rom_region.size, 0x01u);
+
+    static const uint8_t c2_descr[8] = { 'C', 'M', 'F', 'C', 'C', 'F', 'R', 'C' };
+    bool c2_signature_overlay_armed = false;
+    uint8_t c2_signature_overlay_index = 0u;
+
+    msx_pio_io_bus_init();
+    system_audio_init_for_sunrise(false);
+
+    bool external_scc_audio = system_audio_profile == SYSTEM_AUDIO_PROFILE_SCC_EXTERNAL ||
+                              system_audio_profile == SYSTEM_AUDIO_PROFILE_SCC_PLUS_EXTERNAL;
+    bool sfg_audio = system_audio_profile == SYSTEM_AUDIO_PROFILE_YM2151_SFG05 ||
+                     system_audio_profile == SYSTEM_AUDIO_PROFILE_YM2151_SFG01;
+    bool c2_scc_enabled = external_scc_audio;
+    ym2151_sfg_variant_t sfg_variant = system_audio_profile == SYSTEM_AUDIO_PROFILE_YM2151_SFG01 ? YM2151_SFG01 : YM2151_SFG05;
+    const uint32_t sfg_variant_offset = (sfg_variant == YM2151_SFG01) ? SFG_BIOS_VARIANT_SIZE : 0u;
+    const uint8_t *sfg_bios_base = flash_rom + SFG_BIOS_FLASH_OFFSET + sfg_variant_offset;
+
+    msx_pio_bus_init();
+
+    while (true)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+            c2_handle_memory_write(&c2, &ide, mapper_reg, &subslot_reg, c2_scc_enabled, external_scc_audio, sfg_audio, waddr, wdata);
+
+        uint16_t io_addr;
+        uint8_t io_data;
+        while (pio_try_get_io_write(&io_addr, &io_data))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            if (system_audio_handle_io_write(port, io_data))
+                continue;
+            if (port >= 0xFCu && port <= 0xFFu)
+                mapper_reg[port - 0xFCu] = io_data & 0x3Fu;
+            else if ((port & 0xFCu) == 0xF0u && (port & 0x03u) == (c2.pfxn & 0x03u))
+            {
+                if (io_data == 'C' || io_data == 'S')
+                {
+                    c2_signature_overlay_armed = true;
+                    c2_signature_overlay_index = 0u;
+                }
+                c2_port_write(&c2, io_data);
+            }
+        }
+
+        while (pio_try_get_io_read(&io_addr))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            bool in_window = false;
+            uint8_t data = 0xFFu;
+            if (system_audio_handle_io_read(port, &data))
+            {
+                in_window = true;
+            }
+            else if (port >= 0xFCu && port <= 0xFFu)
+            {
+                in_window = true;
+                data = (uint8_t)(0xC0u | (mapper_reg[port - 0xFCu] & 0x3Fu));
+            }
+            else if ((port & 0xFCu) == 0xF0u &&
+                     (port & 0x03u) == (c2.pfxn & 0x03u) &&
+                     c2.pf0_state != C2_PF0_IDLE)
+            {
+                in_window = true;
+                data = c2_port_read(&c2);
+            }
+            pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(in_window, data));
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+
+            while (pio_try_get_write(&waddr, &wdata))
+                c2_handle_memory_write(&c2, &ide, mapper_reg, &subslot_reg, c2_scc_enabled, external_scc_audio, sfg_audio, waddr, wdata);
+
+            uint8_t data = 0xFFu;
+            bool in_window = false;
+
+            if (addr == 0xFFFFu)
+            {
+                in_window = true;
+                data = (uint8_t)~subslot_reg;
+            }
+            else
+            {
+                uint8_t page = (addr >> 14) & 0x03u;
+                uint8_t active_subslot = (subslot_reg >> (page * 2)) & 0x03u;
+
+                if (c2_signature_overlay_armed &&
+                    c2_signature_overlay_index < sizeof(c2_descr) &&
+                    addr == (uint16_t)(0x4010u + c2_signature_overlay_index) &&
+                    (c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u)
+                {
+                    in_window = true;
+                    data = c2_descr[c2_signature_overlay_index++];
+                    if (c2_signature_overlay_index >= sizeof(c2_descr))
+                        c2_signature_overlay_armed = false;
+                    pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+                    continue;
+                }
+                else if (c2_signature_overlay_armed &&
+                         addr >= 0x4010u && addr <= 0x4017u &&
+                         (c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u)
+                {
+                    c2_signature_overlay_armed = false;
+                    c2_signature_overlay_index = 0u;
+                }
+
+                if (active_subslot == 1u)
+                {
+                    if (addr >= 0x4000u && addr <= 0x7FFFu)
+                    {
+                        in_window = true;
+                        uint8_t ide_data;
+                        if (sunrise_ide_handle_read(&ide, addr, &ide_data))
+                            data = ide_data;
+                        else
+                        {
+                            uint8_t seg = ide.segment;
+                            uint32_t rel = ((uint32_t)seg << 14) + (addr & 0x3FFFu);
+                            if (available_length == 0u || rel < available_length)
+                                data = read_rom_byte(rom_base, rel);
+                        }
+                    }
+                }
+                else if (active_subslot == 0u)
+                {
+                    bool regwin_read_active =
+                        ((c2.cardmdr & C2_CARDMDR_REGS_DISABLE) == 0u) &&
+                        ((c2.cardmdr & C2_CARDMDR_REG_RD_OFF) == 0u) &&
+                        c2_addr_is_regwin(&c2, addr);
+
+                    if (regwin_read_active)
+                    {
+                        in_window = true;
+                        data = c2_reg_read(&c2, addr);
+                    }
+                    else
+                    {
+                        bool is_scc_read = false;
+                        if (c2_scc_enabled)
+                        {
+                            if (scc_instance.active)
+                            {
+                                uint32_t scc_reg_start = scc_instance.base_adr + 0x800u;
+                                if (addr >= scc_reg_start && addr <= (scc_reg_start + 0xFFu))
+                                    is_scc_read = true;
+                            }
+                            if (system_audio_profile == SYSTEM_AUDIO_PROFILE_SCC_PLUS_EXTERNAL && (addr & 0xFFFEu) == 0xBFFEu)
+                                is_scc_read = true;
+                        }
+
+                        if (is_scc_read)
+                        {
+                            in_window = true;
+                            data = (uint8_t)SCC_read(&scc_instance, addr);
+                        }
+                        else
+                        {
+                            uint8_t bank_idx;
+                            uint32_t linear;
+                            if (c2_decode_addr(&c2, addr, &bank_idx, &linear))
+                            {
+                                in_window = true;
+                                if (!c2_bank_is_ram(&c2, bank_idx))
+                                    data = c2_flash_read(&c2, addr, linear);
+                                else
+                                    data = (linear < c2.ram_size) ? c2.ram_ptr[linear] : 0xFFu;
+                            }
+                        }
+                    }
+                }
+                else if (active_subslot == 2u)
+                {
+                    in_window = true;
+                    uint8_t mapper_page = mapper_page_from_reg(mapper_reg[page]);
+                    uint32_t mapper_offset = ((uint32_t)mapper_page << 14) | (addr & 0x3FFFu);
+                    data = mapper_read_byte(mapper_offset);
+                }
+                else if (active_subslot == 3u)
+                {
+                    if (external_scc_audio)
+                        in_window = external_scc_read(addr, &data);
+                    else if (sfg_audio)
+                        in_window = sfg_read(sfg_bios_base, addr, &data);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
+}
+
+void __no_inline_not_in_flash_func(loadrom_c2_sd)(uint32_t offset, bool cache_enable)
+{
+    loadrom_c2_common(offset, cache_enable, sunrise_sd_task, sunrise_sd_set_ide_ctx);
+}
+
+void __no_inline_not_in_flash_func(loadrom_c2_usb)(uint32_t offset, bool cache_enable)
+{
+    loadrom_c2_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx);
+}
 
 static void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_common)(
     uint32_t offset,
@@ -10919,6 +11283,12 @@ int __no_inline_not_in_flash_func(main)()
                 loadrom_sunrise_mapper_wifi_sd(rom_offset, cache_enable);
             else
                 loadrom_sunrise_mapper_sd(rom_offset, cache_enable);
+            break;
+        case MAPPER_C2_SD:
+            loadrom_c2_sd(rom_offset, cache_enable);
+            break;
+        case MAPPER_C2_USB:
+            loadrom_c2_usb(rom_offset, cache_enable);
             break;
         case 12:
             loadrom_ascii16x(rom_offset, cache_enable);

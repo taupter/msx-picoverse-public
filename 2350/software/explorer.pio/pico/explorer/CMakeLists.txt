@@ -47,6 +47,7 @@ set(EXPLORER_SOURCES
     hw_config.c
     sunrise_ide.c
     sunrise_sd.c
+    c2_emu.c
     explorer.c 
     mp3.c
     emu2212.c

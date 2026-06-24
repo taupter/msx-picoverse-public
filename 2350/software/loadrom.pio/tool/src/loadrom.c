@@ -412,7 +412,8 @@ static void print_usage(const char *prog_name) {
     printf("  -c1, --carnivore2-sd  Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (microSD card)\n");
     printf("  -c2, --carnivore2-usb Build UF2 with Sunrise IDE Nextor ROM + 1MB PSRAM mapper + Carnivore2 RAM emulation (USB pendrive)\n");
     printf("  -4, --opl4         Build UF2 with the standalone OPL4 / YMF278B / MoonSound cartridge firmware (2MB YRW801-M ROM + 2MB PCM sample RAM)\n");
-    printf("      --opl4-limit   (with -4) Enable the adaptive PCM voice limiter: sheds PCM voices on extreme-polyphony songs to avoid audio underrun, trading some peak voices for smooth playback\n");
+    printf("      --opl4-limit   (with -4) Enable the adaptive PCM voice limiter: sheds PCM voices on extreme-polyphony songs to avoid audio underrun\n");
+    printf("      --lowclock     (with -4) Build an OPL4 image that runs the RP2350 at 282 MHz instead of the default 300 MHz\n");
     printf("  -w, --wifi         Enable ESP-01 WiFi support for Sunrise IDE Nextor modes (-s1/-m1/-s2/-m2 only)\n");
     printf("  -d, --dual-psg     Enable secondary PSG emulation on I/O ports 0x10/0x11\n");
     printf("  -f, -fmpac         Enable MSX-MUSIC/YM2413 emulation on I/O ports 0x7C/0x7D\n");
@@ -594,6 +595,7 @@ int main(int argc, char *argv[])
     bool use_c2_usb = false;
     bool use_opl4 = false;
     bool opl4_limit = false;
+    bool opl4_lowclock = false;
     bool use_wifi = false;
     bool dual_psg = false;
     bool msx_music = false;
@@ -620,6 +622,8 @@ int main(int argc, char *argv[])
             use_opl4 = true;
         } else if (strcmp(argv[i], "--opl4-limit") == 0) {
             opl4_limit = true;
+        } else if (strcmp(argv[i], "--lowclock") == 0) {
+            opl4_lowclock = true;
         } else if ((strcmp(argv[i], "-w") == 0) || (strcmp(argv[i], "--wifi") == 0)) {
             use_wifi = true;
         } else if ((strcmp(argv[i], "-d") == 0) || (strcmp(argv[i], "--dual-psg") == 0)) {
@@ -664,6 +668,10 @@ int main(int argc, char *argv[])
         printf("Option --opl4-limit requires -4/--opl4.\n");
         return 1;
     }
+    if (opl4_lowclock && !use_opl4) {
+        printf("Option --lowclock requires -4/--opl4.\n");
+        return 1;
+    }
 
     // -------------------------------------------------------------------
     // Standalone OPL4 / MoonSound cartridge (-4 / --opl4)
@@ -688,12 +696,14 @@ int main(int argc, char *argv[])
         uint8_t cfg_header[16];
         memset(cfg_header, 0, sizeof(cfg_header));
         cfg_header[0] = 'P'; cfg_header[1] = 'V'; cfg_header[2] = 'O'; cfg_header[3] = '4';
-        cfg_header[4] = opl4_limit ? 0x01u : 0x00u;
+        cfg_header[4] = (uint8_t)((opl4_limit ? 0x01u : 0x00u) |
+                      (opl4_lowclock ? 0x02u : 0x00u));
         const size_t cfg_size = sizeof(cfg_header);
 
         printf("Mode: OPL4 / YMF278B / MoonSound (dedicated cartridge)\n");
         printf("Firmware Size: %zu bytes\n", fw_size);
         printf("YRW801-M ROM Size: %zu bytes\n", yrw_size);
+        printf("OPL4 RP2350 clock: %s\n", opl4_lowclock ? "282 MHz" : "300 MHz");
         printf("Adaptive voice limiter: %s\n", opl4_limit ? "ON (reduced peak polyphony)" : "OFF (full fidelity)");
         printf("UF2 Output: %s\n", output_filename);
 
