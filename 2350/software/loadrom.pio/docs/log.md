@@ -1,5 +1,11 @@
 # Change Log
 
+## PicoVerse 2350 Loadrom v2.63
+
+- Bumped the loadrom build version to v2.63.
+- Disabled standalone OPL4 USB CDC debug logging by default so timing validation and user test UF2s run without the USB stdio device or OPL4 debug instrumentation in the audio path.
+- Tuned the standalone OPL4 adaptive PCM voice limiter to be less aggressive: it now lowers the voice cap only after sustained late buffers, restores voices after repeated headroom, and keeps a higher minimum cap so melodic leads are less likely to be ducked when `--opl4-limit` is enabled.
+
 ## PicoVerse 2350 Loadrom v2.62
 
 - Bumped the loadrom build version to v2.62.
