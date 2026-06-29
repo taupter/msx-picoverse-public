@@ -1,5 +1,5 @@
 // MSX PICOVERSE PROJECT
-// (c) 2025 Cristiano Goncalves
+// (c) 2026 Cristiano Goncalves
 // The Retro Hacker
 //
 // explorer.c - Windows console application to create the explorer firmware for the MSX PICOVERSE 2350
@@ -60,6 +60,7 @@
 #define ROM_TYPE_C2_USB            18
 #define ROM_TYPE_MEGARAM_SD        19
 #define ROM_TYPE_MEGARAM_USB       20
+#define ROM_TYPE_MEGARAM           21
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
@@ -137,6 +138,7 @@ const char* mapper_description(int number) {
         case ROM_TYPE_C2_USB:
         case ROM_TYPE_MEGARAM_SD:
         case ROM_TYPE_MEGARAM_USB:
+        case ROM_TYPE_MEGARAM:
             return "SYSTEM";
         default:
             break;
@@ -186,11 +188,12 @@ uint8_t detect_rom_type(const char *filename, uint32_t size) {
 // Print usage information
 static void print_usage(const char *prog_name) {
 
-    printf("Usage: %s [-h] [-a] [-s1] [-m1] [-c1] [-r1] [-s2] [-m2] [-c2] [-r2] [-o <filename>]\n", prog_name);
+    printf("Usage: %s [-h] [-a] [-r] [-s1] [-m1] [-c1] [-r1] [-s2] [-m2] [-c2] [-r2] [-o <filename>]\n", prog_name);
     printf("  without options, the tool scans the current directory for .ROM files to include in the Explorer image\n");
     printf("Options:\n");
     printf("  -h   Show this help message\n");
     printf("  -a, --allnextor  Include all embedded Nextor system ROM options\n");
+    printf("  -r, --megaram    Include standalone 1MB MegaRAM without Nextor or memory mapper\n");
     printf("  -s1, --sunrise-sd  Include Sunrise IDE Nextor ROM (microSD card)\n");
     printf("  -m1, --mapper-sd   Include Sunrise IDE Nextor ROM + 1MB mapper (microSD card)\n");
     printf("  -c1, --carnivore2-sd  Include Sunrise IDE Nextor ROM + 1MB mapper + Carnivore2 RAM (microSD card)\n");
@@ -289,13 +292,14 @@ void create_uf2_file(const uint8_t *data, size_t size, const char *uf2_filename)
 int main(int argc, char *argv[])
 {
     printf("MSX PICOVERSE 2350 Explorer UF2 Creator %s\n", APP_VERSION);
-    printf("(c) 2025 The Retro Hacker\n\n");
+    printf("(c) 2026 The Retro Hacker\n\n");
 
     bool show_help = false;
     bool use_sunrise_sd = false;
     bool use_mapper_sd = false;
     bool use_c2_sd = false;
     bool use_megaram_sd = false;
+    bool use_megaram = false;
     bool use_sunrise_usb = false;
     bool use_mapper_usb = false;
     bool use_c2_usb = false;
@@ -326,6 +330,8 @@ int main(int argc, char *argv[])
             use_mapper_sd = true;
         } else if ((strcmp(argv[i], "-c1") == 0) || (strcmp(argv[i], "--carnivore2-sd") == 0)) {
             use_c2_sd = true;
+        } else if ((strcmp(argv[i], "-r") == 0) || (strcmp(argv[i], "--megaram") == 0)) {
+            use_megaram = true;
         } else if ((strcmp(argv[i], "-r1") == 0) || (strcmp(argv[i], "--megaram-sd") == 0)) {
             use_megaram_sd = true;
         } else if ((strcmp(argv[i], "-s2") == 0) || (strcmp(argv[i], "--sunrise-usb") == 0)) {
@@ -379,11 +385,11 @@ int main(int argc, char *argv[])
         { use_sunrise_sd,  ROM_TYPE_SUNRISE_SD,        "Nextor Sunrise IDE (SD)" },
         { use_mapper_sd,   ROM_TYPE_SUNRISE_MAPPER_SD, "Nextor Sunrise IDE + 1MB Mapper (SD)" },
         { use_c2_sd,       ROM_TYPE_C2_SD,             "Nextor Sunrise IDE + 1MB Mapper + C2 RAM (SD)" },
-        { use_megaram_sd,  ROM_TYPE_MEGARAM_SD,        "Nextor Sunrise IDE + 1MB Mapper + MegaRAM (SD)" },
+        { use_megaram_sd,  ROM_TYPE_MEGARAM_SD,        "Nextor Sunrise IDE + 1MB Mapper + 1MB MegaRAM (SD)" },
         { use_sunrise_usb, ROM_TYPE_SUNRISE,           "Nextor Sunrise IDE (USB)" },
         { use_mapper_usb,  ROM_TYPE_SUNRISE_MAPPER,    "Nextor Sunrise + 1MB Mapper (USB)" },
         { use_c2_usb,      ROM_TYPE_C2_USB,            "Nextor Sunrise + 1MB Mapper + C2 RAM (USB)" },
-        { use_megaram_usb, ROM_TYPE_MEGARAM_USB,       "Nextor Sunrise + 1MB Mapper + MegaRAM (USB)" },
+        { use_megaram_usb, ROM_TYPE_MEGARAM_USB,       "Nextor Sunrise + 1MB Mapper + 1MB MegaRAM (USB)" },
     };
 
     // Standard Explorer build mode
@@ -444,6 +450,33 @@ int main(int argc, char *argv[])
             file_index++;
             base_offset += nextor_size;
         }
+    }
+
+    if (use_megaram) {
+        char megaram_name[MAX_FILE_NAME_LENGTH] = {0};
+        uint32_t megaram_size = 0;
+        uint32_t megaram_offset = base_offset;
+
+        if (config_offset + CONFIG_RECORD_SIZE > CONFIG_AREA_SIZE) {
+            printf("Configuration area capacity exceeded\n");
+            free(config_buffer);
+            return 1;
+        }
+
+        strncpy(megaram_name, "Brazilian MegaRAM (1MB)", MAX_FILE_NAME_LENGTH);
+        memcpy(config_buffer + config_offset, megaram_name, MAX_FILE_NAME_LENGTH);
+        config_offset += MAX_FILE_NAME_LENGTH;
+        config_buffer[config_offset++] = ROM_TYPE_MEGARAM;
+        memcpy(config_buffer + config_offset, &megaram_size, sizeof(megaram_size));
+        config_offset += sizeof(megaram_size);
+        memcpy(config_buffer + config_offset, &megaram_offset, sizeof(megaram_offset));
+        config_offset += sizeof(megaram_offset);
+
+        printf("File %02d: Name = %-60s, Size = %07u bytes, Flash Offset = 0x%08X, Mapper = %s\n",
+               file_index, megaram_name, megaram_size, megaram_offset,
+               mapper_description(ROM_TYPE_MEGARAM));
+
+        file_index++;
     }
 
     // Scan the current directory for .ROM files
@@ -585,8 +618,12 @@ int main(int argc, char *argv[])
 
     // Handle case of no ROM files found
     if (file_count == 0) {
-        if (include_nextor) {
+        if (include_nextor && use_megaram) {
+            printf("No external ROM files found; generating image with embedded Nextor and MegaRAM entries only.\n");
+        } else if (include_nextor) {
             printf("No external ROM files found; generating image with embedded Nextor entries only.\n");
+        } else if (use_megaram) {
+            printf("No external ROM files found; generating image with standalone MegaRAM entry only.\n");
         } else {
             printf("No ROM files found in the current directory.\n\n");
             print_usage(argv[0] ? argv[0] : "explorer");

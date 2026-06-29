@@ -1,5 +1,16 @@
 # Change Log
 
+## PicoVerse 2350 Explorer v2.39
+
+- Bumped Explorer version to v2.39.
+- Added Explorer `-r`/`--megaram` to create a standalone `Brazilian MegaRAM (1MB)` SYSTEM entry without Nextor or the 1MB MSX memory mapper, allowing the MSX to boot to BIOS while the Cartucho II-compatible MegaRAM surface remains available.
+- Updated the Explorer MSX menu titles for the Nextor + Mapper + MegaRAM entries to say `1MB MegaRAM`.
+- Added MegaRAM-only `MegaRAM SCC` and `MegaRAM SCC+` audio profiles that keep the MegaRAM surface in-place while intercepting SCC register accesses and routing SCC audio to the Pico DAC.
+- Saved standalone `Brazilian MegaRAM (1MB)` ROM detail options to the root display-name `.flash.PVC` file so MegaRAM SCC/SCC+ profile selections persist without a backing ROM file.
+- Reduced the MSX Explorer menu ROM size by consolidating ROM/MP3/File Hunter detail-frame rendering and trimming duplicated footer/status formatting, increasing the `_CODE` margin below the `0xB900` Pico communication window.
+- Fixed the MSX help screen Chip ID after visiting File Hunter by prioritizing the Pico Chip ID subrange over the broader File Hunter status-text read window.
+- Restored WAVEGAME PSG Mirror output by draining queued PSG register writes from the MP3/WAV audio callback before mixing mirrored PSG samples (regression bug).
+
 ## PicoVerse 2350 Explorer v2.38
 
 - Bumped Explorer version to v2.38.

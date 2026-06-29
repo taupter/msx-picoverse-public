@@ -395,6 +395,17 @@ void menu_ui_render_menu_frame(void) {
     frame_rendered = 1;
 }
 
+void menu_ui_render_detail_frame(void) {
+    Locate(0, 0);
+    menu_ui_print_title_line();
+    Locate(0, 1);
+    menu_ui_print_delimiter_line();
+    menu_ui_clear_rows(2, 21);
+    Locate(0, 21);
+    menu_ui_print_delimiter_line();
+    menu_ui_clear_rows(23, 24);
+}
+
 void menu_ui_update_footer_page(void) {
     Locate(0, 22);
     menu_ui_print_footer_line();

@@ -103,3 +103,4 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_mapper_sd)(uint32_t offset, b
 void __no_inline_not_in_flash_func(loadrom_c2_sd)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise_megaram_sd)(uint32_t offset, bool cache_enable);
 void __no_inline_not_in_flash_func(loadrom_sunrise_megaram_usb)(uint32_t offset, bool cache_enable);
+void __no_inline_not_in_flash_func(loadrom_megaram)(uint32_t offset, bool cache_enable);

@@ -166,6 +166,8 @@
 #define AUDIO_PROFILE_SCC_PLUS_EXTERNAL 6u
 #define AUDIO_PROFILE_YM2151_SFG05 7u
 #define AUDIO_PROFILE_YM2151_SFG01 8u
+#define AUDIO_PROFILE_MEGARAM_SCC 9u
+#define AUDIO_PROFILE_MEGARAM_SCC_PLUS 10u
 
 #define PSG_SAMPLE_RATE 44100
 #define PSG_CLOCK       1789773
@@ -611,6 +613,7 @@ ROMRecord records[MAX_ROM_RECORDS]; // Array to store the ROM records
 #define MAPPER_C2_USB             18
 #define MAPPER_MEGARAM_SD         19
 #define MAPPER_MEGARAM_USB        20
+#define MAPPER_MEGARAM            21
 
 static const char *MAPPER_DESCRIPTIONS[] = {
     "PLA-16", "PLA-32", "KonSCC", "PLN-48", "ASC-08",
@@ -830,6 +833,10 @@ static inline void __not_in_flash_func(ym2151_audio_service_buffer)(bool service
 static void start_ym2151_audio_output(void);
 static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out, uint8_t *data_out);
 static inline bool __not_in_flash_func(external_scc_read)(uint16_t addr, uint8_t *data);
+static inline bool __not_in_flash_func(megaram_scc_audio_selected)(void);
+static inline uint32_t __not_in_flash_func(megaram_scc_type_selected)(void);
+static inline bool __not_in_flash_func(megaram_scc_write)(uint16_t addr, uint8_t data);
+static inline bool __not_in_flash_func(megaram_scc_read)(uint16_t addr, uint8_t *data);
 static inline void __not_in_flash_func(sfg_write)(uint16_t addr, uint8_t data);
 static inline bool __not_in_flash_func(sfg_read)(const uint8_t *bios_base, uint16_t addr, uint8_t *data);
 
@@ -854,6 +861,8 @@ typedef enum {
     AUDIO_MODE_SCC_PLUS,
     AUDIO_MODE_SCC_EXTERNAL,
     AUDIO_MODE_SCC_PLUS_EXTERNAL,
+    AUDIO_MODE_MEGARAM_SCC,
+    AUDIO_MODE_MEGARAM_SCC_PLUS,
     AUDIO_MODE_DUAL_PSG,
     AUDIO_MODE_MSX_MUSIC,
     AUDIO_MODE_YM2151_SFG05,
@@ -885,7 +894,8 @@ static bool is_system_mapper(uint8_t mapper) {
            mapper == MAPPER_C2_SD ||
            mapper == MAPPER_C2_USB ||
            mapper == MAPPER_MEGARAM_SD ||
-           mapper == MAPPER_MEGARAM_USB;
+           mapper == MAPPER_MEGARAM_USB ||
+           mapper == MAPPER_MEGARAM;
 }
 
 static bool is_sunrise_sd_mapper(uint8_t mapper) {
@@ -894,7 +904,7 @@ static bool is_sunrise_sd_mapper(uint8_t mapper) {
 }
 
 static bool is_megaram_mapper(uint8_t mapper) {
-    return mapper == MAPPER_MEGARAM_SD || mapper == MAPPER_MEGARAM_USB;
+    return mapper == MAPPER_MEGARAM_SD || mapper == MAPPER_MEGARAM_USB || mapper == MAPPER_MEGARAM;
 }
 
 static bool is_audio_system_mapper(uint8_t mapper) {
@@ -907,8 +917,13 @@ static bool mapper_supports_scc_audio(uint8_t mapper) {
 
 static audio_mode_t resolve_audio_mode(uint8_t mapper, uint8_t requested_profile) {
     if (is_system_mapper(mapper)) {
-        if (is_megaram_mapper(mapper))
+        if (is_megaram_mapper(mapper)) {
+            if (requested_profile == AUDIO_PROFILE_MEGARAM_SCC_PLUS)
+                return AUDIO_MODE_MEGARAM_SCC_PLUS;
+            if (requested_profile == AUDIO_PROFILE_MEGARAM_SCC)
+                return AUDIO_MODE_MEGARAM_SCC;
             return AUDIO_MODE_NONE;
+        }
         if (requested_profile == AUDIO_PROFILE_SCC_PLUS_EXTERNAL)
             return AUDIO_MODE_SCC_PLUS_EXTERNAL;
         if (requested_profile == AUDIO_PROFILE_SCC_EXTERNAL)
@@ -1396,6 +1411,11 @@ static bool build_pvc_options_path(uint16_t record_index, char *out, size_t out_
     ROMRecord *rec = &records[record_index];
     if ((rec->Mapper & (FOLDER_FLAG | MP3_FLAG)) != 0) {
         return false;
+    }
+
+    if (mapper_code_from_record_byte(rec->Mapper) == MAPPER_MEGARAM) {
+        int written = snprintf(out, out_size, "/%s.flash.PVC", rec->Name);
+        return written > 0 && (size_t)written < out_size;
     }
 
     if ((rec->Mapper & SOURCE_SD_FLAG) != 0) {
@@ -3688,6 +3708,7 @@ static int16_t __not_in_flash_func(wavegame_psg_calc_sample)(void)
 {
     if (!wavegame_psg_mirror_active)
         return 0;
+    main_psg_drain_write_ring();
     return apply_audio_volume(main_psg_calc_sample());
 }
 
@@ -4007,6 +4028,10 @@ static system_audio_profile_t system_audio_resolve_profile(void)
     if (ctrl_audio_selection == AUDIO_PROFILE_SCC_EXTERNAL)
         return SYSTEM_AUDIO_PROFILE_SCC_EXTERNAL;
     if (ctrl_audio_selection == AUDIO_PROFILE_SCC_PLUS_EXTERNAL)
+        return SYSTEM_AUDIO_PROFILE_SCC_PLUS_EXTERNAL;
+    if (ctrl_audio_selection == AUDIO_PROFILE_MEGARAM_SCC)
+        return SYSTEM_AUDIO_PROFILE_SCC_EXTERNAL;
+    if (ctrl_audio_selection == AUDIO_PROFILE_MEGARAM_SCC_PLUS)
         return SYSTEM_AUDIO_PROFILE_SCC_PLUS_EXTERNAL;
     if (ctrl_psg_emulation != 0u)
         return SYSTEM_AUDIO_PROFILE_MAIN_PSG;
@@ -5269,6 +5294,10 @@ static uint8_t __not_in_flash_func(fh_read_window_byte)(uint16_t addr, bool *in_
         {
             data = page_buffer[addr - FH_DATA_BASE];
         }
+        else if (addr >= CTRL_CHIP_ID_BASE && addr < (CTRL_CHIP_ID_BASE + CTRL_CHIP_ID_SIZE))
+        {
+            data = (uint8_t)pico_chip_id[addr - CTRL_CHIP_ID_BASE];
+        }
         else if (addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
         {
             data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
@@ -5299,6 +5328,10 @@ static uint8_t __not_in_flash_func(fh_read_menu_window_byte)(uint16_t addr, bool
                 case FH_PROGRESS_H: data = (uint8_t)((fh_progress_percent >> 8) & 0xFFu); break;
                 case FH_RESULT: data = fh_result; break;
             }
+        }
+        else if (addr >= CTRL_CHIP_ID_BASE && addr < (CTRL_CHIP_ID_BASE + CTRL_CHIP_ID_SIZE))
+        {
+            data = (uint8_t)pico_chip_id[addr - CTRL_CHIP_ID_BASE];
         }
         else if (addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
         {
@@ -7125,10 +7158,6 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
                     case MP3_CTRL_MODE:      data = mp3_play_mode; break;
                 }
             }
-            else if (fh_menu_window_active && addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
-            {
-                data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
-            }
             else if (addr >= CTRL_SD_PARTITION_INFO_BASE && addr < (CTRL_SD_PARTITION_INFO_BASE + CTRL_SD_PARTITION_INFO_SIZE))
             {
                 data = ctrl_sd_partition_info[addr - CTRL_SD_PARTITION_INFO_BASE];
@@ -7136,6 +7165,10 @@ int __no_inline_not_in_flash_func(loadrom_msx_menu)(uint32_t offset)
             else if (addr >= CTRL_CHIP_ID_BASE && addr < (CTRL_CHIP_ID_BASE + CTRL_CHIP_ID_SIZE))
             {
                 data = (uint8_t)pico_chip_id[addr - CTRL_CHIP_ID_BASE];
+            }
+            else if (fh_menu_window_active && addr >= FH_STATUS_TEXT_BASE && addr < (FH_STATUS_TEXT_BASE + FH_STATUS_TEXT_SIZE))
+            {
+                data = (uint8_t)fh_wifi_status_text[addr - FH_STATUS_TEXT_BASE];
             }
             else if (addr >= DATA_BASE_ADDR && addr < (DATA_BASE_ADDR + DATA_BUFFER_SIZE))
             {
@@ -8842,6 +8875,7 @@ static void __not_in_flash_func(loadrom_sunrise_megaram_common)(
 
     msx_pio_io_bus_init();
     system_audio_init_for_sunrise(false);
+    bool megaram_scc_audio = megaram_scc_audio_selected();
     msx_pio_bus_init();
 
     while (true)
@@ -8872,6 +8906,8 @@ static void __not_in_flash_func(loadrom_sunrise_megaram_common)(
             }
             else if (active_subslot == 3 && waddr >= 0x4000u && waddr <= 0xBFFFu)
             {
+                if (megaram_scc_audio && !megaram_write_enabled && megaram_scc_write(waddr, wdata))
+                    continue;
                 if (megaram_write_enabled)
                     megaram_write_byte(waddr, wdata, megaram_bank_reg);
                 else
@@ -8956,7 +8992,8 @@ static void __not_in_flash_func(loadrom_sunrise_megaram_common)(
                 else if (active_subslot == 3 && addr >= 0x4000u && addr <= 0xBFFFu)
                 {
                     in_window = true;
-                    data = megaram_read_byte(addr, megaram_bank_reg);
+                    if (!megaram_scc_audio || !megaram_scc_read(addr, &data))
+                        data = megaram_read_byte(addr, megaram_bank_reg);
                 }
             }
 
@@ -8973,6 +9010,77 @@ void __no_inline_not_in_flash_func(loadrom_sunrise_megaram_sd)(uint32_t offset, 
 void __no_inline_not_in_flash_func(loadrom_sunrise_megaram_usb)(uint32_t offset, bool cache_enable)
 {
     loadrom_sunrise_megaram_common(offset, cache_enable, sunrise_usb_task, sunrise_usb_set_ide_ctx);
+}
+
+void __no_inline_not_in_flash_func(loadrom_megaram)(uint32_t offset, bool cache_enable)
+{
+    (void)offset;
+    (void)cache_enable;
+
+    msx_pio_bus_init();
+
+    if (!psram_prepare_megaram_region())
+    {
+        while (true) { tight_loop_contents(); }
+    }
+
+    uint8_t megaram_bank_reg[4] = { 0, 1, 2, 3 };
+    bool megaram_write_enabled = false;
+    bool megaram_scc_audio = megaram_scc_audio_selected();
+    megaram_fill_ff();
+
+    msx_pio_io_bus_init();
+    if (megaram_scc_audio)
+    {
+        scc_audio_init_for_type(megaram_scc_type_selected());
+        i2s_audio_init_scc();
+        multicore_launch_core1(core1_scc_audio);
+    }
+
+    while (true)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr >= 0x4000u && waddr <= 0xBFFFu)
+            {
+                if (megaram_scc_audio && !megaram_write_enabled && megaram_scc_write(waddr, wdata))
+                    continue;
+                if (megaram_write_enabled)
+                    megaram_write_byte(waddr, wdata, megaram_bank_reg);
+                else
+                    megaram_bank_switch_write(waddr, wdata, megaram_bank_reg);
+            }
+        }
+
+        uint16_t io_addr;
+        uint8_t io_data;
+        while (pio_try_get_io_write(&io_addr, &io_data))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            if (port == 0x8Eu || port == 0x8Fu)
+                megaram_write_enabled = false;
+        }
+
+        while (pio_try_get_io_read(&io_addr))
+        {
+            uint8_t port = io_addr & 0xFFu;
+            if (port == 0x8Eu || port == 0x8Fu)
+                megaram_write_enabled = true;
+            pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read, pio_build_token(false, 0xFFu));
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            bool in_window = addr >= 0x4000u && addr <= 0xBFFFu;
+            uint8_t data = 0xFFu;
+            if (in_window && (!megaram_scc_audio || !megaram_scc_read(addr, &data)))
+                data = megaram_read_byte(addr, megaram_bank_reg);
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+        }
+    }
 }
 
 static void __no_inline_not_in_flash_func(loadrom_sunrise_wifi_common)(
@@ -10073,6 +10181,41 @@ static inline bool __not_in_flash_func(external_scc_read)(uint16_t addr, uint8_t
     if (addr == base ||
         (scc_instance.active && addr >= base + 0x800u && addr <= base + 0x8FFu) ||
         (scc_instance.type == SCC_ENHANCED && (addr & 0xFFFEu) == 0xBFFEu))
+    {
+        *data = (uint8_t)SCC_read(&scc_instance, addr);
+        return true;
+    }
+    return false;
+}
+
+static inline bool __not_in_flash_func(megaram_scc_audio_selected)(void)
+{
+    return ctrl_audio_selection == AUDIO_PROFILE_MEGARAM_SCC ||
+           ctrl_audio_selection == AUDIO_PROFILE_MEGARAM_SCC_PLUS;
+}
+
+static inline uint32_t __not_in_flash_func(megaram_scc_type_selected)(void)
+{
+    return ctrl_audio_selection == AUDIO_PROFILE_MEGARAM_SCC_PLUS ? SCC_ENHANCED : SCC_STANDARD;
+}
+
+static inline bool __not_in_flash_func(megaram_scc_write)(uint16_t addr, uint8_t data)
+{
+    uint32_t base = scc_instance.base_adr;
+    bool consume = scc_instance.active && addr >= base + 0x800u && addr <= base + 0x8FFu;
+    if (!consume && addr >= base && addr <= base + 0x7FFu)
+        SCC_write(&scc_instance, base, data);
+    else
+        SCC_write(&scc_instance, addr, data);
+    if (consume)
+        return true;
+    return false;
+}
+
+static inline bool __not_in_flash_func(megaram_scc_read)(uint16_t addr, uint8_t *data)
+{
+    uint32_t base = scc_instance.base_adr;
+    if (scc_instance.active && addr >= base + 0x800u && addr <= base + 0x8FFu)
     {
         *data = (uint8_t)SCC_read(&scc_instance, addr);
         return true;
@@ -11333,7 +11476,7 @@ int __no_inline_not_in_flash_func(main)()
     // PSG Mirror is unstable on Sunrise Nextor + 1MB mapper: heavy disk I/O can
     // drop mapper segment-register writes, so force it off for those variants.
     if (mapper == MAPPER_SUNRISE_MAPPER_USB || mapper == MAPPER_SUNRISE_MAPPER_SD ||
-        mapper == MAPPER_MEGARAM_SD || mapper == MAPPER_MEGARAM_USB) {
+        mapper == MAPPER_MEGARAM_SD || mapper == MAPPER_MEGARAM_USB || mapper == MAPPER_MEGARAM) {
         ctrl_psg_emulation = 0;
     }
     debug_trace("DBG launch rom=%d mapper=%u audio=%u mp3_started=%u", rom_index, mapper, (unsigned)audio_mode, mp3_core1_started ? 1u : 0u);
@@ -11368,7 +11511,8 @@ int __no_inline_not_in_flash_func(main)()
     // flash path and keeps the mapper hot loop fast).
     bool cache_enable = true;
     bool scc_audio = (audio_mode == AUDIO_MODE_SCC || audio_mode == AUDIO_MODE_SCC_PLUS ||
-                      audio_mode == AUDIO_MODE_SCC_EXTERNAL || audio_mode == AUDIO_MODE_SCC_PLUS_EXTERNAL);
+                      audio_mode == AUDIO_MODE_SCC_EXTERNAL || audio_mode == AUDIO_MODE_SCC_PLUS_EXTERNAL ||
+                      audio_mode == AUDIO_MODE_MEGARAM_SCC || audio_mode == AUDIO_MODE_MEGARAM_SCC_PLUS);
     bool external_scc_audio = (audio_mode == AUDIO_MODE_SCC_EXTERNAL || audio_mode == AUDIO_MODE_SCC_PLUS_EXTERNAL);
     bool sfg_audio = (audio_mode == AUDIO_MODE_YM2151_SFG05 || audio_mode == AUDIO_MODE_YM2151_SFG01);
     bool cartridge_audio = scc_audio || sfg_audio || audio_mode == AUDIO_MODE_DUAL_PSG || audio_mode == AUDIO_MODE_MSX_MUSIC;
@@ -11565,6 +11709,9 @@ int __no_inline_not_in_flash_func(main)()
             break;
         case MAPPER_MEGARAM_USB:
             loadrom_sunrise_megaram_usb(rom_offset, cache_enable);
+            break;
+        case MAPPER_MEGARAM:
+            loadrom_megaram(rom_offset, cache_enable);
             break;
         case 12:
             loadrom_ascii16x(rom_offset, cache_enable);

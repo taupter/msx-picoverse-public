@@ -13,6 +13,7 @@ unsigned char menu_ui_row_width(void);
 
 void menu_ui_clear_rows(unsigned char start_row, unsigned char end_row);
 void menu_ui_render_menu_frame(void);
+void menu_ui_render_detail_frame(void);
 void menu_ui_update_footer_page(void);
 void menu_ui_print_title_line(void);
 void menu_ui_print_delimiter_line(void);

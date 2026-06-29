@@ -250,11 +250,8 @@ static void fh_network_status(void)
 
 static void fh_draw_network_status(void)
 {
-    if (strncmp(fh_status_right, "Connected to ", 13) == 0) {
-        fh_draw_status_left(use_80_columns ? "Network: Online" : "Net: Online");
-    } else {
-        fh_draw_status_left(use_80_columns ? "Network: Offline" : "Network Offline");
-    }
+    unsigned char connected = strncmp(fh_status_right, "Connected to ", 13) == 0;
+    fh_draw_status_left(menu_ui_status_text(connected ? "Net: Online" : "Network Offline", connected ? "Network: Online" : "Network: Offline"));
 }
 
 static void fh_read_status_text(void)
@@ -497,11 +494,7 @@ static void fh_render_detail_screen(const ExplorerFHRecord *record)
     char size_text[8];
     unsigned char can_download = fh_record_fits_sd_cache(record);
 
-    Locate(0, 0);
-    menu_ui_print_title_line();
-    Locate(0, 1);
-    menu_ui_print_delimiter_line();
-    menu_ui_clear_rows(2, 21);
+    menu_ui_render_detail_frame();
 
     trim_name_to_buffer(record->name, name, MAX_FILE_NAME_LENGTH);
     fh_size_text(record->size_kb, size_text);
@@ -524,8 +517,6 @@ static void fh_render_detail_screen(const ExplorerFHRecord *record)
     } else {
         fh_draw_detail_status("File exceeds 4MB limit!");
     }
-    Locate(0, 21);
-    menu_ui_print_delimiter_line();
     fh_render_detail_footer();
 }
 

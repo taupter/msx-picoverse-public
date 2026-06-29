@@ -62,7 +62,7 @@ static void write_index_query(unsigned int index) {
 
 static unsigned char record_is_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
-    return mapper_code == 9 || (mapper_code >= 10 && mapper_code <= 11) || (mapper_code >= 15 && mapper_code <= 20);
+    return mapper_code == 9 || (mapper_code >= 10 && mapper_code <= 11) || (mapper_code >= 15 && mapper_code <= 21);
 }
 
 static unsigned char record_is_wifi_capable_system_rom(const ROMRecord *record) {
@@ -82,7 +82,7 @@ static unsigned char record_is_sunrise_sd_system_rom(const ROMRecord *record) {
 
 static unsigned char record_is_sunrise_mapper_system_rom(const ROMRecord *record) {
     unsigned char mapper_code = record_mapper_code(record->Mapper);
-    return mapper_code == 11 || (mapper_code >= 16 && mapper_code <= 20);
+    return mapper_code == 11 || (mapper_code >= 16 && mapper_code <= 21);
 }
 
 static unsigned char record_supports_scc_audio(const ROMRecord *record) {
@@ -196,12 +196,7 @@ void quick_run_rom(unsigned int index) {
 }
 
 static void render_rom_screen(const ROMRecord *record) {
-    Locate(0, 0);
-    menu_ui_print_title_line();
-    Locate(0, 1);
-    menu_ui_print_delimiter_line();
-
-    menu_ui_clear_rows(2, 21);
+    menu_ui_render_detail_frame();
 
     {
         char name[MAX_FILE_NAME_LENGTH + 1];
@@ -224,10 +219,6 @@ static void render_rom_screen(const ROMRecord *record) {
         Locate(0, 6);
         printf(" ");
     }
-
-    Locate(0, 21);
-    menu_ui_print_delimiter_line();
-    menu_ui_clear_rows(23, 24);
 }
 
 void show_rom_screen(unsigned int index) {
@@ -474,9 +465,7 @@ static void render_rom_volume_line(unsigned char audio_volume, int selected) {
 }
 
 static void render_rom_psg_line(unsigned char psg_enabled, int selected) {
-    char line[80];
-    sprintf(line, "PSG Mirror: %s", psg_enabled ? "Yes" : "No");
-    menu_ui_render_selectable_line(10, line, selected);
+    render_rom_prefixed_line(10, "PSG Mirror: ", psg_enabled ? "Yes" : "No", selected);
 }
 
 static void render_rom_partition_line(unsigned char row, unsigned char sd_partition, int selected) {
@@ -494,9 +483,7 @@ static void render_rom_partition_line(unsigned char row, unsigned char sd_partit
 }
 
 static void render_rom_wifi_line(unsigned char row, unsigned char wifi_enabled, int selected) {
-    char line[80];
-    sprintf(line, "      Wifi: %s", wifi_enabled ? "Yes" : "No");
-    menu_ui_render_selectable_line(row, line, selected);
+    render_rom_prefixed_line(row, "      Wifi: ", wifi_enabled ? "Yes" : "No", selected);
 }
 
 static void render_rom_action_line(unsigned char row, int selected) {
@@ -549,25 +536,35 @@ static unsigned char footer_mode_for_selection(int selection, unsigned char allo
 }
 
 static void render_rom_footer_line(unsigned char mode) {
+    const char *text = 0;
     menu_ui_clear_rows(22, 24);
     Locate(0, 22);
 
-    if (use_80_columns) printf("[ESC - BACK] ");
-    else printf("[ESC-BACK] ");
+    printf(menu_ui_status_text("[ESC-BACK] ", "[ESC - BACK] "));
 
-    if (mode == ROM_FOOTER_MAPPER) {
-            printf("[LEFT/RIGHT - SELECT MAPPER]");
-        } else if (mode == ROM_FOOTER_AUDIO) {
-            printf("[LEFT/RIGHT - CHANGE]");
-        } else if (mode == ROM_FOOTER_PSG) {
-            printf("[LEFT/RIGHT - PSG MIRROR]");
-        } else if (mode == ROM_FOOTER_WIFI) {
-            printf("[LEFT/RIGHT - SELECT WIFI]");
-        } else if (mode == ROM_FOOTER_SD) {
-            printf("[LEFT/RIGHT - SD PARTITION]");
-        } else if (mode == ROM_FOOTER_RUN) {
-            printf("[ENTER - RUN]");
-        } 
+    switch (mode) {
+        case ROM_FOOTER_MAPPER:
+            text = "[LEFT/RIGHT - SELECT MAPPER]";
+            break;
+        case ROM_FOOTER_AUDIO:
+            text = "[LEFT/RIGHT - CHANGE]";
+            break;
+        case ROM_FOOTER_PSG:
+            text = "[LEFT/RIGHT - PSG MIRROR]";
+            break;
+        case ROM_FOOTER_WIFI:
+            text = "[LEFT/RIGHT - SELECT WIFI]";
+            break;
+        case ROM_FOOTER_SD:
+            text = "[LEFT/RIGHT - SD PARTITION]";
+            break;
+        case ROM_FOOTER_RUN:
+            text = "[ENTER - RUN]";
+            break;
+    }
+    if (text) {
+        printf(text);
+    }
 
 
 }
@@ -601,11 +598,7 @@ static void render_mp3_screen(const ROMRecord *record) {
     unsigned long size_kb = record->Size / 1024u;
     const char *type = ((record->Mapper & AUDIO_TYPE_MASK) == AUDIO_TYPE_WAV) ? "WAV" : "MP3";
 
-    Locate(0, 0);
-    menu_ui_print_title_line();
-    Locate(0, 1);
-    menu_ui_print_delimiter_line();
-    menu_ui_clear_rows(2, 21);
+    menu_ui_render_detail_frame();
 
     trim_name_to_buffer(record->Name, name, use_80_columns ? 71 : 29);
 
@@ -623,10 +616,6 @@ static void render_mp3_screen(const ROMRecord *record) {
     printf("   Size: %lu KB", size_kb);
     Locate(0, 6);
     printf(" Source: SD");
-
-    Locate(0, 21);
-    menu_ui_print_delimiter_line();
-    menu_ui_clear_rows(23, 24);
 }
 
 static void render_mp3_counter_line(void) {
@@ -678,21 +667,16 @@ static void render_mp3_actions(int selection, unsigned char status) {
 
 static void render_mp3_footer_line(void) {
     unsigned char mode = Peek(MP3_CTRL_MODE);
-    menu_ui_clear_rows(22, 22);
+    unsigned char multi_song = mode != MP3_PLAY_MODE_SINGLE;
+    const char *text;
+    menu_ui_clear_rows(22, 23);
     Locate(0, 22);
     if (use_80_columns) {
-        if (mode == MP3_PLAY_MODE_ALL || mode == MP3_PLAY_MODE_RANDOM) {
-            printf("[ESC - BACK] [ENTER - ACTION] [N - NEXT SONG] [P - PREVIOUS SONG]             ");
-        } else {
-            printf("[ESC - BACK] [ENTER - ACTION]                                                 ");
-        }
+        text = multi_song ? "[ESC - BACK] [ENTER - ACTION] [N - NEXT SONG] [P - PREVIOUS SONG]" : "[ESC - BACK] [ENTER - ACTION]";
     } else {
-        if (mode == MP3_PLAY_MODE_ALL || mode == MP3_PLAY_MODE_RANDOM) {
-            printf("[ESC - BACK] [N - NEXT] [P - PREVIOUS]");
-        } else {
-            printf("[ESC - BACK] [ENT - ACTION]           ");
-        }
+        text = multi_song ? "[ESC - BACK] [N - NEXT] [P - PREVIOUS]" : "[ESC - BACK] [ENT - ACTION]";
     }
+    printf(text);
 }
 
 static void show_mp3_screen(unsigned int index) {
@@ -888,13 +872,17 @@ static unsigned char audio_profile_is_supported(const ROMRecord *record, unsigne
     if (audio_profile == AUDIO_PROFILE_NONE) {
         return 1;
     }
-    if (audio_profile == AUDIO_PROFILE_SCC || audio_profile == AUDIO_PROFILE_SCC_PLUS) {
+    if (audio_profile >= AUDIO_PROFILE_SCC && audio_profile <= AUDIO_PROFILE_SCC_PLUS) {
         return record_supports_scc_audio(record);
     }
-    if (audio_profile == AUDIO_PROFILE_SCC_EXTERNAL || audio_profile == AUDIO_PROFILE_SCC_PLUS_EXTERNAL) {
+    if (audio_profile >= AUDIO_PROFILE_SCC_EXTERNAL && audio_profile <= AUDIO_PROFILE_SCC_PLUS_EXTERNAL) {
         return record_supports_external_scc_audio(record);
     }
-    if (audio_profile == AUDIO_PROFILE_YM2151_SFG05 || audio_profile == AUDIO_PROFILE_YM2151_SFG01) {
+    if (audio_profile >= AUDIO_PROFILE_MEGARAM_SCC && audio_profile <= AUDIO_PROFILE_MEGARAM_SCC_PLUS) {
+        unsigned char mapper_code = record_mapper_code(record->Mapper);
+        return mapper_code >= 19 && mapper_code <= 21;
+    }
+    if (audio_profile >= AUDIO_PROFILE_YM2151_SFG05 && audio_profile <= AUDIO_PROFILE_YM2151_SFG01) {
         return record_supports_msx_music(record);
     }
     if (audio_profile == AUDIO_PROFILE_DUAL_PSG) {
@@ -927,6 +915,8 @@ static unsigned char next_audio_profile(const ROMRecord *record, unsigned char a
         AUDIO_PROFILE_SCC_PLUS,
         AUDIO_PROFILE_SCC_EXTERNAL,
         AUDIO_PROFILE_SCC_PLUS_EXTERNAL,
+        AUDIO_PROFILE_MEGARAM_SCC,
+        AUDIO_PROFILE_MEGARAM_SCC_PLUS,
         AUDIO_PROFILE_YM2151_SFG05,
         AUDIO_PROFILE_YM2151_SFG01,
         AUDIO_PROFILE_DUAL_PSG,
@@ -934,8 +924,6 @@ static unsigned char next_audio_profile(const ROMRecord *record, unsigned char a
     };
     const unsigned int audio_count = (unsigned int)(sizeof(audio_profiles) / sizeof(audio_profiles[0]));
     int current = -1;
-
-    audio_profile = sanitize_audio_profile(record, audio_profile);
 
     for (unsigned int i = 0; i < audio_count; i++) {
         if (audio_profiles[i] == audio_profile) {
@@ -969,21 +957,25 @@ static void build_audio_text(const ROMRecord *record, unsigned char audio_profil
     }
     audio_profile = sanitize_audio_profile(record, audio_profile);
     if (audio_profile == AUDIO_PROFILE_SCC) {
-        audio_label = "YM2212 (SCC)";
+        audio_label = "SCC";
     } else if (audio_profile == AUDIO_PROFILE_SCC_PLUS) {
-        audio_label = "YM2212 (SCC+)";
+        audio_label = "SCC+";
     } else if (audio_profile == AUDIO_PROFILE_SCC_EXTERNAL) {
-        audio_label = "YM2212 (SCC) - External";
+        audio_label = "External SCC";
     } else if (audio_profile == AUDIO_PROFILE_SCC_PLUS_EXTERNAL) {
-        audio_label = "YM2212 (SCC+) - External";
+        audio_label = "External SCC+";
+    } else if (audio_profile == AUDIO_PROFILE_MEGARAM_SCC) {
+        audio_label = "MegaRAM SCC";
+    } else if (audio_profile == AUDIO_PROFILE_MEGARAM_SCC_PLUS) {
+        audio_label = "MegaRAM SCC+";
     } else if (audio_profile == AUDIO_PROFILE_YM2151_SFG05) {
-        audio_label = "YM2164 (SFG05/OPP)";
+        audio_label = "YM2164 SFG05";
     } else if (audio_profile == AUDIO_PROFILE_YM2151_SFG01) {
-        audio_label = "YM2151 (SFG01/OPM)";
+        audio_label = "YM2151 SFG01";
     } else if (audio_profile == AUDIO_PROFILE_DUAL_PSG) {
-        audio_label = "YM2149 (Dual PSG)";
+        audio_label = "Dual PSG";
     } else if (audio_profile == AUDIO_PROFILE_MSX_MUSIC) {
-        audio_label = "YM2413 (FMPAC/MSX-MUSIC)";
+        audio_label = "FMPAC/MSX-MUSIC";
     }
     strncpy(out, audio_label, out_size - 1);
     out[out_size - 1] = '\0';
