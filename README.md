@@ -24,6 +24,7 @@ If you find any issues, have questions, or want to contribute, please open an is
 - Carnivore2-compatible RAM-mode loader on PicoVerse 2350 (`loadrom.exe -c1` / `loadrom.exe -c2`) for `SROM.COM /D15` uploads into the 1MB PSRAM mapper.
 - ESP-01 WiFi support for PicoVerse 2350 Sunrise IDE LoadROM/MultiROM builds (`loadrom.exe -s1 -w`, `-m1 -w`, `-s2 -w`, `-m2 -w`) and for the Explorer File Hunter browser. Compatible with both real MSX hardware and FPGA-based MSX cores.
 - SCC/SCC+, Dual PSG, MSX-MUSIC/YM2413, and YM2151/SFG emulation on the PicoVerse 2350, with per-ROM audio profile selection where supported.
+- Yamanooto flash-cartridge emulation on the PicoVerse 2350 (`yamanooto.exe`) — a Konami-SCC compatible 8 MB flash cartridge with SCC/SCC+, a secondary (dual) PSG, a primary PSG mirror, and MSX-MUSIC/FM-PAC, all always available with the firmware selecting SCC, FM, or pure PSG on the fly so one image can mix SCC, FM, and PSG games.
 - PC-side tooling that generates UF2 images locally for quick drag-and-drop flashing.
 - USB keyboard support on PicoVerse 2040 — use a standard USB keyboard as the MSX keyboard via the cartridge slot.
 - MSX-MIDI support on PicoVerse 2040 — use a USB-MIDI cable as a standard MSX-MIDI interface via the cartridge slot. 
@@ -45,11 +46,15 @@ If you find any issues, have questions, or want to contribute, please open an is
 **Explorer Guides:** Use the Explorer tool to manage flash, embedded Sunrise Nextor, and microSD ROMs, cycle supported microSD partitions, delete selected SD files, play MP3/WAV files from the microSD card, browse File Hunter over ESP-01 WiFi, select ROM audio/PSG options, and search for titles on the device.
 - [MSX PicoVerse 2350 Explorer Tool Manual (English)](/docs/msx-picoverse-2350-explorer-tool-manual.en-us.md)
 
+**Yamanooto Guides:** Use the Yamanooto tool to create a UF2 that emulates a Yamanooto flash cartridge (Konami-SCC compatible, SCC/SCC+, dual PSG, primary PSG mirror, and MSX-MUSIC/FM-PAC) from a single ROM image, with the firmware choosing SCC/FM/PSG automatically at runtime.
+- [MSX PicoVerse 2350 Yamanooto Tool Manual (English)](/docs/msx-picoverse-2350-yamanooto-tool-manual.en-us.md)
+
 **Reference Material** 
 - [PicoVerse 2040 Features Overview](/docs/msx-picoverse-2040-features.md)
 - [PicoVerse 2350 Features Overview](/docs/msx-picoverse-2350-features.md)
 - [MSX PicoVerse 2350 Dual PSG Implementation](/docs/msx-picoverse-2350-dualpsg.md)
 - [MSX PicoVerse 2350 MSX-MUSIC/FM-PAC Implementation](/docs/msx-picoverse-2350-fmpac.md)
+- [MSX PicoVerse 2350 Yamanooto Implementation](/docs/msx-picoverse-2350-yamanooto.md)
 - [MSX PicoVerse 2350 MegaRAM Implementation](/docs/msx-picoverse-2350-megaram.md)
 - [MSX PicoVerse 2350 WAVEGAME Protocol and Support](/docs/msx-picoverse-2350-wavegame.md)
 - [MSX PicoVerse 2350 WiFi Support](/docs/msx-picoverse-2350-wifi.md)
@@ -114,6 +119,7 @@ Interactive BOM available at [PicoVerse 2040 BOM](https://htmlpreview.github.io/
 - Sunrise IDE + 1MB PSRAM memory mapper mode provides both Nextor disk access and expanded RAM (`-m1` for microSD, `-m2` for USB).
 - Sunrise IDE + 1MB mapper + 1MB MegaRAM mode provides Nextor disk access, standard mapper RAM, and a separate writable MegaRAM cartridge surface (`-r1` for microSD, `-r2` for USB).
 - Carnivore2-compatible RAM-mode loading lets `SROM.COM /D15` upload ROMs into the 1MB PSRAM mapper (`-c1` for microSD, `-c2` for USB).
+- Yamanooto flash-cartridge emulation (`yamanooto.exe`) reproduces the  Yamanooto: a Konami-SCC compatible 8 MB flash cartridge with SCC/SCC+, a secondary (dual) PSG on ports `0x10`/`0x11`, a primary PSG mirror (`0xA0`/`0xA1`), and MSX-MUSIC/FM-PAC via an expanded subslot. All engines are always available and the firmware selects SCC, FM, or pure PSG on the fly, so a single image can hold a mix of SCC, FM, and PSG games.
 - LoadROM Sunrise builds can also expose ESP-01 WiFi support with `-w` on top of the `-s1`/`-m1`/`-s2`/`-m2` modes.
 - LoadROM, MultiROM, and Explorer support the Sunrise IDE options. MultiROM and Explorer allow combining them so multiple Nextor modes appear as selectable SYSTEM entries in the menu; Explorer also provides `-a` / `--allnextor` to add all embedded Nextor entries while still appending folder ROMs.
 - Shares the same ROM mapper support list as the 2040 build.
@@ -266,6 +272,8 @@ All hardware and firmware binaries in this repository are released under the Cre
 **MegaRAM support on PicoVerse 2350 LoadROM and Explorer** is a PicoVerse PSRAM-backed implementation of the MSX MegaRAM concept created by Ademir Carchano in Brazil in 1987. The implemented banking behavior follows the Cartucho II / SDMapper-compatible MegaRAM model: four 8KB windows in `0x4000`-`0xBFFF`, bank latches selected by address bits A14:A13, volatile RAM contents, and loader-controlled write enable through `IN (0x8E/0x8F)` with write disable through `OUT (0x8E/0x8F)`. The PicoVerse implementation is original firmware code and is provided as a tribute to Ademir Carchano's contribution to the MSX community.
 
 **FMPCCMFC.BIN** is the English FM-PAC BIOS used by PicoVerse 2350 LoadROM when `-f` / `-fmpac` is selected. The FM-PAC BIOS ROM is copyrighted by Matsushita Corp.; the English translation is credited to 232, Max Iwamoto, and GDX.
+
+**The Yamanooto flash-cartridge emulation on PicoVerse 2350** reproduces the *Yamanooto* cartridge (a Konami-SCC compatible 8 MB flash-ROM with SCC/SCC+ and a secondary PSG). The register map, mapper/offset behaviour, SCC/SCC+ activation rules, and FPGA ID handshake were implemented with reference to openMSX's Yamanooto device implementation ([Yamanooto.cc](https://github.com/openMSX/openMSX/blob/master/src/memory/Yamanooto.cc)) and public Yamanooto programming notes ([Programming the Yamanooto](https://genami.shop/blogs/news/programming-the-yamanooto)). PicoVerse's SCC/SCC+ uses **emu2212**, the dual/mirror PSG uses **emu2149**, and the added MSX-MUSIC engine uses **emu2413** (all © Mitsutaka Okazaki, MIT License). The embedded FM-PAC BIOS (`FMPCCMFC.BIN`) is credited as above. The RP2350 bus/PIO handling, the runtime SCC/FM/PSG engine selector, and the audio pipeline are original PicoVerse work licensed under CC BY-NC-SA 4.0. The physical Yamanooto cartridge is a product of the SCC Alliance; PicoVerse is an independent emulation and is not affiliated with or endorsed in any way.
 
 **MIDI-PAC PSG-to-MIDI Conversion:**  
 The MIDI-PAC firmware and its quality improvements were developed against public technical references and behavior studies. The PSG-to-MIDI mapping combines hardware-correct AY-3-8910 / YM2149 interpretation with pragmatic General MIDI reinterpretation for musical output on modules like the Roland SC-55. Key references used include:  

@@ -1,0 +1,1113 @@
+// MSX PICOVERSE PROJECT
+// (c) 2026 Cristiano Goncalves
+// The Retro Hacker
+//
+// yamanooto.c - Yamanooto flash cartridge emulation for MSX PICOVERSE 2350
+//
+// Emulates the "Yamanooto" flash cartridge on the PicoVerse 2350 hardware.
+// The Yamanooto is a Konami-SCC compatible 8 MB flash-ROM cartridge that also
+// provides SCC / SCC+ audio and a secondary (dual) AY-3-8910 PSG.
+//
+// As a PicoVerse extension the cartridge is always presented as an expanded slot
+// with an MSX-MUSIC (YM2413 / OPLL) FM-PAC BIOS in sub-slot 3, so FM games detect
+// the OPLL. Because a single flash image can hold a mix of SCC games and FM games,
+// the audio core renders either the SCC or the FM on the fly, choosing whichever
+// chip the running program is currently driving (the two are never used together
+// by the same game). The OPLL responds both to the FM-PAC memory registers
+// (0x7FF4/0x7FF5) and to the raw I/O ports (0x7C/0x7D).
+//
+// The secondary (dual) PSG and a mirror of the main MSX PSG (ports 0xA0/0xA1)
+// are also mixed into the cartridge DAC, but only while a channel is actually
+// audible, so idle PSGs never add a buzz to the (quieter) FM music.
+//
+// This firmware reproduces the behaviour documented in the openMSX Yamanooto
+// device (src/memory/Yamanooto.cc):
+//   * Konami-SCC mapper (default) and Konami-4 mapper (CFGR bit K4)
+//   * 10-bit bank registers with a global bank offset (OFFR + CFGR SUBOFF bits)
+//   * Memory-mapped register window at 0x7FFC-0x7FFF (ENAR/OFFR/CFGR/FPGA)
+//   * SCC and SCC+ audio (emu2212), auto-detected from the bank registers
+//   * Secondary PSG on I/O ports 0x10/0x11, optionally echoed to 0xA0/0xA1
+//
+// The PIO state machines handle MSX bus timing deterministically: SM0 answers
+// memory reads (asserting /WAIT while the RP2350 looks up the byte) and SM1
+// captures memory writes for bank switching / register / SCC updates. A second
+// PIO handles the I/O bus for the secondary PSG.
+//
+// The ROM image is concatenated after the firmware binary. A 59-byte config
+// record (name + type + size + offset) precedes the raw image.
+//
+// NOTE: On-cartridge flash *programming* (ENAR WREN + AmdFlash command
+// sequences) is intentionally not emulated. The firmware runs a pre-flashed
+// image, which is the common use case; write cycles with WREN asserted are
+// ignored so they never corrupt the emulated banks.
+//
+// This work is licensed under a "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+// License". https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+#include <string.h>
+#include "pico/stdlib.h"
+#include "pico/multicore.h"
+#include "hardware/clocks.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
+#include "hardware/sync.h"
+#include "hardware/regs/qmi.h"
+#include "hardware/structs/qmi.h"
+#include "pico/audio_i2s.h"
+#include "yamanooto.h"
+#include "emu2212.h"
+#include "emu2149.h"
+#include "emu2413.h"
+#include "msx_bus.pio.h"
+
+// Size of the FM-PAC BIOS image appended after the ROM payload when MSX-MUSIC
+// is enabled (64 KB, paged in four 16 KB banks).
+#define FMPAC_BIOS_SIZE 65536u
+
+// -----------------------------------------------------------------------
+// PIO bus contexts
+// -----------------------------------------------------------------------
+typedef struct {
+    PIO pio;
+    uint sm_read;
+    uint sm_write;
+    uint offset_read;
+    uint offset_write;
+} msx_pio_bus_t;
+
+static msx_pio_bus_t msx_bus;
+static bool msx_bus_programs_loaded = false;
+
+typedef struct {
+    PIO pio_read;
+    PIO pio_write;
+    uint sm_io_read;
+    uint sm_io_write;
+    uint offset_io_read;
+    uint offset_io_write;
+} msx_pio_io_bus_t;
+
+static msx_pio_io_bus_t msx_io_bus;
+static bool msx_io_bus_programs_loaded = false;
+
+// -----------------------------------------------------------------------
+// ROM source
+// -----------------------------------------------------------------------
+static uint32_t active_rom_size = 0;         // ROM image size in bytes
+static const uint8_t *rom_base = NULL;       // Start of the raw ROM image in flash
+
+// -----------------------------------------------------------------------
+// SCC + dual PSG + MSX-MUSIC emulation state and I2S audio
+// -----------------------------------------------------------------------
+static SCC scc_instance;
+static PSG psg_instance;                     // Secondary (dual) PSG on I/O 0x10/0x11
+static PSG main_psg_instance;                // PSG mirror of the main MSX PSG (I/O 0xA0/0xA1)
+static OPLL *msx_music_instance = NULL;      // MSX-MUSIC (YM2413) engine (always created)
+static struct audio_buffer_pool *audio_pool = NULL;
+static bool audio_ready = false;
+static int audio_dma_channel = -1;
+
+// The SCC (5 voices) and the FM/OPLL (9 voices) are both far too heavy to render
+// together every sample on core 1, so only one is rendered at a time. Because a
+// single Yamanooto image can hold a mix of SCC games and FM games, the choice is
+// made on the fly from recent write activity: whichever chip the running program
+// is currently driving is the one that is rendered. These counters are bumped on
+// each chip's *sound-register* writes and sampled once per audio buffer.
+static volatile uint32_t scc_activity = 0;   // bumped on SCC register-window writes (core 0)
+static volatile uint32_t fm_activity = 0;    // bumped on OPLL register writes (core 1)
+
+
+// -----------------------------------------------------------------------
+// Yamanooto register file
+// -----------------------------------------------------------------------
+static volatile uint8_t enableReg = 0;   // ENAR (0x7FFF)
+static volatile uint8_t offsetReg = 0;   // OFFR (0x7FFE)
+static volatile uint8_t configReg = 0;   // CFGR (0x7FFD)
+static volatile uint8_t fpgaFsm   = 0;   // FPGA ID read state machine
+static uint16_t bankRegs[4] = {0, 1, 2, 3};  // Offset-adjusted 10-bit bank registers
+static uint8_t  rawBanks[4] = {0, 1, 2, 3};  // Raw values (used for SCC activation)
+
+// FPGA "read ID" response sequence (just enough for detection code to pass)
+static const uint8_t FPGA_ID[5] = { 0xFFu, 0x1Fu, 0x23u, 0x00u, 0x00u };
+
+// -----------------------------------------------------------------------
+// GPIO initialisation
+// -----------------------------------------------------------------------
+static inline void setup_gpio(void)
+{
+    for (uint pin = PIN_A0; pin <= PIN_A15; ++pin)
+    {
+        gpio_init(pin);
+        gpio_set_input_hysteresis_enabled(pin, true);
+        gpio_set_dir(pin, GPIO_IN);
+    }
+    for (uint pin = PIN_D0; pin <= PIN_D7; ++pin)
+    {
+        gpio_init(pin);
+        gpio_set_input_hysteresis_enabled(pin, true);
+    }
+    gpio_init(PIN_RD);      gpio_set_dir(PIN_RD, GPIO_IN);
+    gpio_init(PIN_WR);      gpio_set_dir(PIN_WR, GPIO_IN);
+    gpio_init(PIN_IORQ);    gpio_set_dir(PIN_IORQ, GPIO_IN);
+    gpio_init(PIN_SLTSL);   gpio_set_dir(PIN_SLTSL, GPIO_IN);
+    gpio_init(PIN_BUSSDIR); gpio_set_dir(PIN_BUSSDIR, GPIO_IN);
+    gpio_init(PIN_PSRAM);   gpio_set_dir(PIN_PSRAM, GPIO_IN);
+}
+
+// -----------------------------------------------------------------------
+// PIO bus initialisation (memory reads/writes on PIO0)
+// -----------------------------------------------------------------------
+static void msx_pio_bus_init(void)
+{
+    msx_bus.pio = pio0;
+    msx_bus.sm_read  = 0;
+    msx_bus.sm_write = 1;
+
+    if (!msx_bus_programs_loaded)
+    {
+        msx_bus.offset_read  = pio_add_program(msx_bus.pio, &msx_read_responder_program);
+        msx_bus.offset_write = pio_add_program(msx_bus.pio, &msx_write_captor_program);
+        msx_bus_programs_loaded = true;
+    }
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, false);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, false);
+    pio_sm_clear_fifos(msx_bus.pio, msx_bus.sm_read);
+    pio_sm_clear_fifos(msx_bus.pio, msx_bus.sm_write);
+    pio_sm_restart(msx_bus.pio, msx_bus.sm_read);
+    pio_sm_restart(msx_bus.pio, msx_bus.sm_write);
+
+    pio_sm_config cfg_read = msx_read_responder_program_get_default_config(msx_bus.offset_read);
+    sm_config_set_in_pins(&cfg_read, PIN_A0);
+    sm_config_set_in_shift(&cfg_read, false, false, 16);
+    sm_config_set_out_pins(&cfg_read, PIN_D0, 8);
+    sm_config_set_out_shift(&cfg_read, true, false, 32);
+    sm_config_set_sideset_pins(&cfg_read, PIN_WAIT);
+    sm_config_set_jmp_pin(&cfg_read, PIN_RD);
+    sm_config_set_clkdiv(&cfg_read, 1.0f);
+    pio_sm_init(msx_bus.pio, msx_bus.sm_read, msx_bus.offset_read, &cfg_read);
+
+    pio_sm_config cfg_write = msx_write_captor_program_get_default_config(msx_bus.offset_write);
+    sm_config_set_in_pins(&cfg_write, PIN_A0);
+    sm_config_set_in_shift(&cfg_write, false, false, 32);
+    sm_config_set_fifo_join(&cfg_write, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg_write, PIN_WR);
+    sm_config_set_clkdiv(&cfg_write, 1.0f);
+    pio_sm_init(msx_bus.pio, msx_bus.sm_write, msx_bus.offset_write, &cfg_write);
+
+    pio_gpio_init(msx_bus.pio, PIN_WAIT);
+    pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_read, PIN_WAIT, 1, true);
+
+    for (uint pin = PIN_D0; pin <= PIN_D7; ++pin)
+    {
+        pio_gpio_init(msx_bus.pio, pin);
+    }
+    pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_read, PIN_D0, 8, false);
+    pio_sm_set_consecutive_pindirs(msx_bus.pio, msx_bus.sm_write, PIN_D0, 8, false);
+
+    gpio_put(PIN_WAIT, 1);
+
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_read, true);
+    pio_sm_set_enabled(msx_bus.pio, msx_bus.sm_write, true);
+}
+
+// -----------------------------------------------------------------------
+// PIO I/O bus initialisation (secondary PSG on PIO1)
+// -----------------------------------------------------------------------
+static void msx_pio_io_bus_init(void)
+{
+    msx_io_bus.pio_read = pio1;
+    msx_io_bus.pio_write = pio1;
+    msx_io_bus.sm_io_read  = 0;
+    msx_io_bus.sm_io_write = 1;
+
+    if (!msx_io_bus_programs_loaded)
+    {
+        msx_io_bus.offset_io_read = pio_add_program(msx_io_bus.pio_read, &msx_io_read_responder_program);
+        msx_io_bus.offset_io_write = pio_add_program(msx_io_bus.pio_write, &msx_io_write_captor_program);
+        msx_io_bus_programs_loaded = true;
+    }
+
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, false);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, false);
+    pio_sm_clear_fifos(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_clear_fifos(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    pio_sm_restart(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    pio_sm_restart(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+
+    pio_sm_config cfg_io_read = msx_io_read_responder_program_get_default_config(msx_io_bus.offset_io_read);
+    sm_config_set_in_pins(&cfg_io_read, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_read, false, false, 16);
+    sm_config_set_out_pins(&cfg_io_read, PIN_D0, 8);
+    sm_config_set_out_shift(&cfg_io_read, true, false, 32);
+    sm_config_set_jmp_pin(&cfg_io_read, PIN_RD);
+    sm_config_set_clkdiv(&cfg_io_read, 1.0f);
+    pio_sm_init(msx_io_bus.pio_read, msx_io_bus.sm_io_read, msx_io_bus.offset_io_read, &cfg_io_read);
+
+    pio_sm_config cfg_io_write = msx_io_write_captor_program_get_default_config(msx_io_bus.offset_io_write);
+    sm_config_set_in_pins(&cfg_io_write, PIN_A0);
+    sm_config_set_in_shift(&cfg_io_write, false, false, 32);
+    sm_config_set_fifo_join(&cfg_io_write, PIO_FIFO_JOIN_RX);
+    sm_config_set_jmp_pin(&cfg_io_write, PIN_WR);
+    sm_config_set_clkdiv(&cfg_io_write, 1.0f);
+    pio_sm_init(msx_io_bus.pio_write, msx_io_bus.sm_io_write, msx_io_bus.offset_io_write, &cfg_io_write);
+
+    pio_sm_set_consecutive_pindirs(msx_io_bus.pio_read, msx_io_bus.sm_io_read, PIN_D0, 8, false);
+
+    pio_sm_set_enabled(msx_io_bus.pio_read, msx_io_bus.sm_io_read, true);
+    pio_sm_set_enabled(msx_io_bus.pio_write, msx_io_bus.sm_io_write, true);
+}
+
+// -----------------------------------------------------------------------
+// Token / FIFO helpers
+// -----------------------------------------------------------------------
+static inline uint16_t __not_in_flash_func(pio_build_token)(bool drive, uint8_t data)
+{
+    uint8_t dir_mask = drive ? 0xFFu : 0x00u;
+    return (uint16_t)data | ((uint16_t)dir_mask << 8);
+}
+
+static inline bool __not_in_flash_func(pio_try_get_write)(uint16_t *addr_out, uint8_t *data_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_write))
+        return false;
+
+    uint32_t sample = pio_sm_get(msx_bus.pio, msx_bus.sm_write);
+    *addr_out = (uint16_t)(sample & 0xFFFFu);
+    *data_out = (uint8_t)((sample >> 16) & 0xFFu);
+    return true;
+}
+
+static inline bool __not_in_flash_func(pio_try_get_io_write)(uint16_t *addr_out, uint8_t *data_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_io_bus.pio_write, msx_io_bus.sm_io_write))
+        return false;
+
+    uint32_t sample = pio_sm_get(msx_io_bus.pio_write, msx_io_bus.sm_io_write);
+    *addr_out = (uint16_t)(sample & 0xFFFFu);
+    *data_out = (uint8_t)((sample >> 16) & 0xFFu);
+    return true;
+}
+
+static inline bool __not_in_flash_func(pio_try_get_io_read)(uint16_t *addr_out)
+{
+    if (pio_sm_is_rx_fifo_empty(msx_io_bus.pio_read, msx_io_bus.sm_io_read))
+        return false;
+
+    *addr_out = (uint16_t)pio_sm_get(msx_io_bus.pio_read, msx_io_bus.sm_io_read);
+    return true;
+}
+
+static inline int16_t __not_in_flash_func(clamp_i16)(int32_t sample)
+{
+    if (sample > 32767) return 32767;
+    if (sample < -32768) return -32768;
+    return (int16_t)sample;
+}
+
+// -----------------------------------------------------------------------
+// Yamanooto address decoding helpers
+// -----------------------------------------------------------------------
+static inline uint32_t __not_in_flash_func(yama_bank_offset)(void)
+{
+    return ((uint32_t)offsetReg << 2) | ((uint32_t)(configReg & YAMA_SUBOFF) >> 4);
+}
+
+static inline uint16_t __not_in_flash_func(yama_mirror)(uint16_t address)
+{
+    // mirror 0x4000<->0xC000 and 0x8000<->0x0000: real hardware ignores the
+    // upper address bit. In-slot accesses are already in [0x4000,0xBFFF].
+    if (address < 0x4000u || address >= 0xC000u)
+        address ^= 0x8000u;
+    return address;
+}
+
+static inline uint32_t __not_in_flash_func(yama_flash_addr)(uint16_t address)
+{
+    uint32_t page8kB = (uint32_t)(address >> 13) - 2u;  // 0..3 for [0x4000,0xBFFF]
+    uint32_t bank = (uint32_t)bankRegs[page8kB] & 0x3FFu;
+    return (bank << 13) | (uint32_t)(address & 0x1FFFu);
+}
+
+static inline uint8_t __not_in_flash_func(yama_read_flash)(uint32_t faddr)
+{
+    if (faddr < active_rom_size)
+        return rom_base[faddr];
+    return 0xFFu;  // unprogrammed flash reads back as 0xFF
+}
+
+// -----------------------------------------------------------------------
+// Memory read handler (returns the byte the cartridge drives onto the bus)
+// -----------------------------------------------------------------------
+static inline uint8_t __not_in_flash_func(yama_mem_read)(uint16_t addr)
+{
+    // Register window at 0x7FFC-0x7FFF (NOT mirrored) when REGEN is set
+    if (addr >= YAMA_FPGA_REG && addr <= YAMA_ENAR && (enableReg & YAMA_REGEN))
+    {
+        switch (addr)
+        {
+            case YAMA_FPGA_REG:
+                if (!(configReg & YAMA_FPGA_EN))
+                    return 0xFFu;
+                return FPGA_ID[fpgaFsm];
+            case YAMA_CFGR:
+                return (uint8_t)(configReg | YAMA_FPGA_WAIT);
+            case YAMA_OFFR:
+                return offsetReg;
+            case YAMA_ENAR:
+                return enableReg;
+            default:
+                break;
+        }
+    }
+
+    uint16_t maddr = yama_mirror(addr);
+
+    // SCC / SCC+ register reads (K4 mode has no SCC)
+    if (!(configReg & YAMA_K4))
+    {
+        if (scc_instance.active)
+        {
+            uint32_t scc_reg_start = scc_instance.base_adr + 0x800u; // 0x9800 or 0xB800
+            if (maddr >= scc_reg_start && maddr <= (scc_reg_start + 0xFFu))
+                return (uint8_t)SCC_read(&scc_instance, maddr);
+        }
+        // SCC+ mode register readback at 0xBFFE-0xBFFF
+        if ((maddr & 0xFFFEu) == 0xBFFEu)
+            return (uint8_t)SCC_read(&scc_instance, maddr);
+    }
+
+    if (configReg & YAMA_ROMDIS)
+        return 0xFFu;
+
+    return yama_read_flash(yama_flash_addr(maddr));
+}
+
+// -----------------------------------------------------------------------
+// Memory write handler (bank switching, SCC and register updates)
+// -----------------------------------------------------------------------
+static inline void __not_in_flash_func(yama_mem_write)(uint16_t addr, uint8_t data)
+{
+    // Register window at 0x7FFC-0x7FFF (NOT mirrored)
+    if (addr >= YAMA_FPGA_REG && addr <= YAMA_ENAR)
+    {
+        if (addr == YAMA_ENAR)
+        {
+            enableReg = data;
+        }
+        else if (enableReg & YAMA_REGEN)
+        {
+            switch (addr)
+            {
+                case YAMA_FPGA_REG:
+                    if (configReg & YAMA_FPGA_EN)
+                    {
+                        // Minimal FPGA "read ID" command handshake
+                        switch (fpgaFsm)
+                        {
+                            case 0: if (data == 0x9Fu) fpgaFsm = 1; break;
+                            case 1: case 2: case 3: ++fpgaFsm; break;
+                            default: fpgaFsm = 0; break;
+                        }
+                    }
+                    break;
+                case YAMA_CFGR:
+                    configReg = data;
+                    break;
+                case YAMA_OFFR:
+                    offsetReg = data;
+                    break;
+                default:
+                    break;
+            }
+        }
+        return; // register addresses never trigger mapper/SCC updates
+    }
+
+    uint16_t maddr = yama_mirror(addr);
+    uint32_t page8kB = (uint32_t)(maddr >> 13) - 2u;
+
+    // Flash programming with WREN is not emulated: ignore to protect the banks.
+    if (enableReg & YAMA_WREN)
+        return;
+
+    uint32_t offset = yama_bank_offset();
+
+    if (configReg & YAMA_K4)
+    {
+        // Konami-4: bank 0 (0x4000-0x5FFF) is fixed; the others switch
+        if (!(configReg & YAMA_MDIS) && maddr >= 0x6000u)
+        {
+            bankRegs[page8kB] = (uint16_t)(((uint32_t)data + offset) & 0x3FFu);
+            rawBanks[page8kB] = data;
+        }
+        return;
+    }
+
+    // Konami-SCC: feed every mapper-region write to the SCC engine, which
+    // auto-detects SCC enable (bank2==0x3F), SCC+ enable (bank3 bit7) and the
+    // mode register at 0xBFFE.
+    SCC_write(&scc_instance, maddr, data);
+
+    // Record SCC sound activity for the on-the-fly engine selector: only count
+    // writes to the SCC register window (0x9800-0x9FFF / 0xB800-0xBFFF) while the
+    // SCC is enabled, so bank-switch writes and FM games do not trigger it.
+    if (scc_instance.active &&
+        (((maddr & 0xF800u) == 0x9800u) || ((maddr & 0xF800u) == 0xB800u)))
+    {
+        scc_activity++;
+    }
+
+    // Bank switch on [0x5000,0x57FF] [0x7000,0x77FF] [0x9000,0x97FF] [0xB000,0xB7FF]
+    if (((maddr & 0x1800u) == 0x1000u) && !(configReg & YAMA_MDIS))
+    {
+        bankRegs[page8kB] = (uint16_t)(((uint32_t)data + offset) & 0x3FFu);
+        rawBanks[page8kB] = data;
+    }
+}
+
+// -----------------------------------------------------------------------
+// MSX-MUSIC (YM2413 / OPLL) rendering
+// -----------------------------------------------------------------------
+// The OPLL is touched ONLY on core 1 (drained from the write ring + I/O FIFO,
+// then rendered), so no spin lock is needed. FM-PAC memory-register writes
+// captured on core 0 are handed to core 1 through a lock-free ring; this both
+// decouples core 0 from the audio path and buffers register bursts so the
+// (lossy) MSX write FIFOs do not drop OPLL writes -- dropped or serialised
+// register writes are what makes the FM sound "robotic".
+#define MSX_MUSIC_WRITE_RING_SIZE 256u
+#define MSX_MUSIC_WRITE_RING_MASK (MSX_MUSIC_WRITE_RING_SIZE - 1u)
+static volatile uint16_t msx_music_write_ring[MSX_MUSIC_WRITE_RING_SIZE];
+static volatile uint32_t msx_music_write_ring_head; // producer (core 0)
+static volatile uint32_t msx_music_write_ring_tail; // consumer (core 1)
+
+// core 0: queue an OPLL register write for core 1 (no OPLL access here).
+static inline void __not_in_flash_func(msx_music_ring_push)(uint8_t port, uint8_t data)
+{
+    uint32_t head = msx_music_write_ring_head;
+    uint32_t next = (head + 1u) & MSX_MUSIC_WRITE_RING_MASK;
+    if (next == msx_music_write_ring_tail)
+        return; // ring full: drop (audio only)
+    msx_music_write_ring[head] = (uint16_t)(((uint16_t)port << 8) | data);
+    __dmb();
+    msx_music_write_ring_head = next;
+}
+
+// core 1: apply a register write directly to the OPLL.
+static inline void __not_in_flash_func(msx_music_apply)(uint8_t port, uint8_t data)
+{
+    if (msx_music_instance)
+    {
+        OPLL_writeIO(msx_music_instance, port, data);
+        fm_activity++;   // record FM activity for the on-the-fly engine selector
+    }
+}
+
+// core 1: drain everything core 0 queued.
+static inline void __not_in_flash_func(msx_music_drain_ring)(void)
+{
+    if (!msx_music_instance)
+        return;
+    uint32_t tail = msx_music_write_ring_tail;
+    while (tail != msx_music_write_ring_head)
+    {
+        __dmb();
+        uint16_t entry = msx_music_write_ring[tail];
+        msx_music_apply((uint8_t)(entry >> 8), (uint8_t)(entry & 0xFFu));
+        tail = (tail + 1u) & MSX_MUSIC_WRITE_RING_MASK;
+    }
+    msx_music_write_ring_tail = tail;
+}
+
+// Output conditioning (mirrors openMSX / the Explorer FM path): a ~35 Hz DC
+// blocker removes the OPLL DC offset, a gentle 1-pole low-pass (~16 kHz) softens
+// the YM2413 exponential-DAC quantization noise, and a soft-knee limiter tames
+// peaks instead of hard-clipping (hard clipping sounds harsh / robotic).
+#define MSX_MUSIC_DC_R       0.995f
+#define MSX_MUSIC_LP_A       0.70f
+#define MSX_MUSIC_LIMIT_KNEE 24000
+#define MSX_MUSIC_LIMIT_CEIL 32767
+static float msx_music_dc_x1 = 0.0f;
+static float msx_music_dc_y1 = 0.0f;
+static float msx_music_lp_y1 = 0.0f;
+
+static inline void msx_music_reset_filters(void)
+{
+    msx_music_dc_x1 = 0.0f;
+    msx_music_dc_y1 = 0.0f;
+    msx_music_lp_y1 = 0.0f;
+}
+
+static inline int32_t __not_in_flash_func(msx_music_filter_sample)(int16_t in)
+{
+    float x = (float)in;
+    float dc = x - msx_music_dc_x1 + MSX_MUSIC_DC_R * msx_music_dc_y1;
+    msx_music_dc_x1 = x;
+    msx_music_dc_y1 = dc;
+    msx_music_lp_y1 += MSX_MUSIC_LP_A * (dc - msx_music_lp_y1);
+    return (int32_t)msx_music_lp_y1;
+}
+
+static inline int16_t __not_in_flash_func(msx_music_soft_limit)(int32_t g)
+{
+    int32_t mag = (g < 0) ? -g : g;
+    if (mag <= MSX_MUSIC_LIMIT_KNEE)
+        return (int16_t)g;
+    const int32_t range = MSX_MUSIC_LIMIT_CEIL - MSX_MUSIC_LIMIT_KNEE;
+    int32_t excess = mag - MSX_MUSIC_LIMIT_KNEE;
+    int32_t compressed = (int32_t)(((int64_t)range * excess) / (range + excess));
+    int32_t out = MSX_MUSIC_LIMIT_KNEE + compressed;
+    if (out > MSX_MUSIC_LIMIT_CEIL)
+        out = MSX_MUSIC_LIMIT_CEIL;
+    return (int16_t)((g < 0) ? -out : out);
+}
+
+// core 1: render the next filtered/gained OPLL sample (not yet limited -- the
+// soft limiter is applied once to the final SCC/FM + PSG mix).
+static inline int32_t __not_in_flash_func(msx_music_calc_fm)(void)
+{
+    return msx_music_filter_sample(OPLL_calc(msx_music_instance)) << MSX_MUSIC_VOLUME_SHIFT;
+}
+
+// FM is rendered while a voice is keyed on, or for this many audio buffers after
+// the last OPLL write (covers release tails). One buffer is SCC_AUDIO_BUFFER_SAMPLES
+// / 44100 s (~5.8 ms), so ~90 buffers is ~0.5 s.
+#define FM_IDLE_BUFFERS 90
+
+// core 1: sum both PSGs (secondary + main-PSG mirror), clocking and mixing them
+// every sample -- never dropped. Used when the PSG is the primary source (pure
+// PSG or SCC games), like the Explorer standalone PSG path: no phase freezes or
+// mute/unmute clicks. Idle PSGs output 0 (voltbl[0] == 0) and the DC blocker
+// removes the unipolar offset, so mixing them costs only a little CPU.
+static inline int32_t __not_in_flash_func(psg_mix_sample)(void)
+{
+    return ((int32_t)PSG_calc(&psg_instance) << PSG_VOLUME_SHIFT)
+         + ((int32_t)PSG_calc(&main_psg_instance) << PSG_VOLUME_SHIFT);
+}
+
+// Is any PSG channel actually producing sound? (non-zero fixed volume or a
+// running envelope, AND tone or noise enabled in the mixer).
+static inline bool __not_in_flash_func(psg_has_audible_channels)(const PSG *psg)
+{
+    uint8_t mixer = psg->reg[7];
+    for (uint8_t channel = 0; channel < 3; channel++)
+    {
+        uint8_t volume = psg->reg[8 + channel] & 0x1Fu;
+        if ((volume & 0x10u) != 0u)
+        {
+            if (psg->env_freq == 0u)
+                continue;
+        }
+        else if ((volume & 0x0Fu) == 0u)
+        {
+            continue;
+        }
+        bool tone_enabled = (mixer & (1u << channel)) == 0u;
+        bool noise_enabled = (mixer & (1u << (channel + 3u))) == 0u;
+        if (tone_enabled || noise_enabled)
+            return true;
+    }
+    return false;
+}
+
+// core 1: audible-gated PSG sum. Used only when FM is the primary source: the
+// OPLL render is heavy, so skipping PSG_calc while a PSG is silent keeps core 1
+// within its per-sample budget (otherwise it underruns -> noise under FM). The
+// gate transitions are inaudible here because they are masked by the FM.
+// Mirrors the Explorer MSX-MUSIC + PSG path.
+static inline int32_t __not_in_flash_func(psg_mix_gated)(void)
+{
+    int32_t out = 0;
+    if (psg_has_audible_channels(&psg_instance))
+        out += (int32_t)PSG_calc(&psg_instance) << PSG_VOLUME_SHIFT;
+    if (psg_has_audible_channels(&main_psg_instance))
+        out += (int32_t)PSG_calc(&main_psg_instance) << PSG_VOLUME_SHIFT;
+    return out;
+}
+
+// -----------------------------------------------------------------------
+// Secondary PSG I/O servicing (runs on the audio core)
+// -----------------------------------------------------------------------
+static inline void __not_in_flash_func(yama_service_psg_io)(void)
+{
+    // Apply any OPLL register writes queued by core 0 (FM-PAC 0x7FF4/0x7FF5).
+    msx_music_drain_ring();
+
+    uint16_t io_addr;
+    uint8_t io_data;
+    while (pio_try_get_io_write(&io_addr, &io_data))
+    {
+        uint8_t port = (uint8_t)(io_addr & 0xFFu);
+        if (port == PSG_PORT_REG || port == PSG_PORT_DATA)
+        {
+            PSG_writeIO(&psg_instance, port, io_data);   // secondary (dual) PSG
+        }
+        else if (port == PSG_ECHO_PORT_REG || port == PSG_ECHO_PORT_DATA)
+        {
+            // PSG mirror: render the main MSX PSG (0xA0/0xA1) through the DAC.
+            PSG_writeIO(&main_psg_instance, port, io_data);
+            // Echo mode also drives the secondary PSG from the main PSG ports.
+            if (configReg & YAMA_ECHO)
+                PSG_writeIO(&psg_instance, port, io_data);
+        }
+        else if (msx_music_instance &&
+                 (port == MSX_MUSIC_PORT_REG || port == MSX_MUSIC_PORT_DATA))
+        {
+            // Optional MSX-MUSIC (YM2413) on I/O ports 0x7C/0x7D (core 1 owns it).
+            msx_music_apply(port, io_data);
+        }
+    }
+
+    // The secondary PSG is write-only; acknowledge captured I/O reads with a
+    // tri-state token so the bus is never driven.
+    while (pio_try_get_io_read(&io_addr))
+    {
+        pio_sm_put_blocking(msx_io_bus.pio_read, msx_io_bus.sm_io_read,
+                            pio_build_token(false, 0xFFu));
+    }
+}
+
+// -----------------------------------------------------------------------
+// Audio: mix SCC + secondary PSG into the I2S DAC (core 1)
+// -----------------------------------------------------------------------
+static void i2s_audio_init(void)
+{
+    if (audio_ready)
+        return;
+
+    // Unmute DAC (active-high mute: low = unmuted)
+    gpio_init(I2S_MUTE_PIN);
+    gpio_set_dir(I2S_MUTE_PIN, GPIO_OUT);
+    gpio_put(I2S_MUTE_PIN, 0);
+
+    static audio_format_t audio_format = {
+        .sample_freq = SCC_SAMPLE_RATE,
+        .format = AUDIO_BUFFER_FORMAT_PCM_S16,
+        .channel_count = 2,
+    };
+
+    static struct audio_buffer_format producer_format = {
+        .format = &audio_format,
+        .sample_stride = 4,  // 2 channels * 2 bytes
+    };
+
+    audio_pool = audio_new_producer_pool(&producer_format, 3, SCC_AUDIO_BUFFER_SAMPLES);
+
+    if (audio_dma_channel < 0)
+    {
+        for (int ch = 0; ch < NUM_DMA_CHANNELS; ++ch)
+        {
+            if (!dma_channel_is_claimed((uint)ch))
+            {
+                audio_dma_channel = ch;
+                break;
+            }
+        }
+    }
+    if (audio_dma_channel < 0)
+    {
+        audio_pool = NULL;
+        return;
+    }
+
+    static struct audio_i2s_config i2s_config = {
+        .data_pin = I2S_DATA_PIN,
+        .clock_pin_base = I2S_BCLK_PIN,
+        .dma_channel = 0,
+        .pio_sm = 2,  // PIO0 SM2 (SM0/SM1 are the MSX memory bus)
+    };
+    i2s_config.dma_channel = (uint)audio_dma_channel;
+
+    audio_i2s_setup(&audio_format, &i2s_config);
+    audio_i2s_connect(audio_pool);
+    audio_i2s_set_enabled(true);
+    audio_ready = true;
+}
+
+static inline struct audio_buffer *__not_in_flash_func(take_audio_buffer_servicing_psg)(void)
+{
+    while (true)
+    {
+        yama_service_psg_io();
+        struct audio_buffer *buffer = take_audio_buffer(audio_pool, false);
+        if (buffer)
+            return buffer;
+        tight_loop_contents();
+    }
+}
+
+static void __no_inline_not_in_flash_func(core1_yamanooto_audio)(void)
+{
+    msx_music_reset_filters();
+
+    // On-the-fly engine selection. SCC and FM are never driven together by one
+    // game, and a single image can hold SCC games, FM games and pure-PSG games.
+    // Render only the chip the program is *currently* driving (plus the PSG):
+    //   * FM  while the OPLL has a voice keyed on, or was written very recently
+    //         (covers release tails);
+    //   * SCC while the SCC is enabled;
+    //   * otherwise nothing (pure PSG).
+    // This must NOT latch: the FM-PAC BIOS writes the OPLL once at boot, and a
+    // latched "render FM" would then play the idle OPLL as a constant tone
+    // (a beep) under pure-PSG games. Rendering both heavy engines at once would
+    // also overrun the core-1 sample budget.
+    enum { ENGINE_NONE = 0, ENGINE_SCC, ENGINE_FM };
+    uint32_t seen_fm = fm_activity;
+    int fm_idle = FM_IDLE_BUFFERS;   // start fully idle (no FM)
+
+    while (true)
+    {
+        struct audio_buffer *buffer = take_audio_buffer_servicing_psg();
+
+        uint32_t now_fm = fm_activity;
+        if (now_fm != seen_fm)
+        {
+            seen_fm = now_fm;
+            fm_idle = 0;
+        }
+        else if (fm_idle < FM_IDLE_BUFFERS)
+        {
+            ++fm_idle;
+        }
+        bool fm_keyed = (msx_music_instance != NULL) && (msx_music_instance->slot_key_status != 0u);
+        bool fm_playing = fm_keyed || (fm_idle < FM_IDLE_BUFFERS);
+
+        int engine = fm_playing ? ENGINE_FM
+                   : (scc_instance.active ? ENGINE_SCC : ENGINE_NONE);
+
+        int16_t *samples = (int16_t *)buffer->buffer->bytes;
+        for (int i = 0; i < SCC_AUDIO_BUFFER_SAMPLES; i++)
+        {
+            yama_service_psg_io();
+            // Only the FM (heavy OPLL) path gates the PSG, to stay within the
+            // core-1 budget. SCC and pure-PSG render the full PSG mix every
+            // sample, exactly like Explorer's SCC + PSG path -- no software DC
+            // blocker (the I2S DAC output is AC-coupled in hardware), so the
+            // SCC + PSG sum is never pushed into extra clipping/noise.
+            int32_t psg = (engine == ENGINE_FM) ? psg_mix_gated() : psg_mix_sample();
+            int16_t s;
+            if (engine == ENGINE_FM)
+            {
+                // Soft-limit the FM + PSG mix so peaks are compressed rather than
+                // hard-clipped (hard clipping sounds harsh / robotic).
+                s = msx_music_soft_limit(msx_music_calc_fm() + psg);
+            }
+            else if (engine == ENGINE_SCC)
+            {
+                // SCC + PSG: hard clamp.
+                s = clamp_i16(((int32_t)SCC_calc(&scc_instance) << SCC_VOLUME_SHIFT) + psg);
+            }
+            else
+            {
+                // Pure PSG: neither heavy engine is being driven.
+                s = clamp_i16(psg);
+            }
+            samples[i * 2]     = s;  // left
+            samples[i * 2 + 1] = s;  // right
+        }
+        buffer->sample_count = SCC_AUDIO_BUFFER_SAMPLES;
+        give_audio_buffer(audio_pool, buffer);
+    }
+}
+
+// -----------------------------------------------------------------------
+// FM-PAC BIOS emulation (used only in the expanded-slot MSX-MUSIC mode)
+// -----------------------------------------------------------------------
+// The FM-PAC presents a 64 KB BIOS in four 16 KB banks at 0x4000-0x7FFF, an
+// 8 KB battery-backed SRAM (unlocked by writing 0x4D/0x69 to 0x5FFE/0x5FFF),
+// a control register (0x7FF6), a bank register (0x7FF7) and the OPLL register
+// pair at 0x7FF4/0x7FF5.
+typedef struct {
+    uint8_t page;
+    uint8_t control;
+    uint8_t sram_key_5ffe;
+    uint8_t sram_key_5fff;
+    uint8_t sram[8192];
+} fmpac_state_t;
+
+static inline bool __not_in_flash_func(fmpac_sram_enabled)(const fmpac_state_t *fmpac)
+{
+    return fmpac->sram_key_5ffe == 0x4Du && fmpac->sram_key_5fff == 0x69u;
+}
+
+static inline void __not_in_flash_func(fmpac_handle_write)(fmpac_state_t *fmpac, uint16_t addr, uint8_t data)
+{
+    if (addr == 0x7FF4u)
+    {
+        msx_music_ring_push(MSX_MUSIC_PORT_REG, data);
+    }
+    else if (addr == 0x7FF5u)
+    {
+        msx_music_ring_push(MSX_MUSIC_PORT_DATA, data);
+    }
+    else if (addr == 0x7FF6u)
+    {
+        fmpac->control = data;
+    }
+    else if (addr == 0x7FF7u)
+    {
+        fmpac->page = data & 0x03u;
+    }
+    else if (addr == 0x5FFEu)
+    {
+        fmpac->sram_key_5ffe = data;
+    }
+    else if (addr == 0x5FFFu)
+    {
+        fmpac->sram_key_5fff = data;
+    }
+    else if (fmpac_sram_enabled(fmpac) && addr >= 0x4000u && addr <= 0x5FFFu)
+    {
+        fmpac->sram[addr - 0x4000u] = data;
+    }
+}
+
+static inline uint8_t __not_in_flash_func(fmpac_handle_read)(const fmpac_state_t *fmpac,
+                                                             const uint8_t *bios_base, uint16_t addr)
+{
+    if (addr == 0x7FF6u)
+        return fmpac->control;
+    if (addr == 0x7FF7u)
+        return fmpac->page;
+    if (fmpac_sram_enabled(fmpac) && addr >= 0x4000u && addr <= 0x5FFFu)
+        return fmpac->sram[addr - 0x4000u];
+
+    if (addr >= 0x4000u && addr <= 0x7FFFu)
+    {
+        uint32_t rel = ((uint32_t)(fmpac->page & 0x03u) << 14) | (addr & 0x3FFFu);
+        if (rel < FMPAC_BIOS_SIZE)
+            return bios_base[rel];
+    }
+    return 0xFFu;
+}
+
+// -----------------------------------------------------------------------
+// Sound-chip initialisation (SCC, secondary PSG, optional MSX-MUSIC)
+// -----------------------------------------------------------------------
+static void __not_in_flash_func(yama_init_sound_chips)(void)
+{
+    // SCC engine: ENHANCED type handles both SCC and SCC+ dynamically.
+    memset(&scc_instance, 0, sizeof(SCC));
+    scc_instance.clk  = SCC_CLOCK;
+    scc_instance.rate = SCC_SAMPLE_RATE;
+    SCC_set_quality(&scc_instance, 1);
+    scc_instance.type = SCC_ENHANCED;
+    SCC_reset(&scc_instance);
+
+    // Secondary (dual) PSG engine on 0x10/0x11
+    memset(&psg_instance, 0, sizeof(psg_instance));
+    psg_instance.rate = PSG_SAMPLE_RATE;
+    PSG_setVolumeMode(&psg_instance, 2);
+    PSG_setClock(&psg_instance, PSG_CLOCK);
+    PSG_setQuality(&psg_instance, 1);
+    PSG_reset(&psg_instance);
+
+    // PSG mirror of the main MSX PSG (0xA0/0xA1)
+    memset(&main_psg_instance, 0, sizeof(main_psg_instance));
+    main_psg_instance.rate = PSG_SAMPLE_RATE;
+    PSG_setVolumeMode(&main_psg_instance, 2);
+    PSG_setClock(&main_psg_instance, PSG_CLOCK);
+    PSG_setQuality(&main_psg_instance, 1);
+    PSG_reset(&main_psg_instance);
+
+    // MSX-MUSIC (YM2413) engine. Always created: the FM-PAC BIOS is always
+    // present in the expanded slot, and the audio core decides on the fly
+    // whether to render SCC or FM based on which chip the game is driving.
+    msx_music_instance = OPLL_new(MSX_MUSIC_CLOCK, MSX_MUSIC_SAMPLE_RATE);
+    if (msx_music_instance)
+    {
+        OPLL_reset(msx_music_instance);
+        OPLL_setChipType(msx_music_instance, OPLL_2413_TONE);
+        OPLL_resetPatch(msx_music_instance, OPLL_2413_TONE);
+    }
+}
+
+// -----------------------------------------------------------------------
+// Expanded-slot cold-boot bootstrap (used before presenting the FM-PAC).
+// Serves a tiny extension ROM whose INIT sets the boot flag (port 0xF4 bit 7)
+// and restarts the machine, so the firmware can present the expanded slot on
+// the second boot when audio/PIO are fully initialised. Mirrors the loadrom
+// hybrid loaders.
+// -----------------------------------------------------------------------
+static void __not_in_flash_func(yama_wait_for_expanded_bootstrap)(void)
+{
+    static const uint8_t bootstrap_rom[] = {
+        0x41, 0x42,          // "AB"
+        0x0A, 0x40,          // INIT = 0x400A
+        0x00, 0x00,          // STATEMENT
+        0x00, 0x00,          // DEVICE
+        0x00, 0x00,          // TEXT
+        0xF3,                // DI
+        0xDB, 0xF4,          // IN A,(0xF4)
+        0xF6, 0x80,          // OR 0x80
+        0xD3, 0xF4,          // OUT (0xF4),A
+        0xC7                 // RST 0 -> restart
+    };
+
+    msx_pio_bus_init();
+
+    bool restart_detected = false;
+    bool init_called = false;
+
+    while (!restart_detected)
+    {
+        uint16_t waddr;
+        uint8_t wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+            if (init_called && addr == 0x0000u)
+            {
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(false, 0xFFu));
+                restart_detected = true;
+            }
+            else
+            {
+                if (addr >= 0x400Au && addr <= 0x4011u)
+                    init_called = true;
+
+                bool in_window = (addr >= 0x4000u) && (addr <= 0x7FFFu);
+                uint8_t data = 0xFFu;
+                if (in_window)
+                {
+                    uint32_t rel = addr - 0x4000u;
+                    if (rel < sizeof(bootstrap_rom))
+                        data = bootstrap_rom[rel];
+                }
+                pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(in_window, data));
+            }
+        }
+        else if (init_called && !gpio_get(PIN_RD) && ((gpio_get_all() & 0xFFFFu) == 0x0000u))
+        {
+            restart_detected = true;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Main emulation loop (core 0)
+// -----------------------------------------------------------------------
+// The cartridge is always presented as an expanded slot (secondary slot
+// register at 0xFFFF). Sub-slot 0 is the Yamanooto game (full mapper /
+// registers / SCC); sub-slot 3 is the FM-PAC BIOS at page 1 (0x4000-0x7FFF).
+// The OPLL is fed both by the FM-PAC memory registers (handled here on core 0)
+// and by the raw I/O ports (handled on core 1 in yama_service_psg_io). The
+// audio core renders SCC or FM on the fly depending on what the game drives.
+static void __no_inline_not_in_flash_func(yamanooto_run_fmpac)(void)
+{
+    rom_base = rom + ROM_RECORD_SIZE;
+    const uint8_t *fmpac_bios_base = rom_base + active_rom_size;
+
+    yama_init_sound_chips();
+
+    // Cold-boot expanded-slot handshake (serves a bootstrap ROM, then restarts).
+    yama_wait_for_expanded_bootstrap();
+
+    // Freeze the bus while re-initialising for the expanded configuration.
+    pio_sm_set_enabled(pio0, 0, false);
+    pio_sm_set_enabled(pio0, 1, false);
+    gpio_init(PIN_WAIT);
+    gpio_set_dir(PIN_WAIT, GPIO_OUT);
+    gpio_put(PIN_WAIT, 0);
+
+    static fmpac_state_t fmpac;
+    memset(&fmpac, 0, sizeof(fmpac));
+    fmpac.control = 0x10u;
+
+    uint8_t subslot_reg = 0x00u;  // all pages default to sub-slot 0 (the game)
+
+    // Memory bus (PIO0), I/O bus (PIO1) then audio on core 1. Audio is launched
+    // only now, after the bootstrap: an active audio core/DMA perturbs the
+    // timing-critical cold-boot expanded-slot handshake.
+    msx_pio_bus_init();
+    msx_pio_io_bus_init();
+    i2s_audio_init();
+    multicore_launch_core1(core1_yamanooto_audio);
+
+    while (true)
+    {
+        uint16_t waddr;
+        uint8_t  wdata;
+        while (pio_try_get_write(&waddr, &wdata))
+        {
+            if (waddr == 0xFFFFu)
+            {
+                subslot_reg = wdata;
+                continue;
+            }
+
+            uint8_t page = (uint8_t)((waddr >> 14) & 0x03u);
+            uint8_t active_subslot = (uint8_t)((subslot_reg >> (page * 2)) & 0x03u);
+            if (active_subslot == 0)
+            {
+                yama_mem_write(waddr, wdata);
+            }
+            else if (active_subslot == 3 && page == 1)
+            {
+                fmpac_handle_write(&fmpac, waddr, wdata);
+            }
+        }
+
+        if (!pio_sm_is_rx_fifo_empty(msx_bus.pio, msx_bus.sm_read))
+        {
+            uint16_t addr = (uint16_t)pio_sm_get(msx_bus.pio, msx_bus.sm_read);
+
+            // Drain writes that arrived while waiting
+            while (pio_try_get_write(&waddr, &wdata))
+            {
+                if (waddr == 0xFFFFu)
+                {
+                    subslot_reg = wdata;
+                    continue;
+                }
+                uint8_t wpage = (uint8_t)((waddr >> 14) & 0x03u);
+                uint8_t wsub = (uint8_t)((subslot_reg >> (wpage * 2)) & 0x03u);
+                if (wsub == 0)
+                    yama_mem_write(waddr, wdata);
+                else if (wsub == 3 && wpage == 1)
+                    fmpac_handle_write(&fmpac, waddr, wdata);
+            }
+
+            uint8_t data = 0xFFu;
+            if (addr == 0xFFFFu)
+            {
+                data = (uint8_t)~subslot_reg;  // expanded-slot detection
+            }
+            else
+            {
+                uint8_t page = (uint8_t)((addr >> 14) & 0x03u);
+                uint8_t active_subslot = (uint8_t)((subslot_reg >> (page * 2)) & 0x03u);
+                if (active_subslot == 0)
+                {
+                    data = yama_mem_read(addr);
+                }
+                else if (active_subslot == 3 && page == 1 && addr >= 0x4000u && addr <= 0x7FFFu)
+                {
+                    data = fmpac_handle_read(&fmpac, fmpac_bios_base, addr);
+                }
+            }
+
+            pio_sm_put_blocking(msx_bus.pio, msx_bus.sm_read, pio_build_token(true, data));
+        }
+    }
+}
+
+int __no_inline_not_in_flash_func(main)(void)
+{
+    // RP2350 flash timing + system clock (same as the loadrom firmware).
+    qmi_hw->m[0].timing = 0x40000202;
+    set_sys_clock_khz(210000, true);
+
+    setup_gpio();
+
+    // Configuration record: name(50) + type(1) + size(4) + offset(4).
+    // The FM-PAC BIOS is always appended after the ROM image by the tool.
+    memcpy(&active_rom_size, rom + ROM_NAME_MAX + 1, sizeof(uint32_t));
+
+    yamanooto_run_fmpac();  // expanded slot: game (sub-slot 0) + FM-PAC BIOS (sub-slot 3)
+    return 0;
+}
