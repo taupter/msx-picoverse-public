@@ -16,6 +16,12 @@ _autosave-*
 *-backups
 *backups
 **/build/
+!/build/
+/build/*
+!/build/Makefile
+!/build/scripts/
+/build/scripts/*
+!/build/scripts/package.ps1
 **/releases/
 **/lib
 **/.vscode/
