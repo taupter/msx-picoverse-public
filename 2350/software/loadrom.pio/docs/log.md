@@ -1,5 +1,11 @@
 # Change Log
 
+## PicoVerse 2350 Loadrom v2.68
+
+- Removed the OPL4-only `--22khz` build option and its alternate 22050 Hz standalone firmware payload after validation showed missing instruments and notes in OPL4 playback. The tool now always packages the default 44100 Hz standalone OPL4 firmware for `-4` / `--opl4` images.
+- Simplified the standalone OPL4 build and embedding pipeline back to a single firmware artifact (`opl4.bin`) so the main build no longer configures, compiles, embeds, or cleans a separate 22.05 kHz variant.
+- Version bumped to v2.68 (top-level and tool Makefiles).
+
 ## PicoVerse 2350 Loadrom v2.67
 
 - Added the OPL4-only `--22khz` tool option for `-4`/`--opl4` images. The build now produces and embeds a second dedicated OPL4 firmware payload compiled for 22050 Hz; that variant advances FM/PCM/timer state by two normal OPL4 sample periods per generated output sample so pitch and tempo stay at normal speed while reducing output-rate workload. Default OPL4 UF2s continue to use the 44100 Hz firmware.
