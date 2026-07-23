@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #include "ff.h"
 #include "diskio.h"
+#include "my_rtc.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "pico/unique_id.h"
@@ -717,6 +718,7 @@ static FIL fh_save_file;
 static uint32_t fh_save_offset = 0;
 static bool fh_save_file_open = false;
 static bool fh_save_close_pending = false;
+static FILINFO fh_download_timestamp;
 static volatile bool fh_menu_window_active = false;
 static volatile bool fh_service_menu_window = false;
 
@@ -729,6 +731,7 @@ static fh_catalog_record_t fh_catalog[FH_MAX_RESULTS];
 static uint16_t fh_catalog_count = 0;
 static bool fh_catalog_loaded = false;
 static bool fh_catalog_message = false;
+static bool fh_network_verified = false;
 static uint8_t fh_tcp_buffer[FH_HTTP_CHUNK_SIZE + 2u];
 static char fh_active_query[FH_QUERY_SIZE];
 
@@ -1983,9 +1986,16 @@ static void process_delete_sd_file_request(void) {
         return;
     }
 
+    char pvc_path[SD_PATH_MAX];
+    bool has_pvc_path = build_pvc_options_path(record_index, pvc_path, sizeof(pvc_path));
     if (f_unlink(sd_path_buffer + sd_path_offsets[record_index]) == FR_OK) {
-        ctrl_ack_value = 1;
         refresh_requested = true;
+        FRESULT pvc_result = has_pvc_path ? f_unlink(pvc_path) : FR_NO_FILE;
+        if (pvc_result == FR_OK || pvc_result == FR_NO_FILE || pvc_result == FR_NO_PATH) {
+            ctrl_ack_value = 1;
+        } else {
+            ctrl_cmd_state = 0;
+        }
     } else {
         ctrl_cmd_state = 0;
     }
@@ -5983,6 +5993,55 @@ static bool fh_parse_header_u32(const char *value, uint32_t *out)
     return true;
 }
 
+static int fh_http_month_number(const char *month)
+{
+    static const char *const months[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+
+    for (int i = 0; i < 12; ++i)
+    {
+        if (tolower((unsigned char)month[0]) == tolower((unsigned char)months[i][0]) &&
+            tolower((unsigned char)month[1]) == tolower((unsigned char)months[i][1]) &&
+            tolower((unsigned char)month[2]) == tolower((unsigned char)months[i][2]))
+            return i + 1;
+    }
+    return 0;
+}
+
+static bool fh_parse_http_timestamp(const char *value, FILINFO *timestamp)
+{
+    char weekday[5];
+    char month_name[4];
+    char zone[4];
+    int day;
+    int year;
+    int hour;
+    int minute;
+    int second;
+    int month;
+
+    if (!value || !timestamp) return false;
+    if (sscanf(value, "%4s %d %3s %d %d:%d:%d %3s",
+               weekday, &day, month_name, &year, &hour, &minute, &second, zone) != 8)
+        return false;
+
+    month = fh_http_month_number(month_name);
+    if (weekday[3] != ',' || month == 0 || day < 1 || day > 31 ||
+        year < 1980 || year > 2107 || hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 || second < 0 || second > 59 ||
+        tolower((unsigned char)zone[0]) != 'g' ||
+        tolower((unsigned char)zone[1]) != 'm' ||
+        tolower((unsigned char)zone[2]) != 't')
+        return false;
+
+    memset(timestamp, 0, sizeof(*timestamp));
+    timestamp->fdate = (WORD)(((year - 1980) << 9) | (month << 5) | day);
+    timestamp->ftime = (WORD)((hour << 11) | (minute << 5) | (second / 2));
+    return true;
+}
+
 static void fh_service_msx_reads_for(uint32_t duration_us)
 {
     uint32_t start = time_us_32();
@@ -6096,7 +6155,7 @@ static void fh_build_http_path(char *out, size_t out_size, const char *query, in
 }
 
 static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, void *ctx,
-                            uint32_t idle_timeout_us, uint8_t redirect_depth)
+                            uint32_t idle_timeout_us, uint8_t redirect_depth, FILINFO *response_timestamp)
 {
     fh_url_t parsed;
     uint8_t connection;
@@ -6213,11 +6272,16 @@ static bool fh_http_get_url(const char *url, fh_http_body_callback_t callback, v
                                     char absolute_url[320];
                                     snprintf(absolute_url, sizeof(absolute_url), "%s://%s%s",
                                              parsed.tls ? "https" : "http", parsed.host, redirect_url);
-                                    return fh_http_get_url(absolute_url, callback, ctx, idle_timeout_us, (uint8_t)(redirect_depth + 1u));
+                                    return fh_http_get_url(absolute_url, callback, ctx, idle_timeout_us,
+                                                           (uint8_t)(redirect_depth + 1u), response_timestamp);
                                 }
-                                return fh_http_get_url(redirect_url, callback, ctx, idle_timeout_us, (uint8_t)(redirect_depth + 1u));
+                                return fh_http_get_url(redirect_url, callback, ctx, idle_timeout_us,
+                                                       (uint8_t)(redirect_depth + 1u), response_timestamp);
                             }
                         }
+                        if (response_timestamp &&
+                            !fh_parse_http_timestamp(fh_find_header_value(headers, "Last-Modified"), response_timestamp))
+                            (void)fh_parse_http_timestamp(fh_find_header_value(headers, "Date"), response_timestamp);
                         decoder.chunked = fh_header_value_is_chunked(fh_find_header_value(headers, "Transfer-Encoding"));
                         if (!decoder.chunked && fh_parse_header_u32(fh_find_header_value(headers, "Content-Length"), &decoder.content_remaining))
                             decoder.has_content_length = true;
@@ -6298,23 +6362,37 @@ static void fh_quiesce_audio_for_qmi(void)
         shutdown_mp3_core1_before_rom_launch();
 }
 
-static bool fh_http_get(const char *path, fh_http_body_callback_t callback, void *ctx, uint32_t idle_timeout_us)
+static bool fh_http_get_with_timestamp(const char *path, fh_http_body_callback_t callback, void *ctx,
+                                       uint32_t idle_timeout_us, FILINFO *response_timestamp)
 {
     char url[256];
+    bool http_ok;
 
     // Halt the audio core before touching WiFi/PSRAM (see note above).
     fh_quiesce_audio_for_qmi();
 
     if (!fh_wifi_wait_connected(FH_WIFI_CONNECT_WAIT_US))
     {
+        fh_network_verified = false;
         fh_set_offline_status();
         return false;
     }
 
     if (fh_starts_with(path, "http://") || fh_starts_with(path, "https://"))
-        return fh_http_get_url(path, callback, ctx, idle_timeout_us, 0);
-    snprintf(url, sizeof(url), "http://" FH_HOST "%s", path);
-    return fh_http_get_url(url, callback, ctx, idle_timeout_us, 0);
+        http_ok = fh_http_get_url(path, callback, ctx, idle_timeout_us, 0, response_timestamp);
+    else
+    {
+        snprintf(url, sizeof(url), "http://" FH_HOST "%s", path);
+        http_ok = fh_http_get_url(url, callback, ctx, idle_timeout_us, 0, response_timestamp);
+    }
+    if (http_ok) fh_network_verified = true;
+    return http_ok;
+}
+
+static bool fh_http_get(const char *path, fh_http_body_callback_t callback, void *ctx,
+                        uint32_t idle_timeout_us)
+{
+    return fh_http_get_with_timestamp(path, callback, ctx, idle_timeout_us, NULL);
 }
 
 #if __has_include("../../../nexus/pico/nexus_tracker.inc")
@@ -6601,6 +6679,7 @@ static void fh_save_fail(const char *message)
         f_close(&fh_save_file);
         fh_save_file_open = false;
     }
+    fatfs_set_fattime_override(0u);
     fh_save_close_pending = false;
     fh_result = 0u;
     fh_save_state = FH_SAVE_FAILED;
@@ -6631,9 +6710,12 @@ static void fh_save_background_work(void)
             fh_save_fail("Save failed: path");
             return;
         }
+        fatfs_set_fattime_override(((uint32_t)fh_download_timestamp.fdate << 16) |
+                                   fh_download_timestamp.ftime);
         fr = f_open(&fh_save_file, path, FA_CREATE_ALWAYS | FA_WRITE);
         if (fr != FR_OK)
         {
+            fatfs_set_fattime_override(0u);
             snprintf(fh_wifi_status_text, sizeof(fh_wifi_status_text), "Save failed: open %u", (unsigned int)fr);
             fh_save_fail(NULL);
             return;
@@ -6645,6 +6727,7 @@ static void fh_save_background_work(void)
     if (fh_save_close_pending)
     {
         fr = f_close(&fh_save_file);
+        fatfs_set_fattime_override(0u);
         fh_save_file_open = false;
         fh_save_close_pending = false;
         if (fr != FR_OK)
@@ -6728,9 +6811,11 @@ static bool fh_download_selected(void)
     fh_build_http_path(path, sizeof(path), fh_active_query, (int)fh_selected_index);
 
     memset(&download, 0, sizeof(download));
+    memset(&fh_download_timestamp, 0, sizeof(fh_download_timestamp));
     download.fallback_size_kb = fh_catalog[fh_selected_index].size_kb;
     fh_progress_percent = 0;
-    http_ok = fh_http_get(path, fh_psram_download_body_callback, &download, 20000000u);
+    http_ok = fh_http_get_with_timestamp(path, fh_psram_download_body_callback, &download, 20000000u,
+                                         &fh_download_timestamp);
     ok = http_ok &&
          download.metadata_done && !download.failed &&
             download.written != 0u &&
@@ -6893,8 +6978,18 @@ static void __not_in_flash_func(fh_update_wifi_status_text)(void)
     const char *prefix = "Connected to ";
 
     fh_set_offline_status();
-    if (!fh_wifi_query_ap_status(payload, &payload_len)) return;
-    if (payload_len < 2u || payload[0] != 5u || payload[1] == 0u) return;
+    if (!fh_wifi_query_ap_status(payload, &payload_len) ||
+        payload_len < 2u || payload[0] != 5u)
+    {
+        if (fh_network_verified)
+            fh_copy_status_prefix("Connected to network");
+        return;
+    }
+    if (payload[1] == 0u)
+    {
+        fh_network_verified = false;
+        return;
+    }
 
     while (out + 1u < FH_STATUS_TEXT_SIZE && prefix[out] != '\0')
     {

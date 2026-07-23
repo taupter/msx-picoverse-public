@@ -1,5 +1,13 @@
 # Change Log
 
+## PicoVerse 2350 Explorer v2.42
+
+- Bumped Explorer version to v2.42.
+- Deleted a ROM's associated `.PVC` options file when the ROM is deleted from microSD, while continuing normally when no options file exists.
+- Stamped FileHunter ROM downloads with the HTTP `Last-Modified` time, falling back to the response `Date`, instead of leaving a null microSD file timestamp.
+- Fixed FileHunter showing `Network: Offline` after successfully loading its online catalog by retaining successful HTTP connectivity when the ESP8266 AP-status query cannot return an SSID.
+- Removed the FileHunter `Network: Online`/`Network: Offline` footer and its redundant Wi-Fi status probes from the MSX menu to reduce ROM usage.
+
 ## PicoVerse 2350 Explorer v2.41
 
 - Bumped Explorer version to v2.41.

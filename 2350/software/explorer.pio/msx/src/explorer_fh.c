@@ -228,32 +228,6 @@ static void fh_download(unsigned int index)
     fh_wait_download_ready();
 }
 
-static void fh_network_status_with_text(const char *status_text)
-{
-    unsigned int i;
-    Poke(CTRL_CMD, CMD_FH_WIFI_STATUS);
-    fh_wait_ready_status(status_text);
-    for (i = 0; i + 1 < sizeof(fh_status_right); i++) {
-        char ch = *((char *)(CTRL_FH_STATUS_TEXT_BASE + i));
-        fh_status_right[i] = ch;
-        if (ch == '\0') {
-            return;
-        }
-    }
-    fh_status_right[sizeof(fh_status_right) - 1] = '\0';
-}
-
-static void fh_network_status(void)
-{
-    fh_network_status_with_text(menu_ui_status_text("Checking net...", "Checking network status..."));
-}
-
-static void fh_draw_network_status(void)
-{
-    unsigned char connected = strncmp(fh_status_right, "Connected to ", 13) == 0;
-    fh_draw_status_left(menu_ui_status_text(connected ? "Net: Online" : "Network Offline", connected ? "Network: Online" : "Network: Offline"));
-}
-
 static void fh_read_status_text(void)
 {
     unsigned int i;
@@ -427,10 +401,8 @@ static void fh_render_frame(void)
 
 static void fh_redraw(void)
 {
-    fh_network_status();
     fh_render_frame();
     fh_draw_list();
-    fh_draw_network_status();
     fh_position_cursor_on_selection();
 }
 
@@ -561,7 +533,6 @@ static void fh_show_detail(unsigned int index)
                 fh_draw_detail_status("Download blocked: exceeds 4MB limit!");
                 continue;
             }
-            fh_network_status_with_text(menu_ui_status_text("Downloading...", "Downloading..."));
             fh_render_detail_screen(record);
             fh_download(index);
             if (Peek(CTRL_FH_RESULT)) {
